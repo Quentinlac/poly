@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .tabs {
+            display: flex;
+            background: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+        }
+
+        .tab {
+            padding: 15px 30px;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            font-size: 1em;
+            font-weight: 600;
+            color: #6c757d;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab:hover {
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            background: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .filters {
+            padding: 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .filter-item {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .filter-item label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.9em;
+        }
+
+        .filter-item select,
+        .filter-item input[type="number"] {
+            padding: 10px 15px;
+            border: 2px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 1em;
+            background: white;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+
+        .filter-item select:hover,
+        .filter-item input[type="number"]:hover {
+            border-color: #667eea;
+        }
+
+        .filter-item select:focus,
+        .filter-item input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .filter-toggle {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 10px;
+            margin-top: 6px;
+        }
+
+        .link-button {
+            color: #5a67d8;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1em;
+            padding: 0;
+            transition: color 0.2s;
+            text-decoration: none;
+        }
+
+        .link-button:hover {
+            color: #434190;
+            text-decoration: underline;
+        }
+
+        .profile-panel {
+            margin: 20px 30px 40px;
+            padding: 20px;
+            background: #ffffff;
+            border: 1px solid #e9ecef;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+            display: none;
+        }
+
+        .profile-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            border-bottom: 1px solid #f1f3f5;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+
+        .profile-header h2 {
+            margin: 0;
+            font-size: 1.5em;
+        }
+
+        .profile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .profile-card {
+            background: #f8f9fc;
+            border-radius: 8px;
+            padding: 15px;
+            border: 1px solid #eef2ff;
+        }
+
+        .profile-card h4 {
+            margin: 0;
+            font-size: 0.85em;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .profile-card .value {
+            font-size: 1.4em;
+            font-weight: 600;
+            margin-top: 5px;
+            color: #2d3748;
+        }
+
+        .profile-trades h3 {
+            margin-bottom: 10px;
+        }
+
+        .profile-trades table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        .profile-trades th,
+        .profile-trades td {
+            padding: 10px;
+            border-bottom: 1px solid #e9ecef;
+            text-align: left;
+            vertical-align: middle;
+        }
+
+        .profile-trades th {
+            background: #f8f9fa;
+            font-weight: 600;
+        }
+
+        .profile-trades tbody tr:hover {
+            background: #f1f3f5;
+        }
+
+        .profile-error {
+            color: #c53030;
+            margin-top: 10px;
+        }
+
+        .btn {
+            padding: 10px 25px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #5568d3;
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+            display: none;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            padding: 30px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95em;
+        }
+
+        thead {
+            background: #f8f9fa;
+            position: sticky;
+            top: 0;
+        }
+
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            color: #495057;
+            border-bottom: 2px solid #dee2e6;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+        }
+
+        th:hover {
+            background: #e9ecef;
+        }
+
+        th.sortable::after {
+            content: ' ↕';
+            opacity: 0.5;
+            font-size: 0.8em;
+        }
+
+        th.sort-asc::after {
+            content: ' ↑';
+            opacity: 1;
+        }
+
+        th.sort-desc::after {
+            content: ' ↓';
+            opacity: 1;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        tbody tr {
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+
+        tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        tbody tr:nth-child(even) {
+            background: #fafbfc;
+        }
+
+        tbody tr:nth-child(even):hover {
+            background: #f0f1f2;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .badge-positive {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .badge-negative {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .badge-neutral {
+            background: #e2e3e5;
+            color: #383d41;
+        }
+
+        .red-flag {
+            color: #dc3545;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .red-flag::before {
+            content: '⚠ ';
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 30px;
+            background: #f8f9fa;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .stat-card h3 {
+            color: #6c757d;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-card .value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏆 Polymarket Top Traders</h1>
+            <p>Identify skilled traders across politics, sports, finance, geopolitics, tech, culture, and economy</p>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('leaderboard')">Leaderboard</button>
+            <button class="tab" onclick="switchTab('myusers')">My Users</button>
+            <button class="tab" onclick="switchTab('import')">Import Top Users</button>
+        </div>
+
+        <!-- LEADERBOARD TAB -->
+        <div id="tab-leaderboard" class="tab-content active">
+        <div class="filters">
+            <div class="filter-group">
+                <div class="filter-item">
+                    <label for="subject">Subject</label>
+                    <select id="subject">
+                        <option value="all">All Subjects</option>
+                        <option value="politics">Politics</option>
+                        <option value="sports">Sports</option>
+                        <option value="finance">Finance</option>
+                        <option value="geopolitics">Geopolitics</option>
+                        <option value="tech">Tech</option>
+                        <option value="culture">Culture</option>
+                        <option value="economy">Economy</option>
+                    </select>
+                </div>
+                <div class="filter-item">
+                    <label for="limit">Limit</label>
+                    <select id="limit">
+                        <option value="100">Top 100</option>
+                        <option value="500">Top 500</option>
+                        <option value="1000">Top 1,000</option>
+                        <option value="5000">Top 5,000</option>
+                        <option value="10000" selected>Top 10,000</option>
+                    </select>
+                </div>
+                <div class="filter-item" style="align-self: flex-end;">
+                    <button class="btn" onclick="loadUsers()">Load Traders</button>
+                </div>
+            </div>
+            <div class="filter-group" style="margin-top: 20px;">
+                <div class="filter-item">
+                    <label for="minTrades">Min Trades</label>
+                    <input type="number" id="minTrades" min="0" step="10" placeholder="e.g. 100">
+                </div>
+                <div class="filter-item">
+                    <label for="minWinRate">Min Win Rate (%)</label>
+                    <input type="number" id="minWinRate" min="0" max="100" step="1" placeholder="e.g. 55">
+                </div>
+                <div class="filter-item">
+                    <label for="minConsistency">Min Consistency (%)</label>
+                    <input type="number" id="minConsistency" min="0" max="100" step="1" placeholder="e.g. 60">
+                </div>
+                <div class="filter-item">
+                    <label for="minPNL">Min P&L ($)</label>
+                    <input type="number" id="minPNL" step="50" placeholder="e.g. 500">
+                </div>
+                <div class="filter-item">
+                    <label>&nbsp;</label>
+                    <div class="filter-toggle">
+                        <input type="checkbox" id="hideFlags">
+                        <label for="hideFlags" style="font-weight:500;color:#495057;">Hide red-flagged traders</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="stats" class="stats" style="display: none;">
+            <div class="stat-card">
+                <h3>Total Traders</h3>
+                <div class="value" id="stat-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Average Win Rate</h3>
+                <div class="value" id="stat-winrate">0%</div>
+            </div>
+            <div class="stat-card">
+                <h3>Average Trades</h3>
+                <div class="value" id="stat-trades">0</div>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <p>Loading traders...</p>
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+
+        <div class="table-container">
+            <table id="users-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-sort="rank" onclick="sortTable('rank')">Rank</th>
+                        <th class="sortable" data-sort="username" onclick="sortTable('username')">Username</th>
+                        <th class="sortable" data-sort="trades" onclick="sortTable('trades')">Trades</th>
+                        <th class="sortable" data-sort="pnl" onclick="sortTable('pnl')">P&L</th>
+                        <th class="sortable" data-sort="winrate" onclick="sortTable('winrate')">Win Rate</th>
+                        <th class="sortable" data-sort="consistency" onclick="sortTable('consistency')">Consistency</th>
+                        <th class="sortable" data-sort="score" onclick="sortTable('score')">Score</th>
+                        <th>Red Flags</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody">
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 40px; color: #6c757d;">
+                            Select filters and click "Load Traders" to see results
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="profile-panel" class="profile-panel" style="display:none;">
+            <div class="profile-header">
+                <div>
+                    <h2 id="profile-name">Select a trader to view profile</h2>
+                    <p id="profile-address" style="color:#718096;"></p>
+                </div>
+                <div id="profile-last-active" style="color:#718096;"></div>
+            </div>
+            <div class="profile-grid">
+                <div class="profile-card">
+                    <h4>Total Trades</h4>
+                    <div class="value" id="profile-trades">-</div>
+                </div>
+                <div class="profile-card">
+                    <h4>Total P&L</h4>
+                    <div class="value" id="profile-pnl">$0</div>
+                </div>
+                <div class="profile-card">
+                    <h4>Win Rate</h4>
+                    <div class="value" id="profile-winrate">0%</div>
+                </div>
+                <div class="profile-card">
+                    <h4>Consistency</h4>
+                    <div class="value" id="profile-consistency">0%</div>
+                </div>
+            </div>
+            <div class="profile-trades">
+                <h3>Recent Trades</h3>
+                <div id="profile-trades-error" class="profile-error" style="display:none;"></div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Subject</th>
+                            <th>Market</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Price</th>
+                            <th>Outcome</th>
+                            <th>Tx</th>
+                        </tr>
+                    </thead>
+                    <tbody id="profile-trades-body">
+                        <tr>
+                            <td colspan="8" style="text-align:center; padding:20px; color:#718096;">No trader selected</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        </div>
+        <!-- END LEADERBOARD TAB -->
+
+        <!-- MY USERS TAB -->
+        <div id="tab-myusers" class="tab-content">
+            <div style="padding: 30px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2>My Imported Users</h2>
+                    <button onclick="loadMyUsers()" style="padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">
+                        🔄 Refresh
+                    </button>
+                </div>
+                <div id="myusers-loading" style="display: none; text-align: center; padding: 40px; color: #6c757d;">
+                    Loading users...
+                </div>
+                <div id="myusers-list">
+                    <p style="text-align: center; padding: 40px; color: #6c757d;">
+                        Click "Refresh" to load your imported users
+                    </p>
+                </div>
+            </div>
+        </div>
+        <!-- END MY USERS TAB -->
+
+        <!-- IMPORT TAB -->
+        <div id="tab-import" class="tab-content">
+            <div style="padding: 30px;">
+                <h2 style="margin-bottom: 20px;">Import Top Users</h2>
+                <p style="color: #6c757d; margin-bottom: 20px;">
+                    Paste a list of Ethereum wallet addresses (one per line) to fetch and store their complete trading history. 
+                    This process may take 30-60 seconds per user.
+                </p>
+                
+                <div style="margin-bottom: 20px;">
+                    <label for="import-addresses" style="display: block; font-weight: 600; margin-bottom: 10px;">Wallet Addresses</label>
+                    <textarea 
+                        id="import-addresses" 
+                        rows="12" 
+                        placeholder="0x1234567890abcdef1234567890abcdef12345678&#10;0xabcdef1234567890abcdef1234567890abcdef12&#10;..."
+                        style="width: 100%; padding: 15px; border: 2px solid #dee2e6; border-radius: 6px; font-family: monospace; font-size: 0.95em; resize: vertical;"
+                    ></textarea>
+                    <p style="margin-top: 8px; font-size: 0.9em; color: #6c757d;">
+                        <strong>Format:</strong> One address per line, or comma/space-separated. Addresses must start with <code>0x</code> and be 42 characters long.
+                    </p>
+                </div>
+
+                <button 
+                    id="import-btn"
+                    onclick="importUsers()"
+                    style="padding: 12px 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 6px; font-size: 1em; font-weight: 600; cursor: pointer; transition: opacity 0.3s;"
+                    onmouseover="this.style.opacity='0.9'"
+                    onmouseout="this.style.opacity='1'"
+                >
+                    Start Import
+                </button>
+
+                <div id="import-progress" style="display: none; margin-top: 20px; padding: 20px; background: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 6px; color: #004085;">
+                    <p>⏳ Processing...</p>
+                </div>
+
+                <div id="import-results" style="margin-top: 20px;">
+                    <!-- Results will be injected here -->
+                </div>
+            </div>
+        </div>
+        <!-- END IMPORT TAB -->
+
+    </div>
+
+    <script>
+        let currentData = [];
+        let sortColumn = 'rank';
+        let sortDirection = 'asc';
+        let selectedUserId = null;
+
+        async function loadUsers() {
+            const subject = document.getElementById('subject').value;
+            const limit = document.getElementById('limit').value;
+            const minTrades = document.getElementById('minTrades').value;
+            const minWinRate = document.getElementById('minWinRate').value;
+            const minConsistency = document.getElementById('minConsistency').value;
+            const minPNL = document.getElementById('minPNL').value;
+            const hideFlags = document.getElementById('hideFlags').checked;
+
+            const params = new URLSearchParams();
+            params.set('subject', subject);
+            params.set('limit', limit);
+            appendParam(params, 'min_trades', minTrades);
+            appendParam(params, 'min_win_rate', minWinRate);
+            appendParam(params, 'min_consistency', minConsistency);
+            appendParam(params, 'min_pnl', minPNL);
+            if (hideFlags) {
+                params.set('hide_red_flags', '1');
+            }
+            
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('stats').style.display = 'none';
+
+            try {
+                const response = await fetch(`/api/users/top?${params.toString()}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load users');
+                }
+
+                currentData = data.rankings || [];
+                renderTable(currentData);
+                updateStats(currentData);
+                
+                document.getElementById('loading').classList.remove('active');
+                document.getElementById('stats').style.display = 'grid';
+            } catch (error) {
+                document.getElementById('loading').classList.remove('active');
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = 'Error: ' + error.message;
+            }
+        }
+
+        function renderTable(rankings) {
+            const tbody = document.getElementById('users-tbody');
+            tbody.innerHTML = '';
+
+            if (rankings.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 40px; color: #6c757d;">No traders found</td></tr>';
+                return;
+            }
+
+            rankings.forEach(ranking => {
+                const user = ranking.user;
+                const row = document.createElement('tr');
+                row.dataset.userId = user.id;
+                row.addEventListener('click', () => loadProfile(user.id));
+                
+                const pnlClass = user.total_pnl >= 0 ? 'badge-positive' : 'badge-negative';
+                const winRateClass = user.win_rate >= 0.6 ? 'badge-positive' : user.win_rate >= 0.55 ? 'badge-neutral' : 'badge-negative';
+                const consistencyClass = user.consistency >= 0.7 ? 'badge-positive' : user.consistency >= 0.5 ? 'badge-neutral' : 'badge-negative';
+
+                row.innerHTML = `
+                    <td>${ranking.rank}</td>
+                    <td class="name-cell">
+                        <a class="link-button" href="/users/${encodeURIComponent(user.id)}" onclick="event.preventDefault(); loadProfile('${user.id}'); return false;">
+                            ${escapeHtml(user.username || user.id)}
+                        </a>
+                    </td>
+                    <td>${user.total_trades}</td>
+                    <td><span class="badge ${pnlClass}">$${formatNumber(user.total_pnl)}</span></td>
+                    <td><span class="badge ${winRateClass}">${(user.win_rate * 100).toFixed(1)}%</span></td>
+                    <td><span class="badge ${consistencyClass}">${(user.consistency * 100).toFixed(0)}%</span></td>
+                    <td><strong>${ranking.overall_score.toFixed(1)}</strong></td>
+                    <td>
+                        ${user.red_flags && user.red_flags.length > 0 
+                            ? user.red_flags.map(flag => `<div class="red-flag">${escapeHtml(flag)}</div>`).join('')
+                            : '<span style="color: #28a745;">✓ No flags</span>'}
+                    </td>
+                `;
+
+                const nameCell = row.querySelector('.name-cell');
+                if (nameCell) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'link-button';
+                    button.textContent = user.username || user.id;
+                    button.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        loadProfile(user.id);
+                    });
+                    nameCell.appendChild(button);
+                }
+
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateStats(rankings) {
+            if (rankings.length === 0) return;
+
+            const totalTrades = rankings.reduce((sum, r) => sum + r.user.total_trades, 0);
+            const avgWinRate = rankings.reduce((sum, r) => sum + r.user.win_rate, 0) / rankings.length;
+            const avgTrades = totalTrades / rankings.length;
+
+            document.getElementById('stat-count').textContent = rankings.length.toLocaleString();
+            document.getElementById('stat-winrate').textContent = (avgWinRate * 100).toFixed(1) + '%';
+            document.getElementById('stat-trades').textContent = Math.round(avgTrades).toLocaleString();
+        }
+
+        function sortTable(column) {
+            if (sortColumn === column) {
+                sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortColumn = column;
+                sortDirection = 'asc';
+            }
+
+            currentData.sort((a, b) => {
+                let aVal, bVal;
+                
+                switch(column) {
+                    case 'rank':
+                        aVal = a.rank;
+                        bVal = b.rank;
+                        break;
+                    case 'username':
+                        aVal = (a.user.username || a.user.id).toLowerCase();
+                        bVal = (b.user.username || b.user.id).toLowerCase();
+                        break;
+                    case 'trades':
+                        aVal = a.user.total_trades;
+                        bVal = b.user.total_trades;
+                        break;
+                    case 'pnl':
+                        aVal = a.user.total_pnl;
+                        bVal = b.user.total_pnl;
+                        break;
+                    case 'winrate':
+                        aVal = a.user.win_rate;
+                        bVal = b.user.win_rate;
+                        break;
+                    case 'consistency':
+                        aVal = a.user.consistency;
+                        bVal = b.user.consistency;
+                        break;
+                    case 'score':
+                        aVal = a.overall_score;
+                        bVal = b.overall_score;
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (typeof aVal === 'string') {
+                    return sortDirection === 'asc' 
+                        ? aVal.localeCompare(bVal)
+                        : bVal.localeCompare(aVal);
+                } else {
+                    return sortDirection === 'asc' 
+                        ? aVal - bVal
+                        : bVal - aVal;
+                }
+            });
+
+            // Update sort indicators
+            document.querySelectorAll('th').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+                if (th.dataset.sort === column) {
+                    th.classList.add(sortDirection === 'asc' ? 'sort-asc' : 'sort-desc');
+                }
+            });
+
+            renderTable(currentData);
+        }
+
+        function appendParam(params, key, value) {
+            if (value === undefined || value === null) {
+                return;
+            }
+            const trimmed = value.toString().trim();
+            if (trimmed !== '') {
+                params.set(key, trimmed);
+            }
+        }
+
+        function formatNumber(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(2) + 'M';
+            } else if (num >= 1000) {
+                return (num / 1000).toFixed(2) + 'K';
+            }
+            return num.toFixed(2);
+        }
+
+        async function loadProfile(userId) {
+            if (!userId) return;
+            selectedUserId = userId;
+            const panel = document.getElementById('profile-panel');
+            panel.style.display = 'block';
+            setProfileLoading();
+
+            try {
+                const [userResp, tradesResp] = await Promise.all([
+                    fetch(`/api/users/${userId}`),
+                    fetch(`/api/users/${userId}/trades?limit=500&live=1`)
+                ]);
+
+                const userData = await userResp.json();
+                if (!userResp.ok) {
+                    throw new Error(userData.error || 'Failed to load user');
+                }
+                const tradesData = await tradesResp.json();
+                if (!tradesResp.ok) {
+                    throw new Error(tradesData.error || 'Failed to load trades');
+                }
+
+                renderProfile(userData.user, tradesData.trades || []);
+            } catch (error) {
+                showProfileError(error.message);
+            }
+        }
+
+        function setProfileLoading() {
+            document.getElementById('profile-name').textContent = 'Loading...';
+            document.getElementById('profile-address').textContent = '';
+            document.getElementById('profile-last-active').textContent = '';
+            document.getElementById('profile-trades').textContent = '...';
+            document.getElementById('profile-pnl').textContent = '...';
+            document.getElementById('profile-winrate').textContent = '...';
+            document.getElementById('profile-consistency').textContent = '...';
+            document.getElementById('profile-trades-error').style.display = 'none';
+            document.getElementById('profile-trades-body').innerHTML = `
+                <tr><td colspan="8" style="text-align:center; padding:20px; color:#718096;">Loading trades...</td></tr>
+            `;
+        }
+
+        function renderProfile(user, trades) {
+            if (!user) return;
+            document.getElementById('profile-name').textContent = user.username || user.address;
+            document.getElementById('profile-address').textContent = user.address;
+            document.getElementById('profile-last-active').textContent = user.last_active ? `Last active: ${formatDateTime(user.last_active)}` : '';
+            document.getElementById('profile-trades').textContent = user.total_trades.toLocaleString();
+            document.getElementById('profile-pnl').textContent = `$${formatNumber(user.total_pnl)}`;
+            document.getElementById('profile-winrate').textContent = `${(user.win_rate * 100).toFixed(1)}%`;
+            document.getElementById('profile-consistency').textContent = `${(user.consistency * 100).toFixed(0)}%`;
+            document.getElementById('profile-trades-error').style.display = 'none';
+            renderTradeRows(trades);
+        }
+
+        function renderTradeRows(trades) {
+            const body = document.getElementById('profile-trades-body');
+            body.innerHTML = '';
+            if (!trades || trades.length === 0) {
+                body.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#718096;">No trades captured for this trader (yet)</td></tr>';
+                return;
+            }
+
+            trades.forEach(trade => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${formatDateTime(trade.timestamp)}</td>
+                    <td>${trade.subject || '-'}</td>
+                    <td>${trade.title || '—'}</td>
+                    <td>${trade.side || ''}</td>
+                    <td>${formatDecimal(trade.size)}</td>
+                    <td>${formatDecimal(trade.price)}</td>
+                    <td>${trade.outcome || ''}</td>
+                    <td>${trade.transaction_hash ? `<a href="https://polygonscan.com/tx/${trade.transaction_hash}" target="_blank">View</a>` : ''}</td>
+                `;
+                body.appendChild(row);
+            });
+        }
+
+        function showProfileError(message) {
+            document.getElementById('profile-trades-body').innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#c53030;">Failed to load trades</td></tr>';
+            const errorEl = document.getElementById('profile-trades-error');
+            errorEl.style.display = 'block';
+            errorEl.textContent = message;
+        }
+
+        function formatDateTime(dateStr) {
+            if (!dateStr) return '';
+            const d = new Date(dateStr);
+            if (Number.isNaN(d.getTime())) {
+                return dateStr;
+            }
+            return d.toLocaleString();
+        }
+
+        function formatDecimal(value) {
+            const num = Number(value);
+            if (Number.isNaN(num)) {
+                return value ?? '-';
+            }
+            return num.toFixed(2);
+        }
+
+        function escapeHtml(value) {
+            if (typeof value !== 'string') {
+                return value;
+            }
+            return value
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Load on page load if needed
+        // loadUsers();
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+
+        // My Users tab functionality
+        async function loadMyUsers() {
+            const loading = document.getElementById('myusers-loading');
+            const listDiv = document.getElementById('myusers-list');
+            
+            loading.style.display = 'block';
+            listDiv.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/users/imported');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                loading.style.display = 'none';
+
+                if (data.rankings.length === 0) {
+                    listDiv.innerHTML = '<p style="text-align:center; padding:40px; color:#6c757d;">No users imported yet. Go to "Import Top Users" tab to add some.</p>';
+                    return;
+                }
+
+                // Build table
+                let html = `
+                    <div style="margin-bottom: 15px;">
+                        <strong>${data.count}</strong> user(s) in database
+                    </div>
+                    <table style="width:100%; border-collapse:collapse; background:white;">
+                        <thead style="background:#f8f9fa;">
+                            <tr>
+                                <th style="padding:12px; text-align:left; border-bottom:2px solid #dee2e6;">Rank</th>
+                                <th style="padding:12px; text-align:left; border-bottom:2px solid #dee2e6;">Username</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Trades</th>
+                                <th style="padding:12px; text-align:right; border-bottom:2px solid #dee2e6;">P&L</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Win Rate</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Consistency</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Score</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+
+                data.rankings.forEach((ranking, idx) => {
+                    const user = ranking.user; // Extract user from ranking object
+                    const displayName = user.username || (user.id ? user.id.substring(0, 10) + '...' : 'Unknown');
+                    const winRate = user.win_rate ? (user.win_rate * 100).toFixed(1) : '0.0';
+                    const consistency = user.consistency ? (user.consistency * 100).toFixed(1) : '0.0';
+                    const score = ranking.overall_score ? ranking.overall_score.toFixed(1) : '0.0';
+                    const pnl = user.total_pnl || 0;
+
+                    html += `
+                        <tr style="border-bottom:1px solid #e9ecef; cursor:pointer;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='white'">
+                            <td style="padding:12px;">${idx + 1}</td>
+                            <td style="padding:12px;">
+                                <a href="/users/${encodeURIComponent(user.id)}" target="_blank" style="color:#667eea; text-decoration:none; font-weight:600;">
+                                    ${escapeHtml(displayName)}
+                                </a>
+                            </td>
+                            <td style="padding:12px; text-align:center;">${user.total_trades || 0}</td>
+                            <td style="padding:12px; text-align:right; color:${pnl >= 0 ? '#28a745' : '#dc3545'}; font-weight:600;">
+                                $${pnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                            </td>
+                            <td style="padding:12px; text-align:center;">${winRate}%</td>
+                            <td style="padding:12px; text-align:center;">${consistency}%</td>
+                            <td style="padding:12px; text-align:center; font-weight:600; color:#667eea;">${score}</td>
+                            <td style="padding:12px; text-align:center;">
+                                <a href="/users/${encodeURIComponent(user.id)}" target="_blank" style="padding:6px 12px; background:#667eea; color:white; text-decoration:none; border-radius:4px; font-size:0.9em; margin-right:8px;">
+                                    View Profile
+                                </a>
+                                <button onclick="deleteUser('${escapeHtml(user.id)}', '${escapeHtml(displayName)}'); event.stopPropagation();" style="padding:6px 12px; background:#dc3545; color:white; border:none; border-radius:4px; font-size:0.9em; cursor:pointer;">
+                                    Delete
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                html += '</tbody></table>';
+                listDiv.innerHTML = html;
+
+            } catch (error) {
+                loading.style.display = 'none';
+                listDiv.innerHTML = `<div style="background:#f8d7da; color:#721c24; padding:15px; border-radius:6px; border:1px solid #f5c6cb;">
+                    <strong>Error loading users:</strong> ${escapeHtml(error.message)}
+                </div>`;
+            }
+        }
+
+        // Import functionality
+        async function importUsers() {
+            const textarea = document.getElementById('import-addresses');
+            const rawText = textarea.value.trim();
+            
+            if (!rawText) {
+                alert('Please enter at least one wallet address');
+                return;
+            }
+
+            // Parse addresses (one per line, comma-separated, or space-separated)
+            const addresses = rawText
+                .split(/[\n,\s]+/)
+                .map(addr => addr.trim())
+                .filter(addr => addr && addr.match(/^0x[a-fA-F0-9]{40}$/));
+
+            if (addresses.length === 0) {
+                alert('No valid Ethereum addresses found. Addresses should start with 0x and be 42 characters long.');
+                return;
+            }
+
+            const confirmed = confirm(`Import ${addresses.length} user(s)? This may take several minutes (about 30-60 seconds per user).`);
+            if (!confirmed) return;
+
+            // Show progress
+            const progressDiv = document.getElementById('import-progress');
+            const resultsDiv = document.getElementById('import-results');
+            const btn = document.getElementById('import-btn');
+            
+            progressDiv.style.display = 'block';
+            progressDiv.innerHTML = `<p>⏳ Importing ${addresses.length} user(s)... Please wait...</p>`;
+            resultsDiv.innerHTML = '';
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/import-top-users', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ addresses })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                
+                // Display results
+                progressDiv.style.display = 'none';
+                resultsDiv.innerHTML = `
+                    <h3 style="margin-bottom:15px;">Import Complete</h3>
+                    <p><strong>Total:</strong> ${data.total} user(s)</p>
+                    <p style="color:#28a745;"><strong>✓ Success:</strong> ${data.success_count}</p>
+                    <p style="color:#dc3545;"><strong>✗ Failed:</strong> ${data.failed_count}</p>
+                    <div style="margin-top:20px; max-height:300px; overflow-y:auto;">
+                        <table style="width:100%; border-collapse:collapse;">
+                            <thead style="background:#f8f9fa; position:sticky; top:0;">
+                                <tr>
+                                    <th style="padding:8px; text-align:left; border-bottom:2px solid #dee2e6;">Address</th>
+                                    <th style="padding:8px; text-align:center; border-bottom:2px solid #dee2e6;">Status</th>
+                                    <th style="padding:8px; text-align:center; border-bottom:2px solid #dee2e6;">Trades</th>
+                                    <th style="padding:8px; text-align:right; border-bottom:2px solid #dee2e6;">Duration</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.results.map(r => `
+                                    <tr style="border-bottom:1px solid #e9ecef;">
+                                        <td style="padding:8px; font-family:monospace; font-size:0.9em;">${escapeHtml(r.address.substring(0, 10))}...</td>
+                                        <td style="padding:8px; text-align:center;">
+                                            ${r.success ? '<span style="color:#28a745;">✓</span>' : '<span style="color:#dc3545;">✗</span>'}
+                                        </td>
+                                        <td style="padding:8px; text-align:center;">${r.success ? r.trade_count : '-'}</td>
+                                        <td style="padding:8px; text-align:right; color:#6c757d; font-size:0.9em;">${r.duration_sec.toFixed(1)}s</td>
+                                    </tr>
+                                    ${r.error_msg ? `<tr><td colspan="4" style="padding:0 8px 8px 8px; font-size:0.85em; color:#dc3545;">${escapeHtml(r.error_msg)}</td></tr>` : ''}
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                // Clear textarea on success
+                if (data.success_count > 0) {
+                    textarea.value = '';
+                }
+
+            } catch (error) {
+                progressDiv.style.display = 'none';
+                resultsDiv.innerHTML = `
+                    <div style="background:#f8d7da; color:#721c24; padding:15px; border-radius:6px; border:1px solid #f5c6cb;">
+                        <strong>Import failed:</strong> ${escapeHtml(error.message)}
+                    </div>
+                `;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // Delete user functionality
+        async function deleteUser(userId, displayName) {
+            const confirmed = confirm(`Are you sure you want to delete user "${displayName}"?\n\nThis will permanently remove:\n- User profile\n- All trades (${userId})\n- All metrics and history\n\nThis action cannot be undone.`);
+
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+
+                // Show success message
+                alert(`User "${displayName}" has been deleted successfully!`);
+
+                // Reload the imported users list
+                await loadImportedUsers();
+
+            } catch (error) {
+                alert(`Failed to delete user: ${error.message}`);
+            }
+        }
+    </script>
+</body>
+</html>
+

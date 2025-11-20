@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{if .user}}{{.user.Username}}{{else}}Trader{{end}} – Profile</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f4f5f7;
+            margin: 0;
+            padding: 40px;
+        }
+        .card {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            padding: 30px;
+        }
+        h1 {
+            margin-top: 0;
+        }
+        .meta {
+            color: #718096;
+            margin-bottom: 20px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+        .stat {
+            padding: 12px;
+            border-radius: 8px;
+            background: #f8fafc;
+            border: 1px solid #edf2f7;
+        }
+
+        /* Filter controls */
+        .filter-section {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+        .filter-control {
+            display: flex;
+            flex-direction: column;
+        }
+        .filter-control label {
+            font-weight: 600;
+            font-size: 0.9em;
+            margin-bottom: 6px;
+            color: #4a5568;
+        }
+        .filter-control input,
+        .filter-control select {
+            padding: 8px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 0.95em;
+        }
+        .search-box {
+            grid-column: 1 / -1;
+        }
+        .search-box input {
+            width: 100%;
+            padding: 10px 16px;
+            font-size: 1em;
+        }
+        .reset-btn {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.95em;
+            font-weight: 600;
+        }
+        .reset-btn:hover {
+            background: #5568d3;
+        }
+
+        /* Results info */
+        .results-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: #edf2f7;
+            border-radius: 6px;
+        }
+        .results-count {
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        /* Table styles */
+        .table-container {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        th, td {
+            padding: 12px;
+            border-bottom: 1px solid #edf2f7;
+            text-align: left;
+        }
+        th {
+            background: #f7fafc;
+            font-weight: 600;
+            color: #2d3748;
+            position: sticky;
+            top: 0;
+        }
+        tr.hidden {
+            display: none;
+        }
+        tr:hover {
+            background: #f7fafc;
+        }
+        a {
+            color: #5a67d8;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .side-buy {
+            color: #38a169;
+            font-weight: 600;
+        }
+        .side-sell {
+            color: #e53e3e;
+            font-weight: 600;
+        }
+        .type-redeem {
+            color: #805ad5;
+            font-weight: 600;
+        }
+        .role-maker {
+            color: #3182ce;
+            font-weight: 600;
+        }
+        .role-taker {
+            color: #d69e2e;
+            font-weight: 600;
+        }
+        .type-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
+            margin-left: 4px;
+        }
+        .type-badge.redeem {
+            background: #faf5ff;
+            color: #6b46c1;
+        }
+        .subject-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+            background: #e6fffa;
+            color: #234e52;
+        }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        .pagination button {
+            padding: 8px 16px;
+            border: 1px solid #cbd5e0;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        .pagination button:hover:not(:disabled) {
+            background: #f7fafc;
+        }
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .pagination .page-info {
+            font-size: 0.9em;
+            color: #4a5568;
+        }
+
+        /* Tab styles */
+        .tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .tab {
+            padding: 12px 24px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            color: #718096;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+        .tab:hover {
+            color: #4a5568;
+        }
+        .tab.active {
+            color: #5a67d8;
+            border-bottom-color: #5a67d8;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Positions table styles */
+        .gain {
+            color: #38a169;
+            font-weight: 600;
+        }
+        .loss {
+            color: #e53e3e;
+            font-weight: 600;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+        }
+        .positions-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+            padding: 16px;
+            background: #f8fafc;
+            border-radius: 8px;
+        }
+        .summary-stat {
+            text-align: center;
+        }
+        .summary-stat .value {
+            font-size: 1.5em;
+            font-weight: 700;
+            color: #2d3748;
+        }
+        .summary-stat .label {
+            font-size: 0.85em;
+            color: #718096;
+        }
+
+        /* Sortable headers */
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+            padding-right: 20px;
+        }
+        th.sortable:hover {
+            background: #edf2f7;
+        }
+        th.sortable::after {
+            content: '↕';
+            position: absolute;
+            right: 6px;
+            opacity: 0.3;
+            font-size: 0.8em;
+        }
+        th.sortable.asc::after {
+            content: '↑';
+            opacity: 1;
+        }
+        th.sortable.desc::after {
+            content: '↓';
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <a href="/" style="text-decoration:none;color:#5a67d8;">← Back to leaderboard</a>
+        <h1>{{if .user.Username}}{{.user.Username}}{{else}}{{.user.Address}}{{end}}</h1>
+        <p class="meta">
+            {{.user.Address}}<br>
+            <small>Last synced: {{formatTime .user.LastSyncedAt}}</small>
+        </p>
+
+        <div class="stats">
+            <div class="stat">
+                <strong>Total Trades</strong>
+                <div>{{.user.TotalTrades}}</div>
+            </div>
+            <div class="stat">
+                <strong>Total P&L</strong>
+                <div>${{printf "%.2f" .user.TotalPNL}}</div>
+            </div>
+            <div class="stat">
+                <strong>Win Rate</strong>
+                <div>{{printf "%.1f%%" (mul100 .user.WinRate)}}</div>
+            </div>
+            <div class="stat">
+                <strong>Consistency</strong>
+                <div>{{printf "%.0f%%" (mul100 .user.Consistency)}}</div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('trades')">Trade History</button>
+            <button class="tab" onclick="switchTab('positions')">Positions Analysis</button>
+        </div>
+
+        <!-- Trades Tab -->
+        <div id="trades-tab" class="tab-content active">
+        {{if .trades}}
+        <!-- Filter Section -->
+        <div class="filter-section">
+            <h3 style="margin-top:0;">Search & Filter</h3>
+            <div class="filter-grid">
+                <div class="filter-control search-box">
+                    <label for="search">Search by Market Name</label>
+                    <input type="text" id="search" placeholder="Type to search markets..." onkeyup="filterTrades()">
+                </div>
+
+                <div class="filter-control">
+                    <label for="filter-subject">Subject</label>
+                    <select id="filter-subject" onchange="filterTrades()">
+                        <option value="">All Subjects</option>
+                        <option value="politics">Politics</option>
+                        <option value="sports">Sports</option>
+                        <option value="finance">Finance</option>
+                        <option value="geopolitics">Geopolitics</option>
+                        <option value="tech">Tech</option>
+                        <option value="culture">Culture</option>
+                        <option value="economy">Economy</option>
+                    </select>
+                </div>
+
+                <div class="filter-control">
+                    <label for="filter-type">Type</label>
+                    <select id="filter-type" onchange="filterTrades()">
+                        <option value="">All Types</option>
+                        <option value="TRADE">Trade</option>
+                        <option value="REDEEM">Redeem</option>
+                    </select>
+                </div>
+
+                <div class="filter-control">
+                    <label for="filter-role">Role</label>
+                    <select id="filter-role" onchange="filterTrades()">
+                        <option value="">All</option>
+                        <option value="MAKER">Maker</option>
+                        <option value="TAKER">Taker</option>
+                    </select>
+                </div>
+
+                <div class="filter-control">
+                    <label for="filter-side">Side</label>
+                    <select id="filter-side" onchange="filterTrades()">
+                        <option value="">All</option>
+                        <option value="BUY">Buy</option>
+                        <option value="SELL">Sell</option>
+                    </select>
+                </div>
+
+                <div class="filter-control">
+                    <label for="filter-outcome">Outcome</label>
+                    <select id="filter-outcome" onchange="filterTrades()">
+                        <option value="">All</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                    </select>
+                </div>
+
+                <div class="filter-control">
+                    <label>&nbsp;</label>
+                    <button class="reset-btn" onclick="resetFilters()">Reset All Filters</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Info -->
+        <div class="results-info">
+            <span class="results-count" id="results-count">Showing all {{len .trades}} activities</span>
+            <span id="page-info" class="page-info"></span>
+        </div>
+
+        <!-- Trades Table -->
+        <div class="table-container">
+            <table id="trades-table">
+                <thead>
+                    <tr>
+                        <th>Trade Time</th>
+                        <th>Logged At</th>
+                        <th>Type</th>
+                        <th>Role</th>
+                        <th>Subject</th>
+                        <th>Market</th>
+                        <th>Outcome</th>
+                        <th>Size</th>
+                        <th>Price</th>
+                        <th>Value</th>
+                        <th>Tx</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .trades}}
+                    <tr data-subject="{{.Subject}}" data-side="{{.Side}}" data-outcome="{{.Outcome}}" data-market="{{.Title}}" data-type="{{if .Type}}{{.Type}}{{else}}TRADE{{end}}" data-role="{{if .IsMaker}}MAKER{{else}}TAKER{{end}}">
+                        <td>{{formatTime .Timestamp}}</td>
+                        <td>{{if .InsertedAt.IsZero}}-{{else}}{{formatTime .InsertedAt}}{{end}}</td>
+                        <td>
+                            {{if eq .Type "REDEEM"}}
+                                <span class="type-redeem">REDEEM</span>
+                            {{else if eq .Side "BUY"}}
+                                <span class="side-buy">BUY</span>
+                            {{else}}
+                                <span class="side-sell">SELL</span>
+                            {{end}}
+                        </td>
+                        <td>
+                            {{if eq .Type "REDEEM"}}
+                                <span>-</span>
+                            {{else if .IsMaker}}
+                                <span class="role-maker">Maker</span>
+                            {{else}}
+                                <span class="role-taker">Taker</span>
+                            {{end}}
+                        </td>
+                        <td><span class="subject-badge">{{.Subject}}</span></td>
+                        <td>{{.Title}}</td>
+                        <td>{{.Outcome}}</td>
+                        <td>{{printf "%.2f" .Size}}</td>
+                        <td>{{if eq .Type "REDEEM"}}$1.00{{else}}{{printf "%.2f" .Price}}{{end}}</td>
+                        <td>{{if eq .Type "REDEEM"}}${{printf "%.2f" .UsdcSize}}{{else}}${{printf "%.2f" (mul .Size .Price)}}{{end}}</td>
+                        <td>{{if .TransactionHash}}<a href="https://polygonscan.com/tx/{{.TransactionHash}}" target="_blank">View</a>{{end}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination -->
+        <div class="pagination" id="pagination">
+            <button onclick="changePage(-1)" id="prev-btn">Previous</button>
+            <span class="page-info" id="pagination-info">Page 1</span>
+            <button onclick="changePage(1)" id="next-btn">Next</button>
+        </div>
+
+        {{else}}
+        <p>No trades recorded.</p>
+        {{end}}
+        </div>
+
+        <!-- Positions Tab -->
+        <div id="positions-tab" class="tab-content">
+            <div class="loading" id="positions-loading">Loading positions analysis...</div>
+            <div id="positions-content" style="display:none;">
+                <div class="positions-summary" id="positions-summary"></div>
+                <div class="table-container">
+                    <table id="positions-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="title" onclick="sortPositions('title')">Market</th>
+                                <th class="sortable" data-sort="outcome" onclick="sortPositions('outcome')">Outcome</th>
+                                <th class="sortable" data-sort="subject" onclick="sortPositions('subject')">Subject</th>
+                                <th class="sortable" data-sort="total_bought" onclick="sortPositions('total_bought')">$ Bought</th>
+                                <th class="sortable" data-sort="total_sold" onclick="sortPositions('total_sold')">$ Sold</th>
+                                <th class="sortable" data-sort="qty_bought" onclick="sortPositions('qty_bought')">Qty Bought</th>
+                                <th class="sortable" data-sort="qty_sold" onclick="sortPositions('qty_sold')">Qty Sold</th>
+                                <th class="sortable desc" data-sort="gain_loss" onclick="sortPositions('gain_loss')">Gain/Loss</th>
+                                <th class="sortable" data-sort="buy_count" onclick="sortPositions('buy_count')">Buys</th>
+                                <th class="sortable" data-sort="sell_count" onclick="sortPositions('sell_count')">Sells</th>
+                                <th class="sortable" data-sort="first_buy_at" onclick="sortPositions('first_buy_at')">First Buy</th>
+                                <th class="sortable" data-sort="last_sell_at" onclick="sortPositions('last_sell_at')">Last Sell</th>
+                                <th class="sortable" data-sort="duration_mins" onclick="sortPositions('duration_mins')">Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        const tradesPerPage = 50;
+        let allRows = [];
+        let visibleRows = [];
+        let positionsLoaded = false;
+        const userId = '{{.user.ID}}';
+        let positionsData = [];
+        let currentSort = { field: 'gain_loss', dir: 'desc' };
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tabName + '-tab').classList.add('active');
+
+            // Load positions if switching to positions tab
+            if (tabName === 'positions' && !positionsLoaded) {
+                loadPositions();
+            }
+        }
+
+        // Load positions data
+        async function loadPositions() {
+            try {
+                const response = await fetch(`/api/users/${userId}/positions`);
+                const data = await response.json();
+
+                if (data.positions && data.positions.length > 0) {
+                    renderPositions(data.positions);
+                } else {
+                    document.getElementById('positions-loading').textContent = 'No positions found.';
+                }
+            } catch (error) {
+                document.getElementById('positions-loading').textContent = 'Error loading positions: ' + error.message;
+            }
+        }
+
+        // Render positions table
+        function renderPositions(positions) {
+            // Store data for sorting
+            positionsData = positions;
+
+            // Calculate summary stats
+            let totalGain = 0, totalLoss = 0, totalBought = 0, totalSold = 0;
+            positions.forEach(p => {
+                totalBought += p.total_bought;
+                totalSold += p.total_sold;
+                if (p.gain_loss >= 0) totalGain += p.gain_loss;
+                else totalLoss += Math.abs(p.gain_loss);
+            });
+
+            // Render summary
+            document.getElementById('positions-summary').innerHTML = `
+                <div class="summary-stat">
+                    <div class="value">${positions.length}</div>
+                    <div class="label">Positions</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="value">$${totalBought.toFixed(2)}</div>
+                    <div class="label">Total Bought</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="value">$${totalSold.toFixed(2)}</div>
+                    <div class="label">Total Sold</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="value gain">+$${totalGain.toFixed(2)}</div>
+                    <div class="label">Total Gains</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="value loss">-$${totalLoss.toFixed(2)}</div>
+                    <div class="label">Total Losses</div>
+                </div>
+            `;
+
+            // Apply default sort (by absolute gain/loss) and render
+            sortPositionsData('gain_loss', 'desc');
+            renderPositionsTable();
+
+            // Show content, hide loading
+            document.getElementById('positions-loading').style.display = 'none';
+            document.getElementById('positions-content').style.display = 'block';
+            positionsLoaded = true;
+        }
+
+        // Helper functions
+        function formatDate(dateStr) {
+            if (!dateStr || dateStr.startsWith('0001')) return '-';
+            const date = new Date(dateStr);
+            return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        }
+
+        function formatDuration(mins) {
+            if (mins < 60) return `${mins.toFixed(0)}m`;
+            if (mins < 1440) return `${(mins/60).toFixed(1)}h`;
+            return `${(mins/1440).toFixed(1)}d`;
+        }
+
+        function truncate(str, len) {
+            return str && str.length > len ? str.substring(0, len) + '...' : str;
+        }
+
+        // Sort positions by clicking header
+        function sortPositions(field) {
+            // Toggle direction if same field
+            let dir = 'asc';
+            if (currentSort.field === field) {
+                dir = currentSort.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                // Default to desc for numeric fields, asc for text
+                const numericFields = ['total_bought', 'total_sold', 'qty_bought', 'qty_sold', 'gain_loss', 'buy_count', 'sell_count', 'duration_mins'];
+                dir = numericFields.includes(field) ? 'desc' : 'asc';
+            }
+
+            sortPositionsData(field, dir);
+            renderPositionsTable();
+
+            // Update header styles
+            document.querySelectorAll('#positions-table th.sortable').forEach(th => {
+                th.classList.remove('asc', 'desc');
+                if (th.dataset.sort === field) {
+                    th.classList.add(dir);
+                }
+            });
+        }
+
+        // Sort the positions data
+        function sortPositionsData(field, dir) {
+            currentSort = { field, dir };
+
+            positionsData.sort((a, b) => {
+                let aVal = a[field];
+                let bVal = b[field];
+
+                // Handle dates
+                if (field.includes('_at')) {
+                    aVal = aVal ? new Date(aVal).getTime() : 0;
+                    bVal = bVal ? new Date(bVal).getTime() : 0;
+                }
+
+                // Handle strings
+                if (typeof aVal === 'string') {
+                    aVal = aVal.toLowerCase();
+                    bVal = bVal.toLowerCase();
+                }
+
+                // Compare
+                if (aVal < bVal) return dir === 'asc' ? -1 : 1;
+                if (aVal > bVal) return dir === 'asc' ? 1 : -1;
+                return 0;
+            });
+        }
+
+        // Render just the table body (for re-sorting)
+        function renderPositionsTable() {
+            const tbody = document.getElementById('positions-body');
+            tbody.innerHTML = positionsData.map(p => {
+                const gainLossClass = p.gain_loss >= 0 ? 'gain' : 'loss';
+                const gainLossSign = p.gain_loss >= 0 ? '+' : '';
+                const duration = p.duration_mins > 0 ? formatDuration(p.duration_mins) : '-';
+                const firstBuy = p.first_buy_at ? formatDate(p.first_buy_at) : '-';
+                const lastSell = p.last_sell_at ? formatDate(p.last_sell_at) : '-';
+
+                return `
+                    <tr>
+                        <td>${truncate(p.title, 50)}</td>
+                        <td>${p.outcome}</td>
+                        <td><span class="subject-badge">${p.subject || '-'}</span></td>
+                        <td>$${p.total_bought.toFixed(2)}</td>
+                        <td>$${p.total_sold.toFixed(2)}</td>
+                        <td>${p.qty_bought.toFixed(2)}</td>
+                        <td>${p.qty_sold.toFixed(2)}</td>
+                        <td class="${gainLossClass}">${gainLossSign}$${p.gain_loss.toFixed(2)}</td>
+                        <td>${p.buy_count}</td>
+                        <td>${p.sell_count}</td>
+                        <td>${firstBuy}</td>
+                        <td>${lastSell}</td>
+                        <td>${duration}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            const table = document.getElementById('trades-table');
+            if (table) {
+                allRows = Array.from(table.querySelectorAll('tbody tr'));
+                visibleRows = allRows;
+                updatePagination();
+            }
+        });
+
+        function filterTrades() {
+            const searchText = document.getElementById('search').value.toLowerCase();
+            const subjectFilter = document.getElementById('filter-subject').value.toLowerCase();
+            const typeFilter = document.getElementById('filter-type').value.toUpperCase();
+            const roleFilter = document.getElementById('filter-role').value.toUpperCase();
+            const sideFilter = document.getElementById('filter-side').value.toUpperCase();
+            const outcomeFilter = document.getElementById('filter-outcome').value;
+
+            let visibleCount = 0;
+            visibleRows = [];
+
+            allRows.forEach(row => {
+                const market = row.getAttribute('data-market').toLowerCase();
+                const subject = row.getAttribute('data-subject').toLowerCase();
+                const type = row.getAttribute('data-type').toUpperCase();
+                const role = row.getAttribute('data-role').toUpperCase();
+                const side = row.getAttribute('data-side').toUpperCase();
+                const outcome = row.getAttribute('data-outcome');
+
+                const matchesSearch = !searchText || market.includes(searchText);
+                const matchesSubject = !subjectFilter || subject === subjectFilter;
+                const matchesType = !typeFilter || type === typeFilter;
+                const matchesRole = !roleFilter || role === roleFilter;
+                const matchesSide = !sideFilter || side === sideFilter;
+                const matchesOutcome = !outcomeFilter || outcome === outcomeFilter;
+
+                if (matchesSearch && matchesSubject && matchesType && matchesRole && matchesSide && matchesOutcome) {
+                    visibleRows.push(row);
+                    visibleCount++;
+                }
+            });
+
+            // Update results count
+            document.getElementById('results-count').textContent =
+                `Showing ${visibleCount} of {{len .trades}} activities`;
+
+            // Reset to page 1 when filters change
+            currentPage = 1;
+            updatePagination();
+        }
+
+        function updatePagination() {
+            const totalPages = Math.ceil(visibleRows.length / tradesPerPage);
+            const start = (currentPage - 1) * tradesPerPage;
+            const end = start + tradesPerPage;
+
+            // Hide all rows first
+            allRows.forEach(row => row.classList.add('hidden'));
+
+            // Show only current page rows
+            visibleRows.slice(start, end).forEach(row => row.classList.remove('hidden'));
+
+            // Update pagination controls
+            document.getElementById('prev-btn').disabled = currentPage === 1;
+            document.getElementById('next-btn').disabled = currentPage >= totalPages || visibleRows.length === 0;
+            document.getElementById('pagination-info').textContent =
+                visibleRows.length > 0 ? `Page ${currentPage} of ${totalPages}` : 'No results';
+
+            // Update page info in results bar
+            const pageStart = visibleRows.length > 0 ? start + 1 : 0;
+            const pageEnd = Math.min(end, visibleRows.length);
+            document.getElementById('page-info').textContent =
+                visibleRows.length > 0 ? `${pageStart}-${pageEnd}` : '';
+        }
+
+        function changePage(delta) {
+            const totalPages = Math.ceil(visibleRows.length / tradesPerPage);
+            const newPage = currentPage + delta;
+
+            if (newPage >= 1 && newPage <= totalPages) {
+                currentPage = newPage;
+                updatePagination();
+
+                // Scroll to top of table
+                document.querySelector('.table-container').scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        function resetFilters() {
+            document.getElementById('search').value = '';
+            document.getElementById('filter-subject').value = '';
+            document.getElementById('filter-type').value = '';
+            document.getElementById('filter-role').value = '';
+            document.getElementById('filter-side').value = '';
+            document.getElementById('filter-outcome').value = '';
+            currentPage = 1;
+            filterTrades();
+        }
+    </script>
+</body>
+</html>

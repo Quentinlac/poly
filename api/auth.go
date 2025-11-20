@@ -1,0 +1,148 @@
+package api
+
+import (
+	"crypto/ecdsa"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+)
+
+// Auth handles Polymarket L1 authentication with EIP-712 signing
+type Auth struct {
+	privateKey *ecdsa.PrivateKey
+	address    common.Address
+}
+
+// NewAuth creates a new auth instance from private key
+func NewAuth() (*Auth, error) {
+	privateKeyStr := os.Getenv("POLYMARKET_PRIVATE_KEY")
+	if privateKeyStr == "" {
+		return nil, fmt.Errorf("POLYMARKET_PRIVATE_KEY environment variable not set")
+	}
+
+	// Remove 0x prefix if present
+	if len(privateKeyStr) > 2 && privateKeyStr[:2] == "0x" {
+		privateKeyStr = privateKeyStr[2:]
+	}
+
+	privateKeyBytes, err := hex.DecodeString(privateKeyStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key format: %w", err)
+	}
+
+	privateKey, err := crypto.ToECDSA(privateKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast public key to ECDSA")
+	}
+
+	address := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	return &Auth{
+		privateKey: privateKey,
+		address:    address,
+	}, nil
+}
+
+// GetAddress returns the Ethereum address derived from the private key
+func (a *Auth) GetAddress() common.Address {
+	return a.address
+}
+
+// SignRequest creates L1 authentication headers for Polymarket API
+func (a *Auth) SignRequest() (map[string]string, error) {
+	timestamp := time.Now().Unix()
+	nonce := int64(0)
+
+	// EIP-712 domain for Polymarket
+	chainID := math.NewHexOrDecimal256(137) // Polygon mainnet
+	domain := apitypes.TypedDataDomain{
+		Name:    "Polymarket",
+		Version: "1",
+		ChainId: chainID,
+	}
+
+	// EIP-712 message structure
+	message := map[string]interface{}{
+		"address":   a.address.Hex(),
+		"timestamp": timestamp,
+		"nonce":     nonce,
+	}
+
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+			},
+			"Message": []apitypes.Type{
+				{Name: "address", Type: "address"},
+				{Name: "timestamp", Type: "uint256"},
+				{Name: "nonce", Type: "uint256"},
+			},
+		},
+		PrimaryType: "Message",
+		Domain:      domain,
+		Message:     message,
+	}
+
+	// Sign the typed data using go-ethereum's signer
+	domainSeparator, err := typedData.HashStruct("EIP712Domain", typedData.Domain.Map())
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash domain: %w", err)
+	}
+
+	typedDataHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash message: %w", err)
+	}
+
+	rawData := []byte(fmt.Sprintf("\x19\x01%s%s", string(domainSeparator), string(typedDataHash)))
+	hash := crypto.Keccak256Hash(rawData)
+
+	signature, err := crypto.Sign(hash.Bytes(), a.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign: %w", err)
+	}
+
+	// Adjust v value (recovery ID)
+	signature[64] += 27
+
+	headers := map[string]string{
+		"POLY_ADDRESS":   a.address.Hex(),
+		"POLY_SIGNATURE": "0x" + hex.EncodeToString(signature),
+		"POLY_TIMESTAMP": strconv.FormatInt(timestamp, 10),
+		"POLY_NONCE":     strconv.FormatInt(nonce, 10),
+		"Content-Type":   "application/json",
+	}
+
+	return headers, nil
+}
+
+// SignMessage signs a simple message (alternative method)
+func (a *Auth) SignMessage(message string) (string, error) {
+	hash := accounts.TextHash([]byte(message))
+	signature, err := crypto.Sign(hash, a.privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign message: %w", err)
+	}
+
+	// Adjust v value
+	signature[64] += 27
+
+	return "0x" + hex.EncodeToString(signature), nil
+}
