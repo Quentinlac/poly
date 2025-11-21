@@ -111,9 +111,9 @@ func (s *Store) ReplaceTrades(ctx context.Context, trades map[string][]models.Tr
 
 	stmt, err := tx.PrepareContext(ctx, `
         INSERT INTO user_trades (
-            id, user_id, market_id, subject, side, size, price, outcome,
-            timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
+            timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 	if err != nil {
 		return err
@@ -128,14 +128,16 @@ func (s *Store) ReplaceTrades(ctx context.Context, trades map[string][]models.Tr
 				userID,
 				trade.MarketID,
 				string(trade.Subject),
+				trade.Type,
 				trade.Side,
+				trade.Role,
 				trade.Size,
+				trade.UsdcSize,
 				trade.Price,
 				trade.Outcome,
 				timeString(trade.Timestamp),
 				trade.Title,
 				trade.Slug,
-				trade.EventSlug,
 				trade.TransactionHash,
 				trade.Name,
 				trade.Pseudonym,
@@ -163,16 +165,16 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) err
 
 	stmt, err := tx.PrepareContext(ctx, `
         INSERT INTO user_trades (
-            id, user_id, market_id, subject, type, side, is_maker, size, usdc_size, price, outcome,
-            timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
+            timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            user_id = excluded.user_id,
-            market_id = excluded.market_id,
+            user_address = excluded.user_address,
+            asset = excluded.asset,
             subject = excluded.subject,
             type = excluded.type,
             side = excluded.side,
-            is_maker = excluded.is_maker,
+            role = excluded.role,
             size = excluded.size,
             usdc_size = excluded.usdc_size,
             price = excluded.price,
@@ -180,7 +182,6 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) err
             timestamp = excluded.timestamp,
             title = excluded.title,
             slug = excluded.slug,
-            event_slug = excluded.event_slug,
             transaction_hash = excluded.transaction_hash,
             name = excluded.name,
             pseudonym = excluded.pseudonym
@@ -192,10 +193,6 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) err
 	defer stmt.Close()
 
 	for _, trade := range trades {
-		isMaker := 0
-		if trade.IsMaker {
-			isMaker = 1
-		}
 		if _, err := stmt.ExecContext(
 			ctx,
 			trade.ID,
@@ -204,7 +201,7 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) err
 			string(trade.Subject),
 			trade.Type,
 			trade.Side,
-			isMaker,
+			trade.Role,
 			trade.Size,
 			trade.UsdcSize,
 			trade.Price,
@@ -212,11 +209,60 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) err
 			timeString(trade.Timestamp),
 			trade.Title,
 			trade.Slug,
-			trade.EventSlug,
 			trade.TransactionHash,
 			trade.Name,
 			trade.Pseudonym,
 			timeString(time.Now()), // Set inserted_at to now
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveGlobalTrades saves trades to the global_trades table for platform-wide monitoring.
+// Unlike SaveTrades, this doesn't require users to exist in the users table.
+func (s *Store) SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error {
+	if len(trades) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+        INSERT INTO global_trades (
+            id, user_address, asset, type, side, size, usdc_size, price, outcome,
+            timestamp, title, slug, transaction_hash, inserted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+    `)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, trade := range trades {
+		if _, err := stmt.ExecContext(
+			ctx,
+			trade.ID,
+			trade.UserID,
+			trade.MarketID,
+			trade.Type,
+			trade.Side,
+			trade.Size,
+			trade.UsdcSize,
+			trade.Price,
+			trade.Outcome,
+			timeString(trade.Timestamp),
+			trade.Title,
+			trade.Slug,
+			trade.TransactionHash,
+			timeString(time.Now()),
 		); err != nil {
 			return err
 		}
@@ -232,10 +278,10 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, user_id, market_id, subject, type, side, is_maker, size, usdc_size, price, outcome,
-               timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
+        SELECT id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
+               timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
         FROM user_trades
-        WHERE user_id = ?
+        WHERE user_address = ?
         ORDER BY datetime(timestamp) DESC
         LIMIT ?`, userID, limit)
 	if err != nil {
@@ -248,7 +294,7 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 		var trade models.TradeDetail
 		var subject string
 		var tradeType sql.NullString
-		var isMaker sql.NullInt64
+		var role sql.NullString
 		var usdcSize sql.NullFloat64
 		var ts, insertedAt sql.NullString
 		if err := rows.Scan(
@@ -258,7 +304,7 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 			&subject,
 			&tradeType,
 			&trade.Side,
-			&isMaker,
+			&role,
 			&trade.Size,
 			&usdcSize,
 			&trade.Price,
@@ -266,7 +312,6 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 			&ts,
 			&trade.Title,
 			&trade.Slug,
-			&trade.EventSlug,
 			&trade.TransactionHash,
 			&trade.Name,
 			&trade.Pseudonym,
@@ -280,8 +325,8 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 		} else {
 			trade.Type = "TRADE"
 		}
-		if isMaker.Valid {
-			trade.IsMaker = isMaker.Int64 == 1
+		if role.Valid {
+			trade.Role = role.String
 		}
 		if usdcSize.Valid {
 			trade.UsdcSize = usdcSize.Float64
@@ -580,6 +625,77 @@ func (s *Store) runMigrations(ctx context.Context) error {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_trades_user_time ON user_trades(user_id, datetime(timestamp) DESC);
+
+    -- Performance indexes for position aggregation
+    CREATE INDEX IF NOT EXISTS idx_trades_user_title_outcome ON user_trades(user_id, title, outcome);
+    CREATE INDEX IF NOT EXISTS idx_trades_user_side ON user_trades(user_id, side);
+
+    -- Analysis cache table for fast lookups
+    CREATE TABLE IF NOT EXISTS analysis_cache (
+        user_id TEXT PRIMARY KEY,
+        result_json TEXT NOT NULL,
+        computed_at TEXT NOT NULL,
+        trade_count INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    -- Materialized positions table for pre-computed aggregations
+    CREATE TABLE IF NOT EXISTS user_positions (
+        user_id TEXT NOT NULL,
+        market_outcome TEXT NOT NULL,
+        title TEXT,
+        outcome TEXT,
+        subject TEXT,
+        total_bought REAL,
+        total_sold REAL,
+        qty_bought REAL,
+        qty_sold REAL,
+        gain_loss REAL,
+        buy_count INTEGER,
+        sell_count INTEGER,
+        first_buy_at TEXT,
+        last_buy_at TEXT,
+        first_sell_at TEXT,
+        last_sell_at TEXT,
+        duration_mins REAL,
+        updated_at TEXT,
+        PRIMARY KEY (user_id, market_outcome),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_positions_user ON user_positions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_positions_gain_loss ON user_positions(user_id, gain_loss);
+
+    -- Global token map cache (avoid re-fetching all markets)
+    CREATE TABLE IF NOT EXISTS token_map_cache (
+        token_id TEXT PRIMARY KEY,
+        condition_id TEXT,
+        outcome TEXT,
+        title TEXT,
+        slug TEXT,
+        event_slug TEXT,
+        updated_at TEXT
+    );
+
+    -- Global trades table for platform-wide monitoring (no FK constraints)
+    CREATE TABLE IF NOT EXISTS global_trades (
+        id TEXT PRIMARY KEY,
+        user_address TEXT NOT NULL,
+        asset TEXT,
+        type TEXT,
+        side TEXT,
+        size REAL,
+        usdc_size REAL,
+        price REAL,
+        outcome TEXT,
+        timestamp TEXT,
+        title TEXT,
+        slug TEXT,
+        transaction_hash TEXT,
+        inserted_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_trades_user ON global_trades(user_address);
+    CREATE INDEX IF NOT EXISTS idx_global_trades_timestamp ON global_trades(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_global_trades_type ON global_trades(type);
     `
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -614,4 +730,287 @@ func timeString(t time.Time) interface{} {
 		return nil
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// SaveAnalysisCache stores computed analysis results for fast retrieval
+func (s *Store) SaveAnalysisCache(ctx context.Context, userID string, resultJSON string, tradeCount int) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO analysis_cache (user_id, result_json, computed_at, trade_count)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET
+			result_json = excluded.result_json,
+			computed_at = excluded.computed_at,
+			trade_count = excluded.trade_count
+	`, userID, resultJSON, time.Now().UTC().Format(time.RFC3339), tradeCount)
+	return err
+}
+
+// GetAnalysisCache retrieves cached analysis results if still valid
+func (s *Store) GetAnalysisCache(ctx context.Context, userID string) (string, int, time.Time, error) {
+	var resultJSON string
+	var tradeCount int
+	var computedAt sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT result_json, trade_count, computed_at
+		FROM analysis_cache
+		WHERE user_id = ?
+	`, userID).Scan(&resultJSON, &tradeCount, &computedAt)
+
+	if err != nil {
+		return "", 0, time.Time{}, err
+	}
+
+	var computed time.Time
+	if computedAt.Valid {
+		computed, _ = time.Parse(time.RFC3339, computedAt.String)
+	}
+
+	return resultJSON, tradeCount, computed, nil
+}
+
+// InvalidateAnalysisCache removes cached analysis for a user (call when trades change)
+func (s *Store) InvalidateAnalysisCache(ctx context.Context, userID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM analysis_cache WHERE user_id = ?`, userID)
+	return err
+}
+
+// GetUserTradeCount returns the number of trades for a user (for cache validation)
+func (s *Store) GetUserTradeCount(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_trades WHERE user_address = ?`, userID).Scan(&count)
+	return count, err
+}
+
+// SaveUserPositions stores pre-computed aggregated positions
+func (s *Store) SaveUserPositions(ctx context.Context, userID string, positions []models.AggregatedPosition) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete existing positions for this user
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_positions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO user_positions (
+			user_id, market_outcome, title, outcome, subject,
+			total_bought, total_sold, qty_bought, qty_sold, gain_loss,
+			buy_count, sell_count, first_buy_at, last_buy_at, first_sell_at, last_sell_at,
+			duration_mins, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, pos := range positions {
+		_, err := stmt.ExecContext(ctx,
+			userID, pos.MarketOutcome, pos.Title, pos.Outcome, string(pos.Subject),
+			pos.TotalBought, pos.TotalSold, pos.QtyBought, pos.QtySold, pos.GainLoss,
+			pos.BuyCount, pos.SellCount,
+			timeString(pos.FirstBuyAt), timeString(pos.LastBuyAt),
+			timeString(pos.FirstSellAt), timeString(pos.LastSellAt),
+			pos.DurationMins, now,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetUserPositions retrieves pre-computed aggregated positions
+func (s *Store) GetUserPositions(ctx context.Context, userID string) ([]models.AggregatedPosition, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT market_outcome, title, outcome, subject,
+			   total_bought, total_sold, qty_bought, qty_sold, gain_loss,
+			   buy_count, sell_count, first_buy_at, last_buy_at, first_sell_at, last_sell_at,
+			   duration_mins
+		FROM user_positions
+		WHERE user_id = ?
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var positions []models.AggregatedPosition
+	for rows.Next() {
+		var pos models.AggregatedPosition
+		var subject string
+		var firstBuy, lastBuy, firstSell, lastSell sql.NullString
+
+		err := rows.Scan(
+			&pos.MarketOutcome, &pos.Title, &pos.Outcome, &subject,
+			&pos.TotalBought, &pos.TotalSold, &pos.QtyBought, &pos.QtySold, &pos.GainLoss,
+			&pos.BuyCount, &pos.SellCount,
+			&firstBuy, &lastBuy, &firstSell, &lastSell,
+			&pos.DurationMins,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		pos.Subject = models.Subject(subject)
+		if firstBuy.Valid {
+			pos.FirstBuyAt, _ = time.Parse(time.RFC3339, firstBuy.String)
+		}
+		if lastBuy.Valid {
+			pos.LastBuyAt, _ = time.Parse(time.RFC3339, lastBuy.String)
+		}
+		if firstSell.Valid {
+			pos.FirstSellAt, _ = time.Parse(time.RFC3339, firstSell.String)
+		}
+		if lastSell.Valid {
+			pos.LastSellAt, _ = time.Parse(time.RFC3339, lastSell.String)
+		}
+
+		positions = append(positions, pos)
+	}
+
+	return positions, rows.Err()
+}
+
+// TokenInfo represents cached token information
+type TokenInfo struct {
+	TokenID     string
+	ConditionID string
+	Outcome     string
+	Title       string
+	Slug        string
+	EventSlug   string
+}
+
+// GetCachedTokens retrieves cached token info for the given token IDs
+func (s *Store) GetCachedTokens(ctx context.Context, tokenIDs []string) (map[string]TokenInfo, error) {
+	if len(tokenIDs) == 0 {
+		return make(map[string]TokenInfo), nil
+	}
+
+	// Build query with placeholders
+	placeholders := make([]string, len(tokenIDs))
+	args := make([]interface{}, len(tokenIDs))
+	for i, id := range tokenIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT token_id, condition_id, outcome, title, slug, event_slug
+		FROM token_map_cache
+		WHERE token_id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]TokenInfo)
+	for rows.Next() {
+		var info TokenInfo
+		if err := rows.Scan(&info.TokenID, &info.ConditionID, &info.Outcome, &info.Title, &info.Slug, &info.EventSlug); err != nil {
+			return nil, err
+		}
+		result[info.TokenID] = info
+	}
+
+	return result, rows.Err()
+}
+
+// SaveTokenCache stores token information in the cache
+func (s *Store) SaveTokenCache(ctx context.Context, tokens map[string]TokenInfo) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO token_map_cache (token_id, condition_id, outcome, title, slug, event_slug, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(token_id) DO UPDATE SET
+			condition_id = excluded.condition_id,
+			outcome = excluded.outcome,
+			title = excluded.title,
+			slug = excluded.slug,
+			event_slug = excluded.event_slug,
+			updated_at = excluded.updated_at
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, info := range tokens {
+		if _, err := stmt.ExecContext(ctx, info.TokenID, info.ConditionID, info.Outcome, info.Title, info.Slug, info.EventSlug, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetTokenInfo retrieves token information from the cache
+func (s *Store) GetTokenInfo(ctx context.Context, tokenID string) (*TokenInfo, error) {
+	var info TokenInfo
+	err := s.db.QueryRowContext(ctx, `
+		SELECT token_id, condition_id, outcome, title, slug
+		FROM token_map_cache
+		WHERE token_id = ?
+	`, tokenID).Scan(&info.TokenID, &info.ConditionID, &info.Outcome, &info.Title, &info.Slug)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// GetTokenByCondition retrieves token information for a condition ID (returns first match)
+func (s *Store) GetTokenByCondition(ctx context.Context, conditionID string) (*TokenInfo, error) {
+	var info TokenInfo
+	err := s.db.QueryRowContext(ctx, `
+		SELECT token_id, condition_id, outcome, title, slug
+		FROM token_map_cache
+		WHERE condition_id = ?
+		LIMIT 1
+	`, conditionID).Scan(&info.TokenID, &info.ConditionID, &info.Outcome, &info.Title, &info.Slug)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// Copy trading settings stubs (not implemented for SQLite Store)
+func (s *Store) GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error) {
+	return nil, nil
+}
+
+func (s *Store) SetUserCopySettings(ctx context.Context, settings UserCopySettings) error {
+	return nil
+}
+
+func (s *Store) GetAllUserCopySettings(ctx context.Context) ([]UserCopySettings, error) {
+	return nil, nil
+}
+
+func (s *Store) DeleteUserCopySettings(ctx context.Context, userAddress string) error {
+	return nil
+}
+
+// GetUserAnalyticsList stub (not implemented for SQLite Store)
+func (s *Store) GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error) {
+	return nil, 0, nil
 }

@@ -18,7 +18,7 @@ import (
 
 // Service handles business logic and coordinates between API, storage, and analyzer.
 type Service struct {
-	store          *storage.Store
+	store          storage.DataStore
 	processor      *analyzer.Processor
 	ranker         *analyzer.Ranker
 	cfg            *config.Config
@@ -54,7 +54,7 @@ type FilterOptions struct {
 }
 
 // NewService creates a new service
-func NewService(store *storage.Store, cfg *config.Config, apiClient *api.Client) *Service {
+func NewService(store storage.DataStore, cfg *config.Config, apiClient *api.Client) *Service {
 	ranker := analyzer.NewRanker(cfg.Scoring)
 	return &Service{
 		store:          store,
@@ -141,38 +141,84 @@ func (s *Service) GetUserTradesLive(ctx context.Context, userID string, limit in
 		limit = 500000
 	}
 
-	// Fetch all trades from the subgraph
-	log.Printf("[Subgraph] Fetching all trades for user %s", normalized)
-	events, err := s.subgraphClient.GetAllUserTrades(ctx, normalized)
-	if err != nil {
-		return nil, fmt.Errorf("subgraph fetch failed: %w", err)
-	}
-	log.Printf("[Subgraph] Fetched %d order filled events", len(events))
+	// Fetch trades, redemptions, and profile concurrently
+	log.Printf("[Subgraph] Fetching all data for user %s concurrently", normalized)
 
-	// Fetch user profile info from REST API (name, pseudonym, profileImage)
-	var profileName, profilePseudonym string
-	if s.apiClient != nil {
+	type tradesResult struct {
+		events []api.OrderFilledEvent
+		err    error
+	}
+	type redemptionsResult struct {
+		redemptions []api.DataTrade
+		err         error
+	}
+	type profileResult struct {
+		name      string
+		pseudonym string
+	}
+
+	tradesCh := make(chan tradesResult, 1)
+	redemptionsCh := make(chan redemptionsResult, 1)
+	profileCh := make(chan profileResult, 1)
+
+	// Fetch trades from subgraph
+	go func() {
+		events, err := s.subgraphClient.GetAllUserTrades(ctx, normalized)
+		tradesCh <- tradesResult{events: events, err: err}
+	}()
+
+	// Fetch redemptions from REST API
+	go func() {
+		if s.apiClient == nil {
+			redemptionsCh <- redemptionsResult{redemptions: []api.DataTrade{}}
+			return
+		}
+		redemptions, err := s.apiClient.GetRedemptions(ctx, normalized)
+		if err != nil {
+			log.Printf("[API] Warning: failed to fetch redemptions: %v", err)
+			redemptionsCh <- redemptionsResult{redemptions: []api.DataTrade{}}
+		} else {
+			redemptionsCh <- redemptionsResult{redemptions: redemptions}
+		}
+	}()
+
+	// Fetch profile from REST API
+	go func() {
+		if s.apiClient == nil {
+			profileCh <- profileResult{}
+			return
+		}
 		profileTrades, err := s.apiClient.GetActivity(ctx, api.TradeQuery{
 			User:  normalized,
 			Limit: 1,
 		})
 		if err == nil && len(profileTrades) > 0 {
-			profileName = profileTrades[0].Name
-			profilePseudonym = profileTrades[0].Pseudonym
-			log.Printf("[Subgraph] Got profile info: name=%s, pseudonym=%s", profileName, profilePseudonym)
-		}
-	}
-
-	// Fetch REDEEM activities from REST API
-	var redemptions []api.DataTrade
-	if s.apiClient != nil {
-		redemptions, err = s.apiClient.GetRedemptions(ctx, normalized)
-		if err != nil {
-			log.Printf("[API] Warning: failed to fetch redemptions: %v", err)
-			redemptions = []api.DataTrade{}
+			profileCh <- profileResult{
+				name:      profileTrades[0].Name,
+				pseudonym: profileTrades[0].Pseudonym,
+			}
 		} else {
-			log.Printf("[API] Fetched %d redemptions", len(redemptions))
+			profileCh <- profileResult{}
 		}
+	}()
+
+	// Collect results
+	tradesRes := <-tradesCh
+	if tradesRes.err != nil {
+		return nil, fmt.Errorf("subgraph fetch failed: %w", tradesRes.err)
+	}
+	events := tradesRes.events
+	log.Printf("[Subgraph] Fetched %d order filled events", len(events))
+
+	redemptionsRes := <-redemptionsCh
+	redemptions := redemptionsRes.redemptions
+	log.Printf("[API] Fetched %d redemptions", len(redemptions))
+
+	profileRes := <-profileCh
+	profileName := profileRes.name
+	profilePseudonym := profileRes.pseudonym
+	if profileName != "" || profilePseudonym != "" {
+		log.Printf("[Subgraph] Got profile info: name=%s, pseudonym=%s", profileName, profilePseudonym)
 	}
 
 	if len(events) == 0 && len(redemptions) == 0 {
@@ -183,13 +229,69 @@ func (s *Service) GetUserTradesLive(ctx context.Context, userID string, limit in
 	tokenIDs := api.GetUniqueTokenIDs(events)
 	log.Printf("[Subgraph] Found %d unique tokens to look up", len(tokenIDs))
 
-	// Build token -> market info map
-	tokenMap, err := s.subgraphClient.BuildTokenMap(ctx, tokenIDs)
+	// Build token -> market info map with caching
+	tokenMap := make(map[string]api.TokenInfo)
+
+	// First, check database cache for tokens
+	cachedTokens, err := s.store.GetCachedTokens(ctx, tokenIDs)
 	if err != nil {
-		log.Printf("[Subgraph] Warning: token map build failed: %v (trades will have limited info)", err)
-		tokenMap = make(map[string]api.TokenInfo)
+		log.Printf("[Subgraph] Warning: failed to get cached tokens: %v", err)
+		cachedTokens = make(map[string]storage.TokenInfo)
 	}
-	log.Printf("[Subgraph] Built token map with %d entries", len(tokenMap))
+
+	// Convert cached tokens to api.TokenInfo and find missing ones
+	var missingTokenIDs []string
+	for _, id := range tokenIDs {
+		if cached, ok := cachedTokens[id]; ok {
+			tokenMap[id] = api.TokenInfo{
+				TokenID:     cached.TokenID,
+				ConditionID: cached.ConditionID,
+				Outcome:     cached.Outcome,
+				Title:       cached.Title,
+				Slug:        cached.Slug,
+				EventSlug:   cached.EventSlug,
+			}
+		} else {
+			missingTokenIDs = append(missingTokenIDs, id)
+		}
+	}
+
+	log.Printf("[Subgraph] Found %d tokens in cache, %d missing", len(cachedTokens), len(missingTokenIDs))
+
+	// Only fetch missing tokens from API
+	if len(missingTokenIDs) > 0 {
+		newTokens, err := s.subgraphClient.BuildTokenMap(ctx, missingTokenIDs)
+		if err != nil {
+			log.Printf("[Subgraph] Warning: token map build failed: %v (some trades will have limited info)", err)
+		} else {
+			// Add new tokens to tokenMap and save to cache
+			toCache := make(map[string]storage.TokenInfo)
+			for id, info := range newTokens {
+				tokenMap[id] = info
+				toCache[id] = storage.TokenInfo{
+					TokenID:     info.TokenID,
+					ConditionID: info.ConditionID,
+					Outcome:     info.Outcome,
+					Title:       info.Title,
+					Slug:        info.Slug,
+					EventSlug:   info.EventSlug,
+				}
+			}
+
+			// Save to cache in background
+			if len(toCache) > 0 {
+				go func() {
+					if err := s.store.SaveTokenCache(context.Background(), toCache); err != nil {
+						log.Printf("[Subgraph] Warning: failed to cache tokens: %v", err)
+					} else {
+						log.Printf("[Subgraph] Cached %d new tokens", len(toCache))
+					}
+				}()
+			}
+		}
+	}
+
+	log.Printf("[Subgraph] Built token map with %d entries (cached: %d, fetched: %d)", len(tokenMap), len(cachedTokens), len(missingTokenIDs))
 
 	// Convert events to TradeDetail with market info
 	var trades []models.TradeDetail
@@ -209,14 +311,49 @@ func (s *Service) GetUserTradesLive(ctx context.Context, userID string, limit in
 		}
 	}
 
-	// Add redemptions
-	for _, redeem := range redemptions {
-		trade := s.toTradeDetail(redeem)
+	// Add redemptions - enrich with market info from conditionId
+	if len(redemptions) > 0 {
+		// Collect unique conditionIds
+		conditionIDs := make(map[string]bool)
+		for _, r := range redemptions {
+			if r.ConditionID != "" {
+				conditionIDs[r.ConditionID] = true
+			}
+		}
 
-		// Deduplicate by transaction hash
-		if !seenIDs[trade.ID] {
-			seenIDs[trade.ID] = true
-			trades = append(trades, trade)
+		// Look up token info by conditionId
+		conditionInfoMap := make(map[string]*storage.TokenInfo)
+		for conditionID := range conditionIDs {
+			info, err := s.store.GetTokenByCondition(ctx, conditionID)
+			if err == nil && info != nil {
+				conditionInfoMap[conditionID] = info
+			}
+		}
+
+		log.Printf("[Service] Enriched %d/%d redemption conditionIds with market info", len(conditionInfoMap), len(conditionIDs))
+
+		// Convert and enrich redemptions
+		for _, redeem := range redemptions {
+			// Enrich with market info if available
+			if info, ok := conditionInfoMap[redeem.ConditionID]; ok {
+				redeem.Asset = info.TokenID
+				redeem.Outcome = info.Outcome
+				if redeem.Slug == "" {
+					redeem.Slug = info.Slug
+				}
+			}
+			// Set side for redemptions (they're effectively sells)
+			if redeem.Side == "" {
+				redeem.Side = "SELL"
+			}
+
+			trade := s.toTradeDetail(redeem)
+
+			// Deduplicate by transaction hash
+			if !seenIDs[trade.ID] {
+				seenIDs[trade.ID] = true
+				trades = append(trades, trade)
+			}
 		}
 	}
 
@@ -231,35 +368,6 @@ func (s *Service) GetUserTradesLive(ctx context.Context, userID string, limit in
 	}
 
 	log.Printf("[Service] Converted %d total activities (trades + redemptions)", len(trades))
-
-	// Save trades to DB (this sets InsertedAt for new trades, keeps original for existing)
-	if err := s.store.SaveTrades(ctx, trades); err != nil {
-		log.Printf("[Service] Warning: failed to save trades to DB: %v", err)
-		// Continue anyway - we still have the live data
-	} else {
-		log.Printf("[Service] Saved %d trades to DB", len(trades))
-
-		// Load from DB to get InsertedAt values
-		dbTrades, err := s.store.ListUserTrades(ctx, normalized, limit)
-		if err != nil {
-			log.Printf("[Service] Warning: failed to reload trades from DB: %v", err)
-		} else {
-			// Build map of ID -> InsertedAt from DB
-			insertedAtMap := make(map[string]time.Time)
-			for _, t := range dbTrades {
-				if !t.InsertedAt.IsZero() {
-					insertedAtMap[t.ID] = t.InsertedAt
-				}
-			}
-
-			// Merge InsertedAt into our trades
-			for i := range trades {
-				if insertedAt, ok := insertedAtMap[trades[i].ID]; ok {
-					trades[i].InsertedAt = insertedAt
-				}
-			}
-		}
-	}
 
 	return trades, nil
 }
@@ -412,66 +520,46 @@ type ImportUserResult struct {
 }
 
 // ImportTopUsers fetches all historical trades for a list of users and stores them.
+// Uses parallel processing with a worker pool for maximum speed.
 func (s *Service) ImportTopUsers(ctx context.Context, addresses []string) ([]ImportUserResult, error) {
 	if s.apiClient == nil {
 		return nil, fmt.Errorf("API client not available")
 	}
 
-	results := make([]ImportUserResult, 0, len(addresses))
+	// Worker pool configuration
+	const maxWorkers = 5 // Process up to 5 users concurrently
 
-	for _, addr := range addresses {
-		result := ImportUserResult{Address: addr}
-		start := time.Now()
+	resultsChan := make(chan ImportUserResult, len(addresses))
+	addressChan := make(chan string, len(addresses))
 
-		normalized := normalizeUserID(addr)
-		if normalized == "" {
-			result.ErrorMsg = "invalid address"
-			result.DurationSec = time.Since(start).Seconds()
-			results = append(results, result)
-			continue
-		}
-
-		// Fetch all trades for this user (up to 500,000)
-		trades, err := s.GetUserTradesLive(ctx, normalized, 500000)
-		if err != nil {
-			result.ErrorMsg = err.Error()
-			result.DurationSec = time.Since(start).Seconds()
-			results = append(results, result)
-			continue
-		}
-
-		// Fetch closed positions for PNL calculation
-		positions, posErr := s.fetchClosedPositions(ctx, normalized)
-
-		// Build user profile from trades and positions
-		user := s.buildUserFromTrades(normalized, trades, positions)
-
-		// Save user profile first (required for foreign key constraint)
-		if err := s.store.SaveUserSnapshot(ctx, user); err != nil {
-			result.ErrorMsg = fmt.Sprintf("failed to save user profile: %v", err)
-			result.DurationSec = time.Since(start).Seconds()
-			results = append(results, result)
-			continue
-		}
-
-		// Now save trades (foreign key constraint satisfied)
-		if len(trades) > 0 {
-			if err := s.store.SaveTrades(ctx, trades); err != nil {
-				result.ErrorMsg = fmt.Sprintf("failed to save trades: %v", err)
-				result.DurationSec = time.Since(start).Seconds()
-				results = append(results, result)
-				continue
+	// Start worker pool
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for addr := range addressChan {
+				result := s.importSingleUser(ctx, addr)
+				resultsChan <- result
 			}
-		}
+		}()
+	}
 
-		if posErr != nil {
-			// Don't fail the import if positions fetch failed
-			result.ErrorMsg = fmt.Sprintf("trades saved but positions fetch failed: %v", posErr)
-		}
+	// Send all addresses to workers
+	for _, addr := range addresses {
+		addressChan <- addr
+	}
+	close(addressChan)
 
-		result.Success = true
-		result.TradeCount = len(trades)
-		result.DurationSec = time.Since(start).Seconds()
+	// Wait for all workers to finish
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect results
+	results := make([]ImportUserResult, 0, len(addresses))
+	for result := range resultsChan {
 		results = append(results, result)
 	}
 
@@ -479,6 +567,98 @@ func (s *Service) ImportTopUsers(ctx context.Context, addresses []string) ([]Imp
 	s.InvalidateCaches()
 
 	return results, nil
+}
+
+// PrePopulateTokens fetches all tokens from CLOB API and saves them to database
+// This should be run once to pre-populate the token cache for fast lookups
+func (s *Service) PrePopulateTokens(ctx context.Context) (int, error) {
+	if s.subgraphClient == nil {
+		return 0, fmt.Errorf("subgraph client unavailable")
+	}
+
+	log.Printf("[Service] Starting token pre-population from CLOB API...")
+
+	// Fetch all tokens
+	tokenMap, err := s.subgraphClient.FetchAllTokensFromCLOB(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("fetch tokens: %w", err)
+	}
+
+	// Convert to storage format and save
+	toCache := make(map[string]storage.TokenInfo)
+	for id, info := range tokenMap {
+		toCache[id] = storage.TokenInfo{
+			TokenID:     info.TokenID,
+			ConditionID: info.ConditionID,
+			Outcome:     info.Outcome,
+			Title:       info.Title,
+			Slug:        info.Slug,
+			EventSlug:   info.EventSlug,
+		}
+	}
+
+	if err := s.store.SaveTokenCache(ctx, toCache); err != nil {
+		return 0, fmt.Errorf("cache tokens: %w", err)
+	}
+
+	log.Printf("[Service] Pre-populated %d tokens into database", len(toCache))
+	return len(toCache), nil
+}
+
+// importSingleUser handles the import logic for a single user (extracted for parallel execution)
+func (s *Service) importSingleUser(ctx context.Context, addr string) ImportUserResult {
+	result := ImportUserResult{Address: addr}
+	start := time.Now()
+
+	normalized := normalizeUserID(addr)
+	if normalized == "" {
+		result.ErrorMsg = "invalid address"
+		result.DurationSec = time.Since(start).Seconds()
+		return result
+	}
+
+	// Fetch all trades for this user (up to 500,000)
+	trades, err := s.GetUserTradesLive(ctx, normalized, 500000)
+	if err != nil {
+		result.ErrorMsg = err.Error()
+		result.DurationSec = time.Since(start).Seconds()
+		return result
+	}
+
+	// Fetch closed positions for PNL calculation
+	positions, posErr := s.fetchClosedPositions(ctx, normalized)
+
+	// Build user profile from trades and positions
+	user := s.buildUserFromTrades(normalized, trades, positions)
+
+	// Save user profile first (required for foreign key constraint)
+	if err := s.store.SaveUserSnapshot(ctx, user); err != nil {
+		result.ErrorMsg = fmt.Sprintf("failed to save user profile: %v", err)
+		result.DurationSec = time.Since(start).Seconds()
+		return result
+	}
+
+	// Now save trades (foreign key constraint satisfied)
+	if len(trades) > 0 {
+		if err := s.store.SaveTrades(ctx, trades); err != nil {
+			result.ErrorMsg = fmt.Sprintf("failed to save trades: %v", err)
+			result.DurationSec = time.Since(start).Seconds()
+			return result
+		}
+	}
+
+	if posErr != nil {
+		// Don't fail the import if positions fetch failed
+		result.ErrorMsg = fmt.Sprintf("trades saved but positions fetch failed: %v", posErr)
+	}
+
+	result.Success = true
+	result.TradeCount = len(trades)
+	result.DurationSec = time.Since(start).Seconds()
+
+	log.Printf("[Import] User %s: %d trades imported in %.2fs", normalized[:8], len(trades), result.DurationSec)
+
+	return result
 }
 
 func (s *Service) fetchClosedPositions(ctx context.Context, userAddress string) ([]api.ClosedPosition, error) {
@@ -754,6 +934,43 @@ func (s *Service) DeleteUser(ctx context.Context, userID string) error {
 	return nil
 }
 
+// GetUserCopySettings returns the copy trading settings for a user
+func (s *Service) GetUserCopySettings(ctx context.Context, userAddress string) (*storage.UserCopySettings, error) {
+	normalized := normalizeUserID(userAddress)
+	if normalized == "" {
+		return nil, fmt.Errorf("invalid user address")
+	}
+	return s.store.GetUserCopySettings(ctx, normalized)
+}
+
+// SetUserCopySettings updates the copy trading settings for a user
+func (s *Service) SetUserCopySettings(ctx context.Context, settings storage.UserCopySettings) error {
+	settings.UserAddress = normalizeUserID(settings.UserAddress)
+	if settings.UserAddress == "" {
+		return fmt.Errorf("invalid user address")
+	}
+	return s.store.SetUserCopySettings(ctx, settings)
+}
+
+// GetAllUserCopySettings returns all user copy trading settings
+func (s *Service) GetAllUserCopySettings(ctx context.Context) ([]storage.UserCopySettings, error) {
+	return s.store.GetAllUserCopySettings(ctx)
+}
+
+// DeleteUserCopySettings removes custom settings for a user
+func (s *Service) DeleteUserCopySettings(ctx context.Context, userAddress string) error {
+	normalized := normalizeUserID(userAddress)
+	if normalized == "" {
+		return fmt.Errorf("invalid user address")
+	}
+	return s.store.DeleteUserCopySettings(ctx, normalized)
+}
+
+// GetUserAnalyticsList returns filtered and sorted user analytics
+func (s *Service) GetUserAnalyticsList(ctx context.Context, filter storage.UserAnalyticsFilter) ([]storage.UserAnalyticsRecord, int, error) {
+	return s.store.GetUserAnalyticsList(ctx, filter)
+}
+
 func (s *Service) applyFilters(users []models.User, subject models.Subject, filters FilterOptions) []models.User {
 	filtered := make([]models.User, 0, len(users))
 	for _, user := range users {
@@ -857,24 +1074,140 @@ func (s *Service) toTradeDetail(tr api.DataTrade) models.TradeDetail {
 		tradeID = fmt.Sprintf("%s-%s", tr.TransactionHash, tr.ConditionID)
 	}
 
+	// Determine role from IsMaker or trade type
+	role := "TAKER"
+	if tradeType == "REDEEM" {
+		role = "REDEEM"
+	} else if tr.IsMaker {
+		role = "MAKER"
+	}
+
 	return models.TradeDetail{
 		ID:              tradeID,
 		UserID:          strings.ToLower(tr.ProxyWallet),
-		MarketID:        tr.ConditionID,
+		MarketID:        tr.Asset, // Use token_id (Asset) to match global_trades
 		Subject:         subject,
 		Type:            tradeType,
 		Side:            strings.ToUpper(tr.Side),
-		IsMaker:         tr.IsMaker,
+		Role:            role,
 		Size:            tr.Size.Float64(),
 		UsdcSize:        tr.UsdcSize.Float64(),
 		Price:           tr.Price.Float64(),
 		Outcome:         tr.Outcome,
 		Title:           tr.Title,
 		Slug:            tr.Slug,
-		EventSlug:       tr.EventSlug,
 		TransactionHash: tr.TransactionHash,
 		Name:            tr.Name,
 		Pseudonym:       tr.Pseudonym,
 		Timestamp:       time.Unix(tr.Timestamp, 0).UTC(),
 	}
+}
+
+// FetchIncrementalTrades fetches all new trades for a user since a given timestamp.
+// This includes both maker and taker trades from the subgraph, plus REDEEM activities.
+// Used by the incremental sync worker to ensure complete data capture.
+func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sinceTimestamp int64) ([]models.TradeDetail, error) {
+	normalized := normalizeUserID(userID)
+	if normalized == "" {
+		return nil, fmt.Errorf("user id required")
+	}
+
+	var allTrades []models.TradeDetail
+
+	// Fetch trades from subgraph (both maker and taker)
+	if s.subgraphClient != nil {
+		events, err := s.subgraphClient.GetUserTradesSince(ctx, normalized, sinceTimestamp)
+		if err != nil {
+			return nil, fmt.Errorf("fetch trades from subgraph: %w", err)
+		}
+
+		if len(events) > 0 {
+			// Get unique token IDs for market lookup
+			tokenIDs := api.GetUniqueTokenIDs(events)
+
+			// Build token map with caching
+			tokenMap := make(map[string]api.TokenInfo)
+
+			// Check cache first
+			cachedTokens, err := s.store.GetCachedTokens(ctx, tokenIDs)
+			if err != nil {
+				cachedTokens = make(map[string]storage.TokenInfo)
+			}
+
+			var missingTokenIDs []string
+			for _, id := range tokenIDs {
+				if cached, ok := cachedTokens[id]; ok {
+					tokenMap[id] = api.TokenInfo{
+						TokenID:     cached.TokenID,
+						ConditionID: cached.ConditionID,
+						Outcome:     cached.Outcome,
+						Title:       cached.Title,
+						Slug:        cached.Slug,
+						EventSlug:   cached.EventSlug,
+					}
+				} else {
+					missingTokenIDs = append(missingTokenIDs, id)
+				}
+			}
+
+			// Fetch missing tokens from API
+			if len(missingTokenIDs) > 0 {
+				newTokens, err := s.subgraphClient.BuildTokenMap(ctx, missingTokenIDs)
+				if err != nil {
+					log.Printf("[Service] Warning: failed to build token map: %v", err)
+				} else {
+					for id, info := range newTokens {
+						tokenMap[id] = info
+					}
+					// Save to cache in background
+					go func(tokens map[string]api.TokenInfo) {
+						cacheTokens := make(map[string]storage.TokenInfo)
+						for id, info := range tokens {
+							cacheTokens[id] = storage.TokenInfo{
+								TokenID:     info.TokenID,
+								ConditionID: info.ConditionID,
+								Outcome:     info.Outcome,
+								Title:       info.Title,
+								Slug:        info.Slug,
+								EventSlug:   info.EventSlug,
+							}
+						}
+						if err := s.store.SaveTokenCache(context.Background(), cacheTokens); err != nil {
+							log.Printf("[Service] Warning: failed to cache tokens: %v", err)
+						}
+					}(newTokens)
+				}
+			}
+
+			// Convert events to TradeDetail
+			for _, event := range events {
+				trade := event.ConvertToDataTradeWithInfo(tokenMap, normalized)
+				detail := s.toTradeDetail(trade)
+				allTrades = append(allTrades, detail)
+			}
+		}
+	}
+
+	// Fetch REDEEM activities from REST API
+	if s.apiClient != nil {
+		redemptions, err := s.apiClient.GetActivity(ctx, api.TradeQuery{
+			User:   normalized,
+			Limit:  500,
+			Types:  []string{"REDEEM"},
+			After:  sinceTimestamp,
+		})
+		if err != nil {
+			log.Printf("[Service] Warning: failed to fetch redemptions: %v", err)
+		} else {
+			for _, redeem := range redemptions {
+				detail := s.toTradeDetail(redeem)
+				allTrades = append(allTrades, detail)
+			}
+			if len(redemptions) > 0 {
+				log.Printf("[Service] Fetched %d redemptions since %d", len(redemptions), sinceTimestamp)
+			}
+		}
+	}
+
+	return allTrades, nil
 }

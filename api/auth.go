@@ -67,19 +67,20 @@ func (a *Auth) SignRequest() (map[string]string, error) {
 	timestamp := time.Now().Unix()
 	nonce := int64(0)
 
-	// EIP-712 domain for Polymarket
+	// EIP-712 domain for Polymarket CLOB
 	chainID := math.NewHexOrDecimal256(137) // Polygon mainnet
 	domain := apitypes.TypedDataDomain{
-		Name:    "Polymarket",
+		Name:    "ClobAuthDomain",
 		Version: "1",
 		ChainId: chainID,
 	}
 
-	// EIP-712 message structure
+	// EIP-712 ClobAuth message structure
 	message := map[string]interface{}{
 		"address":   a.address.Hex(),
-		"timestamp": timestamp,
-		"nonce":     nonce,
+		"timestamp": strconv.FormatInt(timestamp, 10), // timestamp as string
+		"nonce":     math.NewHexOrDecimal256(nonce),
+		"message":   "This message attests that I control the given wallet",
 	}
 
 	typedData := apitypes.TypedData{
@@ -89,13 +90,14 @@ func (a *Auth) SignRequest() (map[string]string, error) {
 				{Name: "version", Type: "string"},
 				{Name: "chainId", Type: "uint256"},
 			},
-			"Message": []apitypes.Type{
+			"ClobAuth": []apitypes.Type{
 				{Name: "address", Type: "address"},
-				{Name: "timestamp", Type: "uint256"},
+				{Name: "timestamp", Type: "string"},
 				{Name: "nonce", Type: "uint256"},
+				{Name: "message", Type: "string"},
 			},
 		},
-		PrimaryType: "Message",
+		PrimaryType: "ClobAuth",
 		Domain:      domain,
 		Message:     message,
 	}

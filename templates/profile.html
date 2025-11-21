@@ -338,6 +338,7 @@
         <div class="tabs">
             <button class="tab active" onclick="switchTab('trades')">Trade History</button>
             <button class="tab" onclick="switchTab('positions')">Positions Analysis</button>
+            <button class="tab" onclick="switchTab('analysis')">Behavioral Analysis</button>
         </div>
 
         <!-- Trades Tab -->
@@ -510,6 +511,40 @@
                 </div>
             </div>
         </div>
+
+        <!-- Analysis Tab -->
+        <div id="analysis-tab" class="tab-content">
+            <div id="analysis-loading" style="text-align: center; padding: 20px;">
+                <p>Click to load behavioral analysis...</p>
+                <button onclick="loadAnalysis()" class="btn-primary" style="padding: 10px 20px; cursor: pointer;">Load Analysis</button>
+            </div>
+            <div id="analysis-content" style="display: none;">
+                <div id="analysis-summary" style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;"></div>
+                <div class="table-container">
+                    <table id="analysis-table" class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Pattern</th>
+                                <th>Metric Type</th>
+                                <th>Significant</th>
+                                <th>Type</th>
+                                <th>D1</th>
+                                <th>D2</th>
+                                <th>D3</th>
+                                <th>D4</th>
+                                <th>D5</th>
+                                <th>D6</th>
+                                <th>D7</th>
+                                <th>D8</th>
+                                <th>D9</th>
+                                <th>D10</th>
+                            </tr>
+                        </thead>
+                        <tbody id="analysis-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -518,6 +553,7 @@
         let allRows = [];
         let visibleRows = [];
         let positionsLoaded = false;
+        let analysisLoaded = false;
         const userId = '{{.user.ID}}';
         let positionsData = [];
         let currentSort = { field: 'gain_loss', dir: 'desc' };
@@ -617,6 +653,75 @@
 
         function truncate(str, len) {
             return str && str.length > len ? str.substring(0, len) + '...' : str;
+        }
+
+        // Load behavioral analysis
+        async function loadAnalysis() {
+            if (analysisLoaded) return;
+
+            document.getElementById('analysis-loading').innerHTML = '<p>Loading analysis...</p>';
+
+            try {
+                const response = await fetch(`/api/users/${userId}/analysis`);
+                const data = await response.json();
+
+                // Show summary
+                const summary = document.getElementById('analysis-summary');
+                summary.innerHTML = `
+                    <strong>Analysis Summary</strong><br>
+                    Total Positions: ${data.total_positions} |
+                    Wins: ${data.win_count} |
+                    Losses: ${data.loss_count} |
+                    Total P&L: $${data.total_pnl.toFixed(2)}
+                `;
+
+                // Build table
+                const tbody = document.getElementById('analysis-body');
+                tbody.innerHTML = '';
+
+                data.patterns.forEach(pattern => {
+                    const row = document.createElement('tr');
+
+                    // Pattern name
+                    let html = `<td><strong>${pattern.name}</strong></td>`;
+                    html += `<td style="font-size: 11px;">${pattern.metric_type}</td>`;
+
+                    // Significant
+                    html += `<td style="text-align: center;">${pattern.significant ? '<span style="color: green;">✓</span>' : '<span style="color: #999;">-</span>'}</td>`;
+
+                    // Pattern type (win/loss)
+                    if (pattern.pattern_type === 'win') {
+                        html += `<td style="color: green; font-weight: bold;">WIN</td>`;
+                    } else if (pattern.pattern_type === 'loss') {
+                        html += `<td style="color: red; font-weight: bold;">LOSS</td>`;
+                    } else {
+                        html += `<td style="color: #999;">-</td>`;
+                    }
+
+                    // Deciles (D1-D10)
+                    for (let i = 1; i <= 10; i++) {
+                        const decile = pattern.deciles.find(d => d.number === i);
+                        if (decile) {
+                            const pnl = decile.avg_pnl;
+                            const color = pnl > 0 ? '#28a745' : (pnl < 0 ? '#dc3545' : '#666');
+                            const bgColor = pnl > 50 ? '#d4edda' : (pnl < -50 ? '#f8d7da' : 'transparent');
+                            html += `<td style="text-align: right; color: ${color}; background: ${bgColor}; font-size: 11px;" title="Count: ${decile.count}, Range: ${decile.min_metric.toFixed(2)}-${decile.max_metric.toFixed(2)}">$${pnl.toFixed(0)}</td>`;
+                        } else {
+                            html += `<td style="text-align: center; color: #999;">-</td>`;
+                        }
+                    }
+
+                    row.innerHTML = html;
+                    tbody.appendChild(row);
+                });
+
+                document.getElementById('analysis-loading').style.display = 'none';
+                document.getElementById('analysis-content').style.display = 'block';
+                analysisLoaded = true;
+
+            } catch (error) {
+                document.getElementById('analysis-loading').innerHTML = `<p style="color: red;">Error loading analysis: ${error.message}</p>`;
+            }
         }
 
         // Sort positions by clicking header

@@ -420,230 +420,155 @@
         </div>
 
         <div class="tabs">
-            <button class="tab active" onclick="switchTab('leaderboard')">Leaderboard</button>
+            <button class="tab active" onclick="switchTab('analytics')">Analytics</button>
             <button class="tab" onclick="switchTab('myusers')">My Users</button>
-            <button class="tab" onclick="switchTab('import')">Import Top Users</button>
         </div>
 
-        <!-- LEADERBOARD TAB -->
-        <div id="tab-leaderboard" class="tab-content active">
+        <!-- ANALYTICS TAB -->
+        <div id="tab-analytics" class="tab-content active">
         <div class="filters">
             <div class="filter-group">
                 <div class="filter-item">
-                    <label for="subject">Subject</label>
-                    <select id="subject">
-                        <option value="all">All Subjects</option>
-                        <option value="politics">Politics</option>
-                        <option value="sports">Sports</option>
-                        <option value="finance">Finance</option>
-                        <option value="geopolitics">Geopolitics</option>
-                        <option value="tech">Tech</option>
-                        <option value="culture">Culture</option>
-                        <option value="economy">Economy</option>
-                    </select>
+                    <label for="minBets">Min Bets</label>
+                    <input type="number" id="minBets" min="0" step="10" placeholder="e.g. 10">
                 </div>
                 <div class="filter-item">
-                    <label for="limit">Limit</label>
-                    <select id="limit">
-                        <option value="100">Top 100</option>
-                        <option value="500">Top 500</option>
-                        <option value="1000">Top 1,000</option>
-                        <option value="5000">Top 5,000</option>
-                        <option value="10000" selected>Top 10,000</option>
-                    </select>
+                    <label for="minPnl">Min P&L ($)</label>
+                    <input type="number" id="minPnl" step="100" placeholder="e.g. 100">
                 </div>
-                <div class="filter-item" style="align-self: flex-end;">
-                    <button class="btn" onclick="loadUsers()">Load Traders</button>
+                <div class="filter-item">
+                    <label for="maxPnl">Max P&L ($)</label>
+                    <input type="number" id="maxPnl" step="100" placeholder="e.g. 10000">
+                </div>
+                <div class="filter-item">
+                    <label for="analyticsLimit">Limit</label>
+                    <select id="analyticsLimit">
+                        <option value="100" selected>100</option>
+                        <option value="500">500</option>
+                        <option value="1000">1,000</option>
+                        <option value="5000">5,000</option>
+                    </select>
                 </div>
             </div>
-            <div class="filter-group" style="margin-top: 20px;">
+            <div class="filter-group" style="margin-top: 15px;">
                 <div class="filter-item">
-                    <label for="minTrades">Min Trades</label>
-                    <input type="number" id="minTrades" min="0" step="10" placeholder="e.g. 100">
-                </div>
-                <div class="filter-item">
-                    <label for="minWinRate">Min Win Rate (%)</label>
-                    <input type="number" id="minWinRate" min="0" max="100" step="1" placeholder="e.g. 55">
-                </div>
-                <div class="filter-item">
-                    <label for="minConsistency">Min Consistency (%)</label>
-                    <input type="number" id="minConsistency" min="0" max="100" step="1" placeholder="e.g. 60">
-                </div>
-                <div class="filter-item">
-                    <label for="minPNL">Min P&L ($)</label>
-                    <input type="number" id="minPNL" step="50" placeholder="e.g. 500">
+                    <label>&nbsp;</label>
+                    <div class="filter-toggle">
+                        <input type="checkbox" id="hideBots">
+                        <label for="hideBots" style="font-weight:500;color:#495057;">Hide bots</label>
+                    </div>
                 </div>
                 <div class="filter-item">
                     <label>&nbsp;</label>
                     <div class="filter-toggle">
-                        <input type="checkbox" id="hideFlags">
-                        <label for="hideFlags" style="font-weight:500;color:#495057;">Hide red-flagged traders</label>
+                        <input type="checkbox" id="dataComplete">
+                        <label for="dataComplete" style="font-weight:500;color:#495057;">Complete data only</label>
                     </div>
+                </div>
+                <div class="filter-item" style="align-self: flex-end;">
+                    <button class="btn" onclick="loadAnalytics()">Load Analytics</button>
                 </div>
             </div>
         </div>
 
-        <div id="stats" class="stats" style="display: none;">
+        <div id="analytics-stats" class="stats" style="display: none;">
             <div class="stat-card">
-                <h3>Total Traders</h3>
-                <div class="value" id="stat-count">0</div>
+                <h3>Total Users</h3>
+                <div class="value" id="analytics-stat-count">0</div>
             </div>
             <div class="stat-card">
-                <h3>Average Win Rate</h3>
-                <div class="value" id="stat-winrate">0%</div>
-            </div>
-            <div class="stat-card">
-                <h3>Average Trades</h3>
-                <div class="value" id="stat-trades">0</div>
+                <h3>Showing</h3>
+                <div class="value" id="analytics-stat-showing">0</div>
             </div>
         </div>
 
-        <div class="loading" id="loading">
-            <p>Loading traders...</p>
+        <div class="loading" id="analytics-loading">
+            <p>Loading analytics...</p>
         </div>
 
-        <div id="error" class="error" style="display: none;"></div>
+        <div id="analytics-error" class="error" style="display: none;"></div>
 
-        <div class="table-container">
-            <table id="users-table">
+        <div class="table-container" style="overflow-x: auto;">
+            <table id="analytics-table" style="min-width: 1800px;">
                 <thead>
                     <tr>
-                        <th class="sortable" data-sort="rank" onclick="sortTable('rank')">Rank</th>
-                        <th class="sortable" data-sort="username" onclick="sortTable('username')">Username</th>
-                        <th class="sortable" data-sort="trades" onclick="sortTable('trades')">Trades</th>
-                        <th class="sortable" data-sort="pnl" onclick="sortTable('pnl')">P&L</th>
-                        <th class="sortable" data-sort="winrate" onclick="sortTable('winrate')">Win Rate</th>
-                        <th class="sortable" data-sort="consistency" onclick="sortTable('consistency')">Consistency</th>
-                        <th class="sortable" data-sort="score" onclick="sortTable('score')">Score</th>
-                        <th>Red Flags</th>
+                        <th>User</th>
+                        <th class="sortable" data-sort="pnl" onclick="sortAnalytics('pnl')">Net P&L</th>
+                        <th class="sortable" data-sort="pnl_percent" onclick="sortAnalytics('pnl_percent')">P&L %</th>
+                        <th class="sortable" data-sort="bets" onclick="sortAnalytics('bets')">Bets</th>
+                        <th class="sortable" data-sort="buy" onclick="sortAnalytics('buy')">Buy $</th>
+                        <th class="sortable" data-sort="sell" onclick="sortAnalytics('sell')">Sell $</th>
+                        <th class="sortable" data-sort="markets" onclick="sortAnalytics('markets')">Markets</th>
+                        <th class="sortable" data-sort="avg_investment" onclick="sortAnalytics('avg_investment')">Avg/Market</th>
+                        <th class="sortable" data-sort="trades_per_day" onclick="sortAnalytics('trades_per_day')">Trades/Day</th>
+                        <th class="sortable" data-sort="fast_trades" onclick="sortAnalytics('fast_trades')">Fast</th>
+                        <th class="sortable" data-sort="fast_pnl" onclick="sortAnalytics('fast_pnl')">Fast Avg</th>
+                        <th class="sortable" data-sort="avg_trades" onclick="sortAnalytics('avg_trades')">Mid</th>
+                        <th class="sortable" data-sort="mid_pnl" onclick="sortAnalytics('mid_pnl')">Mid Avg</th>
+                        <th class="sortable" data-sort="slow_trades" onclick="sortAnalytics('slow_trades')">Slow</th>
+                        <th class="sortable" data-sort="slow_pnl" onclick="sortAnalytics('slow_pnl')">Slow Avg</th>
+                        <th>Bot</th>
+                        <th>Data</th>
                     </tr>
                 </thead>
-                <tbody id="users-tbody">
+                <tbody id="analytics-tbody">
                     <tr>
-                        <td colspan="8" style="text-align: center; padding: 40px; color: #6c757d;">
-                            Select filters and click "Load Traders" to see results
+                        <td colspan="17" style="text-align: center; padding: 40px; color: #6c757d;">
+                            Click "Load Analytics" to see results
                         </td>
                     </tr>
                 </tbody>
             </table>
         </div>
-
-        <div id="profile-panel" class="profile-panel" style="display:none;">
-            <div class="profile-header">
-                <div>
-                    <h2 id="profile-name">Select a trader to view profile</h2>
-                    <p id="profile-address" style="color:#718096;"></p>
-                </div>
-                <div id="profile-last-active" style="color:#718096;"></div>
-            </div>
-            <div class="profile-grid">
-                <div class="profile-card">
-                    <h4>Total Trades</h4>
-                    <div class="value" id="profile-trades">-</div>
-                </div>
-                <div class="profile-card">
-                    <h4>Total P&L</h4>
-                    <div class="value" id="profile-pnl">$0</div>
-                </div>
-                <div class="profile-card">
-                    <h4>Win Rate</h4>
-                    <div class="value" id="profile-winrate">0%</div>
-                </div>
-                <div class="profile-card">
-                    <h4>Consistency</h4>
-                    <div class="value" id="profile-consistency">0%</div>
-                </div>
-            </div>
-            <div class="profile-trades">
-                <h3>Recent Trades</h3>
-                <div id="profile-trades-error" class="profile-error" style="display:none;"></div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Subject</th>
-                            <th>Market</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Price</th>
-                            <th>Outcome</th>
-                            <th>Tx</th>
-                        </tr>
-                    </thead>
-                    <tbody id="profile-trades-body">
-                        <tr>
-                            <td colspan="8" style="text-align:center; padding:20px; color:#718096;">No trader selected</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
         </div>
-        </div>
-        <!-- END LEADERBOARD TAB -->
+        <!-- END ANALYTICS TAB -->
 
         <!-- MY USERS TAB -->
         <div id="tab-myusers" class="tab-content">
             <div style="padding: 30px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                    <h2>My Imported Users</h2>
+                    <h2>My Users</h2>
                     <button onclick="loadMyUsers()" style="padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">
-                        🔄 Refresh
+                        Refresh
                     </button>
                 </div>
+
+                <!-- Add User Section -->
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e9ecef;">
+                    <h3 style="margin-bottom: 15px; font-size: 1.1em;">Add New User</h3>
+                    <div style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+                        <div style="flex: 1; min-width: 300px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px; font-size: 0.9em;">Wallet Address</label>
+                            <input
+                                type="text"
+                                id="add-user-address"
+                                placeholder="0x1234567890abcdef1234567890abcdef12345678"
+                                style="width: 100%; padding: 10px 15px; border: 2px solid #dee2e6; border-radius: 6px; font-family: monospace; font-size: 0.95em;"
+                            >
+                        </div>
+                        <button
+                            onclick="addSingleUser()"
+                            id="add-user-btn"
+                            style="padding: 10px 25px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; white-space: nowrap;"
+                        >
+                            Add User
+                        </button>
+                    </div>
+                    <div id="add-user-status" style="margin-top: 10px; display: none;"></div>
+                </div>
+
                 <div id="myusers-loading" style="display: none; text-align: center; padding: 40px; color: #6c757d;">
                     Loading users...
                 </div>
                 <div id="myusers-list">
                     <p style="text-align: center; padding: 40px; color: #6c757d;">
-                        Click "Refresh" to load your imported users
+                        Click "Refresh" to load your users
                     </p>
                 </div>
             </div>
         </div>
         <!-- END MY USERS TAB -->
 
-        <!-- IMPORT TAB -->
-        <div id="tab-import" class="tab-content">
-            <div style="padding: 30px;">
-                <h2 style="margin-bottom: 20px;">Import Top Users</h2>
-                <p style="color: #6c757d; margin-bottom: 20px;">
-                    Paste a list of Ethereum wallet addresses (one per line) to fetch and store their complete trading history. 
-                    This process may take 30-60 seconds per user.
-                </p>
-                
-                <div style="margin-bottom: 20px;">
-                    <label for="import-addresses" style="display: block; font-weight: 600; margin-bottom: 10px;">Wallet Addresses</label>
-                    <textarea 
-                        id="import-addresses" 
-                        rows="12" 
-                        placeholder="0x1234567890abcdef1234567890abcdef12345678&#10;0xabcdef1234567890abcdef1234567890abcdef12&#10;..."
-                        style="width: 100%; padding: 15px; border: 2px solid #dee2e6; border-radius: 6px; font-family: monospace; font-size: 0.95em; resize: vertical;"
-                    ></textarea>
-                    <p style="margin-top: 8px; font-size: 0.9em; color: #6c757d;">
-                        <strong>Format:</strong> One address per line, or comma/space-separated. Addresses must start with <code>0x</code> and be 42 characters long.
-                    </p>
-                </div>
-
-                <button 
-                    id="import-btn"
-                    onclick="importUsers()"
-                    style="padding: 12px 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 6px; font-size: 1em; font-weight: 600; cursor: pointer; transition: opacity 0.3s;"
-                    onmouseover="this.style.opacity='0.9'"
-                    onmouseout="this.style.opacity='1'"
-                >
-                    Start Import
-                </button>
-
-                <div id="import-progress" style="display: none; margin-top: 20px; padding: 20px; background: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 6px; color: #004085;">
-                    <p>⏳ Processing...</p>
-                </div>
-
-                <div id="import-results" style="margin-top: 20px;">
-                    <!-- Results will be injected here -->
-                </div>
-            </div>
-        </div>
-        <!-- END IMPORT TAB -->
 
     </div>
 
@@ -653,49 +578,115 @@
         let sortDirection = 'asc';
         let selectedUserId = null;
 
-        async function loadUsers() {
-            const subject = document.getElementById('subject').value;
-            const limit = document.getElementById('limit').value;
-            const minTrades = document.getElementById('minTrades').value;
-            const minWinRate = document.getElementById('minWinRate').value;
-            const minConsistency = document.getElementById('minConsistency').value;
-            const minPNL = document.getElementById('minPNL').value;
-            const hideFlags = document.getElementById('hideFlags').checked;
+        // Analytics state
+        let analyticsData = [];
+        let analyticsSortColumn = 'pnl';
+        let analyticsSortDesc = true;
+
+        // Analytics functions
+        async function loadAnalytics() {
+            const minBets = document.getElementById('minBets').value;
+            const minPnl = document.getElementById('minPnl').value;
+            const maxPnl = document.getElementById('maxPnl').value;
+            const limit = document.getElementById('analyticsLimit').value;
+            const hideBots = document.getElementById('hideBots').checked;
+            const dataComplete = document.getElementById('dataComplete').checked;
 
             const params = new URLSearchParams();
-            params.set('subject', subject);
             params.set('limit', limit);
-            appendParam(params, 'min_trades', minTrades);
-            appendParam(params, 'min_win_rate', minWinRate);
-            appendParam(params, 'min_consistency', minConsistency);
-            appendParam(params, 'min_pnl', minPNL);
-            if (hideFlags) {
-                params.set('hide_red_flags', '1');
-            }
-            
-            document.getElementById('loading').classList.add('active');
-            document.getElementById('error').style.display = 'none';
-            document.getElementById('stats').style.display = 'none';
+            params.set('sort', analyticsSortColumn);
+            params.set('order', analyticsSortDesc ? 'desc' : 'asc');
+
+            if (minBets) params.set('min_bets', minBets);
+            if (minPnl) params.set('min_pnl', minPnl);
+            if (maxPnl) params.set('max_pnl', maxPnl);
+            if (hideBots) params.set('hide_bots', '1');
+            if (dataComplete) params.set('data_complete', '1');
+
+            document.getElementById('analytics-loading').classList.add('active');
+            document.getElementById('analytics-error').style.display = 'none';
+            document.getElementById('analytics-stats').style.display = 'none';
 
             try {
-                const response = await fetch(`/api/users/top?${params.toString()}`);
+                const response = await fetch(`/api/analytics?${params.toString()}`);
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.error || 'Failed to load users');
+                    throw new Error(data.error || 'Failed to load analytics');
                 }
 
-                currentData = data.rankings || [];
-                renderTable(currentData);
-                updateStats(currentData);
-                
-                document.getElementById('loading').classList.remove('active');
-                document.getElementById('stats').style.display = 'grid';
+                analyticsData = data.analytics || [];
+                renderAnalyticsTable(analyticsData);
+
+                document.getElementById('analytics-stat-count').textContent = data.total_count.toLocaleString();
+                document.getElementById('analytics-stat-showing').textContent = data.count.toLocaleString();
+
+                document.getElementById('analytics-loading').classList.remove('active');
+                document.getElementById('analytics-stats').style.display = 'grid';
             } catch (error) {
-                document.getElementById('loading').classList.remove('active');
-                document.getElementById('error').style.display = 'block';
-                document.getElementById('error').textContent = 'Error: ' + error.message;
+                document.getElementById('analytics-loading').classList.remove('active');
+                document.getElementById('analytics-error').style.display = 'block';
+                document.getElementById('analytics-error').textContent = 'Error: ' + error.message;
             }
+        }
+
+        function renderAnalyticsTable(data) {
+            const tbody = document.getElementById('analytics-tbody');
+            tbody.innerHTML = '';
+
+            if (!data || data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="17" style="text-align: center; padding: 40px; color: #6c757d;">No data found</td></tr>';
+                return;
+            }
+
+            data.forEach(row => {
+                const tr = document.createElement('tr');
+                const pnlClass = row.net_pnl >= 0 ? 'badge-positive' : 'badge-negative';
+                const pctClass = row.pnl_percentage >= 0 ? 'badge-positive' : 'badge-negative';
+                const fastPnlClass = row.fast_avg_pnl >= 0 ? 'badge-positive' : 'badge-negative';
+                const midPnlClass = row.mid_avg_pnl >= 0 ? 'badge-positive' : 'badge-negative';
+                const slowPnlClass = row.slow_avg_pnl >= 0 ? 'badge-positive' : 'badge-negative';
+
+                tr.innerHTML = `
+                    <td><a href="https://polymarket.com/profile/${row.user_address}" target="_blank" style="color:#667eea; font-family:monospace; font-size:0.85em;">${row.user_address.substring(0, 10)}...</a></td>
+                    <td><span class="badge ${pnlClass}">$${formatNumber(row.net_pnl)}</span></td>
+                    <td><span class="badge ${pctClass}">${row.pnl_percentage.toFixed(1)}%</span></td>
+                    <td>${row.total_bets}</td>
+                    <td>$${formatNumber(row.total_buy_usd)}</td>
+                    <td>$${formatNumber(row.total_sell_redeem_usd)}</td>
+                    <td>${row.unique_markets}</td>
+                    <td>$${formatNumber(row.avg_investment_per_market)}</td>
+                    <td>${row.trades_per_day_avg.toFixed(1)}</td>
+                    <td>${row.fast_trades}</td>
+                    <td><span class="badge ${fastPnlClass}">$${formatNumber(row.fast_avg_pnl)}</span></td>
+                    <td>${row.avg_trades}</td>
+                    <td><span class="badge ${midPnlClass}">$${formatNumber(row.mid_avg_pnl)}</span></td>
+                    <td>${row.slow_trades}</td>
+                    <td><span class="badge ${slowPnlClass}">$${formatNumber(row.slow_avg_pnl)}</span></td>
+                    <td>${row.is_bot ? '<span style="color:#dc3545;">Yes</span>' : '<span style="color:#28a745;">No</span>'}</td>
+                    <td>${row.data_complete ? '<span style="color:#28a745;">Full</span>' : '<span style="color:#ffc107;">Partial</span>'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function sortAnalytics(column) {
+            if (analyticsSortColumn === column) {
+                analyticsSortDesc = !analyticsSortDesc;
+            } else {
+                analyticsSortColumn = column;
+                analyticsSortDesc = true;
+            }
+
+            // Update sort indicators
+            document.querySelectorAll('#analytics-table th').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+                if (th.dataset.sort === column) {
+                    th.classList.add(analyticsSortDesc ? 'sort-desc' : 'sort-asc');
+                }
+            });
+
+            loadAnalytics();
         }
 
         function renderTable(rankings) {
@@ -977,13 +968,18 @@
             // Update tab content
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
             document.getElementById('tab-' + tabName).classList.add('active');
+
+            // Auto-load data for certain tabs
+            if (tabName === 'myusers') {
+                loadMyUsers();
+            }
         }
 
         // My Users tab functionality
         async function loadMyUsers() {
             const loading = document.getElementById('myusers-loading');
             const listDiv = document.getElementById('myusers-list');
-            
+
             loading.style.display = 'block';
             listDiv.innerHTML = '';
 
@@ -997,7 +993,7 @@
                 loading.style.display = 'none';
 
                 if (data.rankings.length === 0) {
-                    listDiv.innerHTML = '<p style="text-align:center; padding:40px; color:#6c757d;">No users imported yet. Go to "Import Top Users" tab to add some.</p>';
+                    listDiv.innerHTML = '<p style="text-align:center; padding:40px; color:#6c757d;">No users yet. Add a wallet address above to get started.</p>';
                     return;
                 }
 
@@ -1009,13 +1005,12 @@
                     <table style="width:100%; border-collapse:collapse; background:white;">
                         <thead style="background:#f8f9fa;">
                             <tr>
-                                <th style="padding:12px; text-align:left; border-bottom:2px solid #dee2e6;">Rank</th>
+                                <th style="padding:12px; text-align:left; border-bottom:2px solid #dee2e6;">#</th>
                                 <th style="padding:12px; text-align:left; border-bottom:2px solid #dee2e6;">Username</th>
                                 <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Trades</th>
                                 <th style="padding:12px; text-align:right; border-bottom:2px solid #dee2e6;">P&L</th>
                                 <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Win Rate</th>
-                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Consistency</th>
-                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Score</th>
+                                <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Multiplier</th>
                                 <th style="padding:12px; text-align:center; border-bottom:2px solid #dee2e6;">Actions</th>
                             </tr>
                         </thead>
@@ -1023,32 +1018,45 @@
                 `;
 
                 data.rankings.forEach((ranking, idx) => {
-                    const user = ranking.user; // Extract user from ranking object
+                    const user = ranking.user;
                     const displayName = user.username || (user.id ? user.id.substring(0, 10) + '...' : 'Unknown');
                     const winRate = user.win_rate ? (user.win_rate * 100).toFixed(1) : '0.0';
-                    const consistency = user.consistency ? (user.consistency * 100).toFixed(1) : '0.0';
-                    const score = ranking.overall_score ? ranking.overall_score.toFixed(1) : '0.0';
                     const pnl = user.total_pnl || 0;
 
                     html += `
-                        <tr style="border-bottom:1px solid #e9ecef; cursor:pointer;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='white'">
+                        <tr style="border-bottom:1px solid #e9ecef;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='white'">
                             <td style="padding:12px;">${idx + 1}</td>
                             <td style="padding:12px;">
                                 <a href="/users/${encodeURIComponent(user.id)}" target="_blank" style="color:#667eea; text-decoration:none; font-weight:600;">
                                     ${escapeHtml(displayName)}
                                 </a>
+                                <div style="font-size:0.75em; color:#6c757d; font-family:monospace;">${user.id.substring(0, 10)}...</div>
                             </td>
                             <td style="padding:12px; text-align:center;">${user.total_trades || 0}</td>
                             <td style="padding:12px; text-align:right; color:${pnl >= 0 ? '#28a745' : '#dc3545'}; font-weight:600;">
                                 $${pnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
                             </td>
                             <td style="padding:12px; text-align:center;">${winRate}%</td>
-                            <td style="padding:12px; text-align:center;">${consistency}%</td>
-                            <td style="padding:12px; text-align:center; font-weight:600; color:#667eea;">${score}</td>
+                            <td style="padding:12px; text-align:center;" id="multiplier-cell-${user.id}">
+                                <span id="multiplier-display-${user.id}" style="cursor:pointer;" onclick="editMultiplier('${user.id}')">
+                                    <span style="font-weight:600; color:#667eea;">1/20</span>
+                                    <span style="font-size:0.8em; color:#6c757d;">(5%)</span>
+                                </span>
+                                <div id="multiplier-edit-${user.id}" style="display:none;">
+                                    <select id="multiplier-select-${user.id}" style="padding:4px 8px; border:1px solid #dee2e6; border-radius:4px; font-size:0.9em;">
+                                        <option value="0.01">1/100 (1%)</option>
+                                        <option value="0.02">1/50 (2%)</option>
+                                        <option value="0.05" selected>1/20 (5%)</option>
+                                        <option value="0.1">1/10 (10%)</option>
+                                        <option value="0.2">1/5 (20%)</option>
+                                        <option value="0.25">1/4 (25%)</option>
+                                        <option value="0.5">1/2 (50%)</option>
+                                    </select>
+                                    <button onclick="saveMultiplier('${user.id}')" style="padding:4px 8px; background:#28a745; color:white; border:none; border-radius:4px; font-size:0.8em; cursor:pointer; margin-left:4px;">Save</button>
+                                    <button onclick="cancelMultiplier('${user.id}')" style="padding:4px 8px; background:#6c757d; color:white; border:none; border-radius:4px; font-size:0.8em; cursor:pointer; margin-left:2px;">X</button>
+                                </div>
+                            </td>
                             <td style="padding:12px; text-align:center;">
-                                <a href="/users/${encodeURIComponent(user.id)}" target="_blank" style="padding:6px 12px; background:#667eea; color:white; text-decoration:none; border-radius:4px; font-size:0.9em; margin-right:8px;">
-                                    View Profile
-                                </a>
                                 <button onclick="deleteUser('${escapeHtml(user.id)}', '${escapeHtml(displayName)}'); event.stopPropagation();" style="padding:6px 12px; background:#dc3545; color:white; border:none; border-radius:4px; font-size:0.9em; cursor:pointer;">
                                     Delete
                                 </button>
@@ -1060,6 +1068,11 @@
                 html += '</tbody></table>';
                 listDiv.innerHTML = html;
 
+                // Load actual multipliers for each user
+                data.rankings.forEach(ranking => {
+                    loadUserMultiplier(ranking.user.id);
+                });
+
             } catch (error) {
                 loading.style.display = 'none';
                 listDiv.innerHTML = `<div style="background:#f8d7da; color:#721c24; padding:15px; border-radius:6px; border:1px solid #f5c6cb;">
@@ -1068,99 +1081,122 @@
             }
         }
 
-        // Import functionality
-        async function importUsers() {
-            const textarea = document.getElementById('import-addresses');
-            const rawText = textarea.value.trim();
-            
-            if (!rawText) {
-                alert('Please enter at least one wallet address');
+        // Load multiplier for a specific user
+        async function loadUserMultiplier(userId) {
+            try {
+                const response = await fetch(`/api/users/${encodeURIComponent(userId)}/copy-settings`);
+                if (!response.ok) return;
+
+                const data = await response.json();
+                const settings = data.settings;
+                const multiplier = settings.multiplier || 0.05;
+
+                // Update display
+                const display = document.getElementById(`multiplier-display-${userId}`);
+                const select = document.getElementById(`multiplier-select-${userId}`);
+                if (display && select) {
+                    const fraction = multiplierToFraction(multiplier);
+                    const percent = (multiplier * 100).toFixed(0);
+                    display.innerHTML = `<span style="font-weight:600; color:#667eea;">${fraction}</span> <span style="font-size:0.8em; color:#6c757d;">(${percent}%)</span>`;
+                    select.value = multiplier;
+                }
+            } catch (error) {
+                console.error('Failed to load multiplier for', userId, error);
+            }
+        }
+
+        function multiplierToFraction(mult) {
+            if (mult <= 0) return '0';
+            const inverse = Math.round(1 / mult);
+            return `1/${inverse}`;
+        }
+
+        function editMultiplier(userId) {
+            document.getElementById(`multiplier-display-${userId}`).style.display = 'none';
+            document.getElementById(`multiplier-edit-${userId}`).style.display = 'inline';
+        }
+
+        function cancelMultiplier(userId) {
+            document.getElementById(`multiplier-display-${userId}`).style.display = 'inline';
+            document.getElementById(`multiplier-edit-${userId}`).style.display = 'none';
+        }
+
+        async function saveMultiplier(userId) {
+            const select = document.getElementById(`multiplier-select-${userId}`);
+            const multiplier = parseFloat(select.value);
+
+            try {
+                const response = await fetch(`/api/users/${encodeURIComponent(userId)}/copy-settings`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ multiplier: multiplier })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.error || `HTTP ${response.status}`);
+                }
+
+                // Update display
+                const display = document.getElementById(`multiplier-display-${userId}`);
+                const fraction = multiplierToFraction(multiplier);
+                const percent = (multiplier * 100).toFixed(0);
+                display.innerHTML = `<span style="font-weight:600; color:#667eea;">${fraction}</span> <span style="font-size:0.8em; color:#6c757d;">(${percent}%)</span>`;
+
+                cancelMultiplier(userId);
+            } catch (error) {
+                alert('Failed to save multiplier: ' + error.message);
+            }
+        }
+
+        // Add single user
+        async function addSingleUser() {
+            const input = document.getElementById('add-user-address');
+            const btn = document.getElementById('add-user-btn');
+            const statusDiv = document.getElementById('add-user-status');
+            const address = input.value.trim();
+
+            if (!address) {
+                alert('Please enter a wallet address');
                 return;
             }
 
-            // Parse addresses (one per line, comma-separated, or space-separated)
-            const addresses = rawText
-                .split(/[\n,\s]+/)
-                .map(addr => addr.trim())
-                .filter(addr => addr && addr.match(/^0x[a-fA-F0-9]{40}$/));
-
-            if (addresses.length === 0) {
-                alert('No valid Ethereum addresses found. Addresses should start with 0x and be 42 characters long.');
+            if (!address.match(/^0x[a-fA-F0-9]{40}$/)) {
+                alert('Invalid Ethereum address. Must start with 0x and be 42 characters.');
                 return;
             }
 
-            const confirmed = confirm(`Import ${addresses.length} user(s)? This may take several minutes (about 30-60 seconds per user).`);
-            if (!confirmed) return;
-
-            // Show progress
-            const progressDiv = document.getElementById('import-progress');
-            const resultsDiv = document.getElementById('import-results');
-            const btn = document.getElementById('import-btn');
-            
-            progressDiv.style.display = 'block';
-            progressDiv.innerHTML = `<p>⏳ Importing ${addresses.length} user(s)... Please wait...</p>`;
-            resultsDiv.innerHTML = '';
             btn.disabled = true;
+            statusDiv.style.display = 'block';
+            statusDiv.innerHTML = '<span style="color:#667eea;">Importing user... This may take 30-60 seconds.</span>';
 
             try {
                 const response = await fetch('/api/import-top-users', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ addresses })
+                    body: JSON.stringify({ addresses: [address] })
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    const data = await response.json();
+                    throw new Error(data.error || `HTTP ${response.status}`);
                 }
 
                 const data = await response.json();
-                
-                // Display results
-                progressDiv.style.display = 'none';
-                resultsDiv.innerHTML = `
-                    <h3 style="margin-bottom:15px;">Import Complete</h3>
-                    <p><strong>Total:</strong> ${data.total} user(s)</p>
-                    <p style="color:#28a745;"><strong>✓ Success:</strong> ${data.success_count}</p>
-                    <p style="color:#dc3545;"><strong>✗ Failed:</strong> ${data.failed_count}</p>
-                    <div style="margin-top:20px; max-height:300px; overflow-y:auto;">
-                        <table style="width:100%; border-collapse:collapse;">
-                            <thead style="background:#f8f9fa; position:sticky; top:0;">
-                                <tr>
-                                    <th style="padding:8px; text-align:left; border-bottom:2px solid #dee2e6;">Address</th>
-                                    <th style="padding:8px; text-align:center; border-bottom:2px solid #dee2e6;">Status</th>
-                                    <th style="padding:8px; text-align:center; border-bottom:2px solid #dee2e6;">Trades</th>
-                                    <th style="padding:8px; text-align:right; border-bottom:2px solid #dee2e6;">Duration</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${data.results.map(r => `
-                                    <tr style="border-bottom:1px solid #e9ecef;">
-                                        <td style="padding:8px; font-family:monospace; font-size:0.9em;">${escapeHtml(r.address.substring(0, 10))}...</td>
-                                        <td style="padding:8px; text-align:center;">
-                                            ${r.success ? '<span style="color:#28a745;">✓</span>' : '<span style="color:#dc3545;">✗</span>'}
-                                        </td>
-                                        <td style="padding:8px; text-align:center;">${r.success ? r.trade_count : '-'}</td>
-                                        <td style="padding:8px; text-align:right; color:#6c757d; font-size:0.9em;">${r.duration_sec.toFixed(1)}s</td>
-                                    </tr>
-                                    ${r.error_msg ? `<tr><td colspan="4" style="padding:0 8px 8px 8px; font-size:0.85em; color:#dc3545;">${escapeHtml(r.error_msg)}</td></tr>` : ''}
-                                `).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                `;
 
-                // Clear textarea on success
                 if (data.success_count > 0) {
-                    textarea.value = '';
+                    const result = data.results[0];
+                    statusDiv.innerHTML = `<span style="color:#28a745;">User added successfully! (${result.trade_count} trades imported in ${result.duration_sec.toFixed(1)}s)</span>`;
+                    input.value = '';
+                    // Refresh the user list
+                    await loadMyUsers();
+                } else {
+                    const result = data.results[0];
+                    throw new Error(result.error_msg || 'Import failed');
                 }
 
             } catch (error) {
-                progressDiv.style.display = 'none';
-                resultsDiv.innerHTML = `
-                    <div style="background:#f8d7da; color:#721c24; padding:15px; border-radius:6px; border:1px solid #f5c6cb;">
-                        <strong>Import failed:</strong> ${escapeHtml(error.message)}
-                    </div>
-                `;
+                statusDiv.innerHTML = `<span style="color:#dc3545;">Error: ${escapeHtml(error.message)}</span>`;
             } finally {
                 btn.disabled = false;
             }
@@ -1187,8 +1223,8 @@
                 // Show success message
                 alert(`User "${displayName}" has been deleted successfully!`);
 
-                // Reload the imported users list
-                await loadImportedUsers();
+                // Reload the users list
+                await loadMyUsers();
 
             } catch (error) {
                 alert(`Failed to delete user: ${error.message}`);

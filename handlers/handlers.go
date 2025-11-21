@@ -2,15 +2,19 @@ package handlers
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"polymarket-analyzer/config"
 	"polymarket-analyzer/models"
 	"polymarket-analyzer/service"
+	"polymarket-analyzer/storage"
 
 	"github.com/gin-gonic/gin"
 )
+
+var ethAddressRegex = regexp.MustCompile(`^0x[a-fA-F0-9]{40}$`)
 
 // Handler handles HTTP requests
 type Handler struct {
@@ -171,6 +175,23 @@ func (h *Handler) GetUserPositions(c *gin.Context) {
 	})
 }
 
+// GetUserAnalysis returns decile analysis for all behavioral patterns
+func (h *Handler) GetUserAnalysis(c *gin.Context) {
+	userID := c.Param("id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user ID required"})
+		return
+	}
+
+	analysis, err := h.service.GetUserAnalysis(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to analyze patterns: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, analysis)
+}
+
 // GetSubjects returns list of available subjects
 func (h *Handler) GetSubjects(c *gin.Context) {
 	subjects := []gin.H{
@@ -229,13 +250,27 @@ func (h *Handler) ImportTopUsers(c *gin.Context) {
 		return
 	}
 
-	// Clean up addresses (trim whitespace, remove empty strings)
+	// Clean up and validate addresses
 	cleaned := make([]string, 0, len(req.Addresses))
+	invalidAddresses := make([]string, 0)
 	for _, addr := range req.Addresses {
-		addr = strings.TrimSpace(addr)
-		if addr != "" {
-			cleaned = append(cleaned, addr)
+		addr = strings.ToLower(strings.TrimSpace(addr))
+		if addr == "" {
+			continue
 		}
+		if !ethAddressRegex.MatchString(addr) {
+			invalidAddresses = append(invalidAddresses, addr)
+			continue
+		}
+		cleaned = append(cleaned, addr)
+	}
+
+	if len(invalidAddresses) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid Ethereum addresses provided",
+			"invalid_addresses": invalidAddresses,
+		})
+		return
 	}
 
 	if len(cleaned) == 0 {
@@ -264,6 +299,22 @@ func (h *Handler) ImportTopUsers(c *gin.Context) {
 	})
 }
 
+// PrePopulateTokens fetches all tokens from CLOB API and saves them to database.
+// This should be run once to pre-populate the token cache for fast lookups.
+func (h *Handler) PrePopulateTokens(c *gin.Context) {
+	count, err := h.service.PrePopulateTokens(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pre-populate failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"token_count": count,
+		"message":     "Token pre-population complete",
+	})
+}
+
 // DeleteUser removes a user and all their associated data.
 func (h *Handler) DeleteUser(c *gin.Context) {
 	userID := c.Param("id")
@@ -284,6 +335,102 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "User deleted successfully",
+	})
+}
+
+// GetUserCopySettings returns copy trading settings for a user
+func (h *Handler) GetUserCopySettings(c *gin.Context) {
+	userID := c.Param("id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user ID required"})
+		return
+	}
+
+	settings, err := h.service.GetUserCopySettings(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get copy settings: " + err.Error()})
+		return
+	}
+
+	// Return default settings if none exist
+	if settings == nil {
+		settings = &storage.UserCopySettings{
+			UserAddress: strings.ToLower(userID),
+			Multiplier:  0.05, // Default 1/20th
+			Enabled:     true,
+			MinUSDC:     1.0,
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"settings": settings,
+	})
+}
+
+// UpdateUserCopySettingsRequest is the payload for updating copy settings
+type UpdateUserCopySettingsRequest struct {
+	Multiplier *float64 `json:"multiplier"`
+	Enabled    *bool    `json:"enabled"`
+	MinUSDC    *float64 `json:"min_usdc"`
+}
+
+// UpdateUserCopySettings updates copy trading settings for a user
+func (h *Handler) UpdateUserCopySettings(c *gin.Context) {
+	userID := c.Param("id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user ID required"})
+		return
+	}
+
+	var req UpdateUserCopySettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		return
+	}
+
+	// Get existing settings or create defaults
+	settings, err := h.service.GetUserCopySettings(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get settings: " + err.Error()})
+		return
+	}
+
+	if settings == nil {
+		settings = &storage.UserCopySettings{
+			UserAddress: strings.ToLower(userID),
+			Multiplier:  0.05,
+			Enabled:     true,
+			MinUSDC:     1.0,
+		}
+	}
+
+	// Apply updates
+	if req.Multiplier != nil {
+		if *req.Multiplier <= 0 || *req.Multiplier > 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "multiplier must be between 0 and 1"})
+			return
+		}
+		settings.Multiplier = *req.Multiplier
+	}
+	if req.Enabled != nil {
+		settings.Enabled = *req.Enabled
+	}
+	if req.MinUSDC != nil {
+		if *req.MinUSDC < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "min_usdc must be non-negative"})
+			return
+		}
+		settings.MinUSDC = *req.MinUSDC
+	}
+
+	if err := h.service.SetUserCopySettings(c.Request.Context(), *settings); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update settings: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"settings": settings,
 	})
 }
 
@@ -352,4 +499,63 @@ func parsePercentPointer(val string) *float64 {
 		return &converted
 	}
 	return ptr
+}
+
+// GetAnalyticsList returns filtered and sorted user analytics data
+func (h *Handler) GetAnalyticsList(c *gin.Context) {
+	filter := storage.UserAnalyticsFilter{
+		SortBy:   c.DefaultQuery("sort", "pnl"),
+		SortDesc: c.DefaultQuery("order", "desc") == "desc",
+	}
+
+	// Parse limit and offset
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			filter.Limit = l
+		}
+	}
+	if filter.Limit == 0 {
+		filter.Limit = 100
+	}
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			filter.Offset = o
+		}
+	}
+
+	// Parse filters
+	filter.MinPnL = parseFloatPointer(c.Query("min_pnl"))
+	filter.MaxPnL = parseFloatPointer(c.Query("max_pnl"))
+	filter.MinBets = parseIntPointer(c.Query("min_bets"))
+	filter.MaxBets = parseIntPointer(c.Query("max_bets"))
+	filter.MinPnLPercent = parseFloatPointer(c.Query("min_pnl_percent"))
+	filter.MaxPnLPercent = parseFloatPointer(c.Query("max_pnl_percent"))
+
+	// Boolean filters
+	hideBots := strings.ToLower(strings.TrimSpace(c.Query("hide_bots")))
+	filter.HideBots = hideBots == "1" || hideBots == "true"
+
+	dataComplete := strings.ToLower(strings.TrimSpace(c.Query("data_complete")))
+	if dataComplete == "1" || dataComplete == "true" {
+		dc := true
+		filter.DataComplete = &dc
+	} else if dataComplete == "0" || dataComplete == "false" {
+		dc := false
+		filter.DataComplete = &dc
+	}
+
+	results, totalCount, err := h.service.GetUserAnalyticsList(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load analytics: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"analytics":   results,
+		"count":       len(results),
+		"total_count": totalCount,
+		"offset":      filter.Offset,
+		"limit":       filter.Limit,
+	})
 }

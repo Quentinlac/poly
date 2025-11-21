@@ -18,7 +18,7 @@ import (
 // Worker runs periodic background sync jobs (markets, users, trades).
 type Worker struct {
 	apiClient *api.Client
-	store     *storage.Store
+	store     storage.DataStore
 	cfg       *config.Config
 	svc       *service.Service
 
@@ -27,7 +27,7 @@ type Worker struct {
 }
 
 // NewWorker builds a new sync worker.
-func NewWorker(apiClient *api.Client, store *storage.Store, cfg *config.Config, svc *service.Service) *Worker {
+func NewWorker(apiClient *api.Client, store storage.DataStore, cfg *config.Config, svc *service.Service) *Worker {
 	return &Worker{
 		apiClient: apiClient,
 		store:     store,

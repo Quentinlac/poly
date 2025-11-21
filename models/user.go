@@ -53,19 +53,18 @@ type Trade struct {
 // TradeDetail captures the raw trade information shown on user profiles.
 type TradeDetail struct {
 	ID              string    `json:"id"`
-	UserID          string    `json:"user_id"`
-	MarketID        string    `json:"market_id"`
+	UserID          string    `json:"user_address"`  // Maps to user_address column
+	MarketID        string    `json:"asset"`         // Maps to asset column (token_id or conditionId)
 	Subject         Subject   `json:"subject"`
-	Type            string    `json:"type"` // TRADE, REDEEM, SPLIT, MERGE, etc.
+	Type            string    `json:"type"`          // TRADE, REDEEM, SPLIT, MERGE, etc.
 	Side            string    `json:"side"`
-	IsMaker         bool      `json:"is_maker"` // true if user was maker (limit order), false if taker (market order)
+	Role            string    `json:"role"`          // MAKER, TAKER, or REDEEM
 	Size            float64   `json:"size"`
-	UsdcSize        float64   `json:"usdc_size"` // For REDEEM, this is the payout amount
+	UsdcSize        float64   `json:"usdc_size"`     // For REDEEM, this is the payout amount
 	Price           float64   `json:"price"`
 	Outcome         string    `json:"outcome"`
 	Title           string    `json:"title"`
 	Slug            string    `json:"slug"`
-	EventSlug       string    `json:"event_slug"`
 	TransactionHash string    `json:"transaction_hash"`
 	Name            string    `json:"name"`
 	Pseudonym       string    `json:"pseudonym"`

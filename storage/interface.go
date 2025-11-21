@@ -1,0 +1,55 @@
+package storage
+
+import (
+	"context"
+	"time"
+
+	"polymarket-analyzer/models"
+)
+
+// DataStore defines the interface for storage backends
+type DataStore interface {
+	Close() error
+
+	// User operations
+	SaveUserSnapshot(ctx context.Context, user models.User) error
+	ReplaceAllUsers(ctx context.Context, users []models.User) error
+	ListUsers(ctx context.Context, subject models.Subject, limit int) ([]models.User, error)
+	GetUser(ctx context.Context, userID string) (*models.User, error)
+	DeleteUser(ctx context.Context, userID string) error
+
+	// Trade operations
+	ReplaceTrades(ctx context.Context, trades map[string][]models.TradeDetail) error
+	SaveTrades(ctx context.Context, trades []models.TradeDetail) error
+	SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error
+	ListUserTrades(ctx context.Context, userID string, limit int) ([]models.TradeDetail, error)
+	GetUserTradeCount(ctx context.Context, userID string) (int, error)
+
+	// Analysis cache operations
+	SaveAnalysisCache(ctx context.Context, userID string, resultJSON string, tradeCount int) error
+	GetAnalysisCache(ctx context.Context, userID string) (string, int, time.Time, error)
+	InvalidateAnalysisCache(ctx context.Context, userID string) error
+
+	// Position operations
+	SaveUserPositions(ctx context.Context, userID string, positions []models.AggregatedPosition) error
+	GetUserPositions(ctx context.Context, userID string) ([]models.AggregatedPosition, error)
+
+	// Token cache operations
+	GetCachedTokens(ctx context.Context, tokenIDs []string) (map[string]TokenInfo, error)
+	SaveTokenCache(ctx context.Context, tokens map[string]TokenInfo) error
+	GetTokenInfo(ctx context.Context, tokenID string) (*TokenInfo, error)
+	GetTokenByCondition(ctx context.Context, conditionID string) (*TokenInfo, error)
+
+	// Copy trading settings
+	GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error)
+	SetUserCopySettings(ctx context.Context, settings UserCopySettings) error
+	GetAllUserCopySettings(ctx context.Context) ([]UserCopySettings, error)
+	DeleteUserCopySettings(ctx context.Context, userAddress string) error
+
+	// Analytics
+	GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error)
+}
+
+// Ensure both implementations satisfy the interface
+var _ DataStore = (*Store)(nil)
+var _ DataStore = (*PostgresStore)(nil)

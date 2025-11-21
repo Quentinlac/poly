@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# Build artifacts
+polymarket-analyzer
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data and cache
+data/
+cache/
+*.db
+
+# Documentation
+*.md
+docs/
+
+# Logs
+*.log
+
+# Temporary
+conv.md

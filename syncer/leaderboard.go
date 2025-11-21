@@ -207,7 +207,6 @@ func (b *LeaderboardBuilder) RecordTrade(trade api.DataTrade, subject models.Sub
 		Outcome:         trade.Outcome,
 		Title:           trade.Title,
 		Slug:            trade.Slug,
-		EventSlug:       trade.EventSlug,
 		TransactionHash: trade.TransactionHash,
 		Name:            trade.Name,
 		Pseudonym:       trade.Pseudonym,

@@ -15,11 +15,13 @@ import (
 	"polymarket-analyzer/storage"
 )
 
+// Note: api import is still needed for NewIncrementalWorker signature
+
 // IncrementalWorker polls users for new trades incrementally (only fetches new data).
 // This is much more efficient than full refreshes and can run frequently (5 seconds).
 type IncrementalWorker struct {
 	apiClient *api.Client
-	store     *storage.Store
+	store     storage.DataStore
 	cfg       *config.Config
 	svc       *service.Service
 	ranker    *analyzer.Ranker
@@ -32,7 +34,7 @@ type IncrementalWorker struct {
 }
 
 // NewIncrementalWorker creates a new incremental polling worker.
-func NewIncrementalWorker(apiClient *api.Client, store *storage.Store, cfg *config.Config, svc *service.Service) *IncrementalWorker {
+func NewIncrementalWorker(apiClient *api.Client, store storage.DataStore, cfg *config.Config, svc *service.Service) *IncrementalWorker {
 	ranker := analyzer.NewRanker(cfg.Scoring)
 	processor := analyzer.NewProcessor(ranker)
 
@@ -49,7 +51,7 @@ func NewIncrementalWorker(apiClient *api.Client, store *storage.Store, cfg *conf
 
 // Start launches the incremental polling loop.
 func (w *IncrementalWorker) Start() {
-	interval := 5 * time.Second // Fixed 5-second interval
+	interval := 2 * time.Second // 2-second interval for faster trade detection
 	log.Printf("[incremental] starting with %v interval", interval)
 
 	w.wg.Add(1)
@@ -153,12 +155,8 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 		sinceTime = now.Add(-7 * 24 * time.Hour)
 	}
 
-	// Fetch new trades (incremental)
-	trades, err := w.apiClient.GetTrades(ctx, api.TradeQuery{
-		User:  user.Address, // Fetch trades BY this user (not where they're the maker)
-		Limit: 100,          // Only fetch up to 100 new trades per sync
-		After: sinceTime.Unix(),
-	})
+	// Fetch new trades using shared service (fetches maker, taker, and redeems)
+	trades, err := w.svc.FetchIncrementalTrades(ctx, user.Address, sinceTime.Unix())
 	if err != nil {
 		return fmt.Errorf("fetch trades: %w", err)
 	}
@@ -173,7 +171,7 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	}
 
 	// Process new trades - check for duplicates before inserting
-	// Get existing trade IDs to avoid duplicates (API bug: loops old trades)
+	// Get existing trade IDs to avoid duplicates
 	existingTrades, err := w.store.ListUserTrades(ctx, user.Address, 10000)
 	if err != nil {
 		return fmt.Errorf("list existing trades: %w", err)
@@ -187,9 +185,8 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	// Filter out duplicates
 	newTradeDetails := make([]models.TradeDetail, 0, len(trades))
 	for _, trade := range trades {
-		detail := convertToTradeDetail(trade, user.Address)
-		if !existingIDs[detail.ID] {
-			newTradeDetails = append(newTradeDetails, detail)
+		if !existingIDs[trade.ID] {
+			newTradeDetails = append(newTradeDetails, trade)
 		}
 	}
 
@@ -206,6 +203,11 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	// Save new trades
 	if err := w.store.SaveTrades(ctx, newTradeDetails); err != nil {
 		return fmt.Errorf("save trades: %w", err)
+	}
+
+	// Invalidate analysis cache since trades changed
+	if err := w.store.InvalidateAnalysisCache(ctx, user.Address); err != nil {
+		log.Printf("[incremental] warning: failed to invalidate analysis cache: %v", err)
 	}
 
 	// Recalculate user metrics (only if we have new trades)
@@ -226,6 +228,13 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	// Invalidate cache for this user
 	if w.svc != nil {
 		w.svc.InvalidateCaches()
+
+		// Trigger background update of materialized positions
+		go func() {
+			if err := w.svc.UpdateUserPositions(context.Background(), user.Address); err != nil {
+				log.Printf("[incremental] failed to update positions for %s: %v", user.Address, err)
+			}
+		}()
 	}
 
 	log.Printf("[incremental] synced %s: %d new trades (API returned %d, %d were duplicates)",
@@ -261,32 +270,5 @@ func sortUsersByLastSynced(users []models.User) {
 				users[i], users[j] = users[j], users[i]
 			}
 		}
-	}
-}
-
-// convertToTradeDetail converts API trade response to TradeDetail model.
-func convertToTradeDetail(trade api.Trade, userAddress string) models.TradeDetail {
-	// Use same ID format as initial import to avoid duplicates
-	tradeID := trade.TransactionHash
-	if tradeID == "" {
-		tradeID = fmt.Sprintf("%s-%d-%s", trade.ProxyWallet, trade.Timestamp, trade.Asset)
-	}
-
-	return models.TradeDetail{
-		ID:              tradeID,
-		UserID:          userAddress,
-		MarketID:        trade.ConditionID,
-		Subject:         "", // Will be classified later
-		Side:            trade.Side,
-		Size:            trade.Size.Float64(),
-		Price:           trade.Price.Float64(),
-		Outcome:         trade.Outcome,
-		Title:           trade.Title,
-		Slug:            trade.Slug,
-		EventSlug:       trade.EventSlug,
-		TransactionHash: trade.TransactionHash,
-		Name:            trade.Name,
-		Pseudonym:       trade.Pseudonym,
-		Timestamp:       time.Unix(trade.Timestamp, 0),
 	}
 }

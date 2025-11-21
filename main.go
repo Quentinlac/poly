@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"html/template"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"polymarket-analyzer/api"
 	"polymarket-analyzer/config"
 	"polymarket-analyzer/handlers"
+	"polymarket-analyzer/middleware"
 	"polymarket-analyzer/service"
 	"polymarket-analyzer/storage"
 	"polymarket-analyzer/syncer"
@@ -30,11 +32,13 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	store, err := storage.New(cfg.Data.DBPath)
+	store, err := storage.NewPostgres()
 	if err != nil {
-		log.Fatalf("failed to init storage: %v", err)
+		log.Fatalf("failed to init PostgreSQL storage: %v", err)
 	}
 	defer store.Close()
+
+	log.Println("[main] PostgreSQL + Redis storage initialized")
 
 	baseURL := os.Getenv("POLYMARKET_API_URL")
 	if baseURL == "" {
@@ -43,12 +47,72 @@ func main() {
 	apiClient := api.NewClient(baseURL)
 	svc := service.NewService(store, cfg, apiClient)
 
-	// Start incremental worker for 5-second polling
+	// Start incremental worker for tracked users (2-second polling)
 	incrementalWorker := syncer.NewIncrementalWorker(apiClient, store, cfg, svc)
 	incrementalWorker.Start()
 	defer incrementalWorker.Stop()
 
-	log.Println("[main] Incremental worker started (5-second polling for new trades)")
+	log.Println("[main] Incremental worker started (2-second polling for tracked users)")
+
+	// Start global trade monitor for platform-wide monitoring
+	subgraphClient := api.NewSubgraphClient()
+
+	// Create The Graph client for redemptions (optional, requires API key)
+	var theGraphClient *api.TheGraphClient
+	theGraphAPIKey := os.Getenv("THEGRAPH_API_KEY")
+	if theGraphAPIKey != "" {
+		theGraphClient = api.NewTheGraphClient(theGraphAPIKey)
+		log.Println("[main] The Graph client configured for redemptions (5-minute polling)")
+	} else {
+		log.Println("[main] THEGRAPH_API_KEY not set - redemptions disabled")
+	}
+
+	globalMonitor := syncer.NewGlobalTradeMonitor(subgraphClient, theGraphClient, store)
+	globalMonitor.Start()
+	defer globalMonitor.Stop()
+
+	log.Println("[main] Global trade monitor started (trades: 2s, redemptions: 5min)")
+
+	// Start copy trader for automated trade copying
+	copyTraderEnabled := os.Getenv("COPY_TRADER_ENABLED")
+	if copyTraderEnabled == "true" || copyTraderEnabled == "1" {
+		copyConfig := syncer.CopyTraderConfig{
+			Enabled:          true,
+			Multiplier:       0.05, // 1/20th
+			MinOrderUSDC:     1.0,  // $1 minimum
+			CheckIntervalSec: 2,    // 2 seconds
+		}
+
+		// Parse custom multiplier if set
+		if mult := os.Getenv("COPY_TRADER_MULTIPLIER"); mult != "" {
+			if v, err := strconv.ParseFloat(mult, 64); err == nil {
+				copyConfig.Multiplier = v
+			}
+		}
+
+		// Parse custom minimum if set
+		if minUSDC := os.Getenv("COPY_TRADER_MIN_USDC"); minUSDC != "" {
+			if v, err := strconv.ParseFloat(minUSDC, 64); err == nil {
+				copyConfig.MinOrderUSDC = v
+			}
+		}
+
+		copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
+		if err != nil {
+			log.Printf("[main] Warning: failed to create copy trader: %v", err)
+		} else {
+			ctx := context.Background()
+			if err := copyTrader.Start(ctx); err != nil {
+				log.Printf("[main] Warning: failed to start copy trader: %v", err)
+			} else {
+				defer copyTrader.Stop()
+				log.Printf("[main] Copy trader started (multiplier=%.2f, minUSDC=$%.2f)",
+					copyConfig.Multiplier, copyConfig.MinOrderUSDC)
+			}
+		}
+	} else {
+		log.Println("[main] Copy trader disabled (set COPY_TRADER_ENABLED=true to enable)")
+	}
 
 	// Set up router
 	r := gin.Default()
@@ -76,17 +140,39 @@ func main() {
 	// Initialize handlers
 	h := handlers.NewHandler(cfg, svc)
 
-	// Routes
+	// Apply global middleware
+	r.Use(middleware.BasicAuth())
+
+	// Public routes (no additional validation needed)
 	r.GET("/", h.Index)
-	r.GET("/api/users/top", h.GetTopUsers)
-	r.GET("/api/users/imported", h.GetAllImportedUsers)
-	r.GET("/api/users/:id", h.GetUserProfile)
-	r.GET("/api/users/:id/trades", h.GetUserTrades)
-	r.GET("/api/users/:id/positions", h.GetUserPositions)
-	r.POST("/api/import-top-users", h.ImportTopUsers)
-	r.DELETE("/api/users/:id", h.DeleteUser)
 	r.GET("/api/subjects", h.GetSubjects)
-	r.GET("/users/:id", h.UserProfilePage)
+
+	// API routes with query parameter validation
+	api := r.Group("/api")
+	api.Use(middleware.ValidateQueryParams())
+	{
+		api.GET("/users/top", h.GetTopUsers)
+		api.GET("/users/imported", h.GetAllImportedUsers)
+		api.GET("/analytics", h.GetAnalyticsList)
+		api.POST("/import-top-users", h.ImportTopUsers)
+		api.POST("/pre-populate-tokens", h.PrePopulateTokens)
+	}
+
+	// User-specific routes with ID validation
+	userRoutes := r.Group("/api/users/:id")
+	userRoutes.Use(middleware.ValidateUserID())
+	{
+		userRoutes.GET("", h.GetUserProfile)
+		userRoutes.GET("/trades", h.GetUserTrades)
+		userRoutes.GET("/positions", h.GetUserPositions)
+		userRoutes.GET("/analysis", h.GetUserAnalysis)
+		userRoutes.DELETE("", h.DeleteUser)
+		userRoutes.GET("/copy-settings", h.GetUserCopySettings)
+		userRoutes.PUT("/copy-settings", h.UpdateUserCopySettings)
+	}
+
+	// HTML user profile page with ID validation
+	r.GET("/users/:id", middleware.ValidateUserID(), h.UserProfilePage)
 
 	// Get port from environment or use default
 	port := os.Getenv("PORT")

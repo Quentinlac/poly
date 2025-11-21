@@ -62,6 +62,8 @@ type GammaMarket struct {
 	Tags         []GammaTag `json:"tags"`
 	StartDateISO string     `json:"startDateIso"`
 	EndDateISO   string     `json:"endDateIso"`
+	ClobTokenIds string     `json:"clobTokenIds"` // Comma-separated token IDs
+	Outcomes     string     `json:"outcomes"`     // JSON array as string e.g. "[\"Yes\",\"No\"]"
 }
 
 type GammaTag struct {
