@@ -992,7 +992,7 @@
                 const data = await response.json();
                 loading.style.display = 'none';
 
-                if (data.rankings.length === 0) {
+                if (!data.rankings || data.rankings.length === 0) {
                     listDiv.innerHTML = '<p style="text-align:center; padding:40px; color:#6c757d;">No users yet. Add a wallet address above to get started.</p>';
                     return;
                 }
