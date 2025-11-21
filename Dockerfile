@@ -32,7 +32,6 @@ COPY --from=builder /app/polymarket-analyzer .
 
 # Copy required assets
 COPY --from=builder /app/templates ./templates
-COPY --from=builder /app/static ./static
 COPY --from=builder /app/config ./config
 
 # Create data directory
