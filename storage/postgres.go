@@ -420,7 +420,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context, subject models.Subject, l
 	}
 	defer rows.Close()
 
-	var users []models.User
+	users := make([]models.User, 0)
 	for rows.Next() {
 		var u models.User
 		var lastActive, lastSynced *time.Time
