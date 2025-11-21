@@ -65,6 +65,7 @@ type TradeDetail struct {
 	Outcome         string    `json:"outcome"`
 	Title           string    `json:"title"`
 	Slug            string    `json:"slug"`
+	EventSlug       string    `json:"event_slug"`
 	TransactionHash string    `json:"transaction_hash"`
 	Name            string    `json:"name"`
 	Pseudonym       string    `json:"pseudonym"`

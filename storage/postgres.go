@@ -163,31 +163,33 @@ func (s *PostgresStore) SaveTrades(ctx context.Context, trades []models.TradeDet
 	batch := &pgx.Batch{}
 
 	for _, trade := range trades {
+		isMaker := trade.Role == "MAKER"
 		batch.Queue(`
 			INSERT INTO user_trades (
-				id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
-				timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
+				id, user_id, market_id, subject, type, side, is_maker, size, usdc_size, price, outcome,
+				timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
 			ON CONFLICT (id, timestamp) DO UPDATE SET
-				user_address = EXCLUDED.user_address,
-				asset = EXCLUDED.asset,
+				user_id = EXCLUDED.user_id,
+				market_id = EXCLUDED.market_id,
 				subject = EXCLUDED.subject,
 				type = EXCLUDED.type,
 				side = EXCLUDED.side,
-				role = EXCLUDED.role,
+				is_maker = EXCLUDED.is_maker,
 				size = EXCLUDED.size,
 				usdc_size = EXCLUDED.usdc_size,
 				price = EXCLUDED.price,
 				outcome = EXCLUDED.outcome,
 				title = EXCLUDED.title,
 				slug = EXCLUDED.slug,
+				event_slug = EXCLUDED.event_slug,
 				transaction_hash = EXCLUDED.transaction_hash,
 				name = EXCLUDED.name,
 				pseudonym = EXCLUDED.pseudonym
 		`,
 			trade.ID, trade.UserID, trade.MarketID, string(trade.Subject), trade.Type, trade.Side,
-			trade.Role, trade.Size, trade.UsdcSize, trade.Price, trade.Outcome, trade.Timestamp,
-			trade.Title, trade.Slug, trade.TransactionHash, trade.Name, trade.Pseudonym,
+			isMaker, trade.Size, trade.UsdcSize, trade.Price, trade.Outcome, trade.Timestamp,
+			trade.Title, trade.Slug, trade.EventSlug, trade.TransactionHash, trade.Name, trade.Pseudonym,
 		)
 	}
 
@@ -265,10 +267,10 @@ func (s *PostgresStore) ListUserTrades(ctx context.Context, userID string, limit
 
 	// Query PostgreSQL
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
-			   timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
+		SELECT id, user_id, market_id, subject, type, side, is_maker, size, usdc_size, price, outcome,
+			   timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
 		FROM user_trades
-		WHERE user_address = $1
+		WHERE user_id = $1
 		ORDER BY timestamp DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
@@ -281,11 +283,13 @@ func (s *PostgresStore) ListUserTrades(ctx context.Context, userID string, limit
 		var trade models.TradeDetail
 		var subject, tradeType string
 		var insertedAt *time.Time
+		var isMaker bool
+		var eventSlug *string
 
 		if err := rows.Scan(
 			&trade.ID, &trade.UserID, &trade.MarketID, &subject, &tradeType, &trade.Side,
-			&trade.Role, &trade.Size, &trade.UsdcSize, &trade.Price, &trade.Outcome,
-			&trade.Timestamp, &trade.Title, &trade.Slug,
+			&isMaker, &trade.Size, &trade.UsdcSize, &trade.Price, &trade.Outcome,
+			&trade.Timestamp, &trade.Title, &trade.Slug, &eventSlug,
 			&trade.TransactionHash, &trade.Name, &trade.Pseudonym, &insertedAt,
 		); err != nil {
 			return nil, err
@@ -293,8 +297,16 @@ func (s *PostgresStore) ListUserTrades(ctx context.Context, userID string, limit
 
 		trade.Subject = models.Subject(subject)
 		trade.Type = tradeType
+		if isMaker {
+			trade.Role = "MAKER"
+		} else {
+			trade.Role = "TAKER"
+		}
 		if insertedAt != nil {
 			trade.InsertedAt = *insertedAt
+		}
+		if eventSlug != nil {
+			trade.EventSlug = *eventSlug
 		}
 		trades = append(trades, trade)
 	}
@@ -621,7 +633,7 @@ func (s *PostgresStore) InvalidateAnalysisCache(ctx context.Context, userID stri
 // GetUserTradeCount returns the number of trades for a user
 func (s *PostgresStore) GetUserTradeCount(ctx context.Context, userID string) (int, error) {
 	var count int
-	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_trades WHERE user_address = $1`, userID).Scan(&count)
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_trades WHERE user_id = $1`, userID).Scan(&count)
 	return count, err
 }
 
@@ -829,15 +841,16 @@ func (s *PostgresStore) ReplaceTrades(ctx context.Context, trades map[string][]m
 
 	for _, tradeList := range trades {
 		for _, trade := range tradeList {
+			isMaker := trade.Role == "MAKER"
 			_, err := tx.Exec(ctx, `
 				INSERT INTO user_trades (
-					id, user_address, asset, subject, type, side, role, size, usdc_size, price, outcome,
-					timestamp, title, slug, transaction_hash, name, pseudonym, inserted_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
+					id, user_id, market_id, subject, type, side, is_maker, size, usdc_size, price, outcome,
+					timestamp, title, slug, event_slug, transaction_hash, name, pseudonym, inserted_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
 			`,
 				trade.ID, trade.UserID, trade.MarketID, string(trade.Subject), trade.Type, trade.Side,
-				trade.Role, trade.Size, trade.UsdcSize, trade.Price, trade.Outcome, trade.Timestamp,
-				trade.Title, trade.Slug, trade.TransactionHash, trade.Name, trade.Pseudonym,
+				isMaker, trade.Size, trade.UsdcSize, trade.Price, trade.Outcome, trade.Timestamp,
+				trade.Title, trade.Slug, trade.EventSlug, trade.TransactionHash, trade.Name, trade.Pseudonym,
 			)
 			if err != nil {
 				return err

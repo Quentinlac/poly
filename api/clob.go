@@ -468,20 +468,23 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 		VerifyingContract: verifyingContract,
 	}
 
+	// Convert string values to big integers for EIP-712
+	sideInt, _ := strconv.ParseInt(order.Side, 10, 64)
+
 	// Order message for EIP-712
 	message := map[string]interface{}{
-		"salt":        order.Salt,
-		"maker":       order.Maker,
-		"signer":      order.Signer,
-		"taker":       order.Taker,
-		"tokenId":     order.TokenID,
-		"makerAmount": order.MakerAmount,
-		"takerAmount": order.TakerAmount,
-		"expiration":  order.Expiration,
-		"nonce":       order.Nonce,
-		"feeRateBps":  order.FeeRateBps,
-		"side":        order.Side,
-		"signatureType": order.SignatureType,
+		"salt":          order.Salt,
+		"maker":         order.Maker,
+		"signer":        order.Signer,
+		"taker":         order.Taker,
+		"tokenId":       order.TokenID,
+		"makerAmount":   order.MakerAmount,
+		"takerAmount":   order.TakerAmount,
+		"expiration":    order.Expiration,
+		"nonce":         order.Nonce,
+		"feeRateBps":    order.FeeRateBps,
+		"side":          math.NewHexOrDecimal256(sideInt),
+		"signatureType": math.NewHexOrDecimal256(int64(order.SignatureType)),
 	}
 
 	typedData := apitypes.TypedData{
@@ -552,6 +555,13 @@ func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType Orde
 	if err != nil {
 		return nil, err
 	}
+
+	// Add browser-like headers to avoid Cloudflare blocking
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Origin", "https://polymarket.com")
+	req.Header.Set("Referer", "https://polymarket.com/")
 
 	// Add L2 headers
 	c.addL2Headers(req)
