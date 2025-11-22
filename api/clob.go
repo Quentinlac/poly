@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -112,7 +115,7 @@ type Order struct {
 	Expiration    string `json:"expiration"`
 	Nonce         string `json:"nonce"`
 	FeeRateBps    string `json:"feeRateBps"`
-	Side          string `json:"side"`
+	Side          int    `json:"side"`
 	SignatureType int    `json:"signatureType"`
 	Signature     string `json:"signature"`
 }
@@ -154,18 +157,19 @@ func NewClobClient(baseURL string, auth *Auth) (*ClobClient, error) {
 
 // DeriveAPICreds derives or creates API credentials
 func (c *ClobClient) DeriveAPICreds(ctx context.Context) (*APICreds, error) {
-	// First try to derive existing credentials
-	creds, err := c.deriveAPICreds(ctx)
+	// Try to create new credentials first (more reliable)
+	creds, err := c.createAPICreds(ctx)
 	if err == nil && creds != nil {
 		c.apiCreds = creds
+		log.Printf("[CLOB] Created new API credentials")
 		return creds, nil
 	}
 
-	// If that fails, create new credentials
-	log.Printf("[CLOB] Deriving creds failed, creating new: %v", err)
-	creds, err = c.createAPICreds(ctx)
+	// If that fails, try to derive existing credentials
+	log.Printf("[CLOB] Creating creds failed (%v), trying to derive existing", err)
+	creds, err = c.deriveAPICreds(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API creds: %w", err)
+		return nil, fmt.Errorf("failed to derive API creds: %w", err)
 	}
 
 	c.apiCreds = creds
@@ -368,8 +372,8 @@ func (c *ClobClient) PlaceMarketOrder(ctx context.Context, tokenID string, side 
 		return nil, fmt.Errorf("failed to create signed order: %w", err)
 	}
 
-	// Place the order
-	return c.postOrder(ctx, order, OrderTypeFOK)
+	// Place the order (using GTC for better compatibility)
+	return c.postOrder(ctx, order, OrderTypeGTC)
 }
 
 // PlaceLimitOrder places a limit order (GTC - Good-Til-Cancelled)
@@ -389,30 +393,46 @@ func (c *ClobClient) PlaceLimitOrder(ctx context.Context, tokenID string, side S
 }
 
 func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
-	// Convert to base units (6 decimals for USDC)
+	// Round price to tick size (0.01 for most markets)
+	tickSize := 0.01
+	price = float64(int(price/tickSize+0.5)) * tickSize
+
+	// Round size to 2 decimal places
+	size = float64(int(size*100+0.5)) / 100
+
+	// Enforce minimum order size
+	if size < 0.01 {
+		size = 0.01
+	}
+
+	log.Printf("[CLOB DEBUG] Rounded price: %.4f, size: %.4f", price, size)
+
+	// Convert to base units
+	// USDC: 6 decimals
+	// Outcome tokens: 6 decimals (same as USDC in Polymarket)
 	// MakerAmount: what we're giving (USDC for buy, tokens for sell)
 	// TakerAmount: what we're getting (tokens for buy, USDC for sell)
 
 	var makerAmount, takerAmount *big.Int
 	sideInt := 0 // 0 = BUY, 1 = SELL
 
-	// Amounts in base units (6 decimals)
+	// Token amounts in 6 decimals (same as USDC)
 	sizeUnits := new(big.Float).Mul(big.NewFloat(size), big.NewFloat(1e6))
-
 	sizeInt := new(big.Int)
 	sizeUnits.Int(sizeInt)
 
+	// USDC amount in 6 decimals
 	usdcAmount := new(big.Float).Mul(big.NewFloat(size*price), big.NewFloat(1e6))
 	usdcInt := new(big.Int)
 	usdcAmount.Int(usdcInt)
 
 	if side == SideBuy {
-		makerAmount = usdcInt    // We give USDC
-		takerAmount = sizeInt    // We get tokens
+		makerAmount = usdcInt    // We give USDC (6 decimals)
+		takerAmount = sizeInt    // We get tokens (6 decimals)
 		sideInt = 0
 	} else {
-		makerAmount = sizeInt    // We give tokens
-		takerAmount = usdcInt    // We get USDC
+		makerAmount = sizeInt    // We give tokens (6 decimals)
+		takerAmount = usdcInt    // We get USDC (6 decimals)
 		sideInt = 1
 	}
 
@@ -422,14 +442,18 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// Zero address for taker (anyone can fill)
 	takerAddress := "0x0000000000000000000000000000000000000000"
 
-	// Expiration: 24 hours from now
-	expiration := time.Now().Add(24 * time.Hour).Unix()
+	// Expiration: 0 for GTC orders (no expiration)
+	expiration := int64(0)
+
+	// Use checksummed addresses (Polymarket expects this format)
+	makerAddress := c.auth.GetAddress().Hex()
+	signerAddress := c.auth.GetAddress().Hex()
 
 	// Build order struct
 	order := &Order{
 		Salt:          salt,
-		Maker:         c.auth.GetAddress().Hex(),
-		Signer:        c.auth.GetAddress().Hex(),
+		Maker:         makerAddress,
+		Signer:        signerAddress,
 		Taker:         takerAddress,
 		TokenID:       tokenID,
 		MakerAmount:   makerAmount.String(),
@@ -437,7 +461,7 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 		Expiration:    strconv.FormatInt(expiration, 10),
 		Nonce:         "0",
 		FeeRateBps:    "0",
-		Side:          strconv.Itoa(sideInt),
+		Side:          sideInt,
 		SignatureType: 0, // EOA signature
 	}
 
@@ -469,22 +493,35 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 	}
 
 	// Convert string values to big integers for EIP-712
-	sideInt, _ := strconv.ParseInt(order.Side, 10, 64)
+	salt := new(big.Int)
+	salt.SetString(order.Salt, 10)
+	tokenId := new(big.Int)
+	tokenId.SetString(order.TokenID, 10)
+	makerAmount := new(big.Int)
+	makerAmount.SetString(order.MakerAmount, 10)
+	takerAmount := new(big.Int)
+	takerAmount.SetString(order.TakerAmount, 10)
+	expiration := new(big.Int)
+	expiration.SetString(order.Expiration, 10)
+	nonce := new(big.Int)
+	nonce.SetString(order.Nonce, 10)
+	feeRateBps := new(big.Int)
+	feeRateBps.SetString(order.FeeRateBps, 10)
 
-	// Order message for EIP-712
+	// Order message for EIP-712 - pass *big.Int for uint256 types
 	message := map[string]interface{}{
-		"salt":          order.Salt,
+		"salt":          salt,
 		"maker":         order.Maker,
 		"signer":        order.Signer,
 		"taker":         order.Taker,
-		"tokenId":       order.TokenID,
-		"makerAmount":   order.MakerAmount,
-		"takerAmount":   order.TakerAmount,
-		"expiration":    order.Expiration,
-		"nonce":         order.Nonce,
-		"feeRateBps":    order.FeeRateBps,
-		"side":          math.NewHexOrDecimal256(sideInt),
-		"signatureType": math.NewHexOrDecimal256(int64(order.SignatureType)),
+		"tokenId":       tokenId,
+		"makerAmount":   makerAmount,
+		"takerAmount":   takerAmount,
+		"expiration":    expiration,
+		"nonce":         nonce,
+		"feeRateBps":    feeRateBps,
+		"side":          big.NewInt(int64(order.Side)),
+		"signatureType": big.NewInt(int64(order.SignatureType)),
 	}
 
 	typedData := apitypes.TypedData{
@@ -515,20 +552,15 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 		Message:     message,
 	}
 
-	domainSeparator, err := typedData.HashStruct("EIP712Domain", typedData.Domain.Map())
+	// Hash the typed data using EIP-712
+	hash, _, err := apitypes.TypedDataAndHash(typedData)
 	if err != nil {
-		return "", fmt.Errorf("failed to hash domain: %w", err)
+		return "", fmt.Errorf("failed to hash typed data: %w", err)
 	}
 
-	typedDataHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
-	if err != nil {
-		return "", fmt.Errorf("failed to hash message: %w", err)
-	}
+	log.Printf("[CLOB DEBUG] EIP-712 hash: 0x%x", hash)
 
-	rawData := []byte(fmt.Sprintf("\x19\x01%s%s", string(domainSeparator), string(typedDataHash)))
-	hash := crypto.Keccak256Hash(rawData)
-
-	signature, err := crypto.Sign(hash.Bytes(), c.auth.privateKey)
+	signature, err := crypto.Sign(hash, c.auth.privateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign: %w", err)
 	}
@@ -542,7 +574,7 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType OrderType) (*OrderResponse, error) {
 	payload := OrderRequest{
 		Order:     *order,
-		Owner:     c.apiCreds.APIKey,
+		Owner:     c.auth.GetAddress().Hex(),
 		OrderType: orderType,
 	}
 
@@ -550,6 +582,8 @@ func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType Orde
 	if err != nil {
 		return nil, err
 	}
+
+	log.Printf("[CLOB DEBUG] Order payload: %s", string(body))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/order", bytes.NewReader(body))
 	if err != nil {
@@ -573,6 +607,9 @@ func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType Orde
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	log.Printf("[CLOB DEBUG] Response status: %d", resp.StatusCode)
+	log.Printf("[CLOB DEBUG] Response body: %s", string(respBody))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("post order failed: %d %s", resp.StatusCode, string(respBody))
@@ -602,33 +639,36 @@ func (c *ClobClient) addL2Headers(req *http.Request) {
 	signature := c.hmacSign(message, c.apiCreds.APISecret)
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("POLY-ADDRESS", c.auth.GetAddress().Hex())
-	req.Header.Set("POLY-API-KEY", c.apiCreds.APIKey)
-	req.Header.Set("POLY-PASSPHRASE", c.apiCreds.APIPassphrase)
-	req.Header.Set("POLY-TIMESTAMP", timestamp)
-	req.Header.Set("POLY-SIGNATURE", signature)
+	req.Header.Set("POLY_ADDRESS", c.auth.GetAddress().Hex())
+	req.Header.Set("POLY_API_KEY", c.apiCreds.APIKey)
+	req.Header.Set("POLY_PASSPHRASE", c.apiCreds.APIPassphrase)
+	req.Header.Set("POLY_TIMESTAMP", timestamp)
+	req.Header.Set("POLY_SIGNATURE", signature)
 }
 
 func (c *ClobClient) hmacSign(message string, secret string) string {
-	// Decode base64 secret
-	key, err := hex.DecodeString(secret)
+	// Decode URL-safe base64 secret
+	key, err := base64.URLEncoding.DecodeString(secret)
 	if err != nil {
-		// If not hex, use as-is
-		key = []byte(secret)
+		// Try standard base64
+		key, err = base64.StdEncoding.DecodeString(secret)
+		if err != nil {
+			// If not base64, use as-is
+			key = []byte(secret)
+		}
 	}
 
-	h := crypto.Keccak256Hash(append(key, []byte(message)...))
-	return hex.EncodeToString(h.Bytes())
+	// HMAC-SHA256 signature
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(message))
+	return base64.URLEncoding.EncodeToString(h.Sum(nil))
 }
 
 func generateSalt() string {
-	// Generate random 32-byte salt
-	salt := make([]byte, 32)
-	for i := range salt {
-		salt[i] = byte(time.Now().UnixNano() >> (i % 8))
-	}
-	saltBig := new(big.Int).SetBytes(salt)
-	return saltBig.String()
+	// Generate random salt (smaller number like Python SDK uses)
+	// Use current timestamp with some randomness
+	salt := time.Now().UnixNano() % 1000000000
+	return strconv.FormatInt(salt, 10)
 }
 
 // GetPrivateKey returns the private key (needed for signing)
