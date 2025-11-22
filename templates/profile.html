@@ -436,7 +436,7 @@
                 </thead>
                 <tbody>
                     {{range .trades}}
-                    <tr data-subject="{{.Subject}}" data-side="{{.Side}}" data-outcome="{{.Outcome}}" data-market="{{.Title}}" data-type="{{if .Type}}{{.Type}}{{else}}TRADE{{end}}" data-role="{{if .IsMaker}}MAKER{{else}}TAKER{{end}}">
+                    <tr data-subject="{{.Subject}}" data-side="{{.Side}}" data-outcome="{{.Outcome}}" data-market="{{.Title}}" data-type="{{if .Type}}{{.Type}}{{else}}TRADE{{end}}" data-role="{{if eq .Role "MAKER"}}MAKER{{else}}TAKER{{end}}">
                         <td>{{formatTime .Timestamp}}</td>
                         <td>{{if .InsertedAt.IsZero}}-{{else}}{{formatTime .InsertedAt}}{{end}}</td>
                         <td>
@@ -451,7 +451,7 @@
                         <td>
                             {{if eq .Type "REDEEM"}}
                                 <span>-</span>
-                            {{else if .IsMaker}}
+                            {{else if eq .Role "MAKER"}}
                                 <span class="role-maker">Maker</span>
                             {{else}}
                                 <span class="role-taker">Taker</span>
