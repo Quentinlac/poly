@@ -27,12 +27,13 @@ import (
 
 // ClobClient handles CLOB API interactions for trading
 type ClobClient struct {
-	baseURL    string
-	httpClient *http.Client
-	auth       *Auth
-	apiCreds   *APICreds
-	chainID    int64
-	funder     common.Address
+	baseURL       string
+	httpClient    *http.Client
+	auth          *Auth
+	apiCreds      *APICreds
+	chainID       int64
+	funder        common.Address
+	signatureType int // 0=EOA, 1=Magic/Email, 2=Browser proxy
 }
 
 // APICreds holds API credentials for CLOB
@@ -105,7 +106,7 @@ const (
 
 // Order represents a signed order
 type Order struct {
-	Salt          string `json:"salt"`
+	Salt          int64  `json:"salt"`
 	Maker         string `json:"maker"`
 	Signer        string `json:"signer"`
 	Taker         string `json:"taker"`
@@ -115,9 +116,10 @@ type Order struct {
 	Expiration    string `json:"expiration"`
 	Nonce         string `json:"nonce"`
 	FeeRateBps    string `json:"feeRateBps"`
-	Side          int    `json:"side"`
+	Side          string `json:"side"`
 	SignatureType int    `json:"signatureType"`
 	Signature     string `json:"signature"`
+	SideInt       int    `json:"-"` // Internal use for EIP-712 signing
 }
 
 // OrderRequest is the payload for placing an order
@@ -147,17 +149,32 @@ func NewClobClient(baseURL string, auth *Auth) (*ClobClient, error) {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		auth:    auth,
-		chainID: 137, // Polygon mainnet
-		funder:  auth.GetAddress(),
+		auth:          auth,
+		chainID:       137, // Polygon mainnet
+		funder:        auth.GetAddress(),
+		signatureType: 0, // Default to EOA
 	}
 
 	return client, nil
 }
 
+// SetFunder sets the funder address for Magic/Email wallets
+// The funder is the Polymarket profile address where USDC is held
+func (c *ClobClient) SetFunder(funderAddress string) {
+	c.funder = common.HexToAddress(funderAddress)
+}
+
+// SetSignatureType sets the signature type (0=EOA, 1=Magic/Email, 2=Browser proxy)
+func (c *ClobClient) SetSignatureType(sigType int) {
+	c.signatureType = sigType
+}
+
 // DeriveAPICreds derives or creates API credentials
 func (c *ClobClient) DeriveAPICreds(ctx context.Context) (*APICreds, error) {
-	// Try to create new credentials first (more reliable)
+	// First try to delete any existing credentials
+	c.deleteAPICreds(ctx)
+
+	// Try to create new credentials
 	creds, err := c.createAPICreds(ctx)
 	if err == nil && creds != nil {
 		c.apiCreds = creds
@@ -174,6 +191,34 @@ func (c *ClobClient) DeriveAPICreds(ctx context.Context) (*APICreds, error) {
 
 	c.apiCreds = creds
 	return creds, nil
+}
+
+func (c *ClobClient) deleteAPICreds(ctx context.Context) {
+	// Get L1 authentication headers
+	headers, err := c.auth.SignRequest()
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.baseURL+"/auth/api-key", nil)
+	if err != nil {
+		return
+	}
+
+	// Set L1 headers
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[CLOB] Deleted existing API credentials")
+	}
 }
 
 func (c *ClobClient) deriveAPICreds(ctx context.Context) (*APICreds, error) {
@@ -219,7 +264,11 @@ func (c *ClobClient) createAPICreds(ctx context.Context) (*APICreds, error) {
 		return nil, fmt.Errorf("failed to sign request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/auth/api-key", nil)
+	// Create with a nonce to generate unique API key
+	nonce := time.Now().UnixNano()
+	body := fmt.Sprintf(`{"nonce":%d}`, nonce)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/auth/api-key", bytes.NewBufferString(body))
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +277,7 @@ func (c *ClobClient) createAPICreds(ctx context.Context) (*APICreds, error) {
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -414,7 +464,8 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// TakerAmount: what we're getting (tokens for buy, USDC for sell)
 
 	var makerAmount, takerAmount *big.Int
-	sideInt := 0 // 0 = BUY, 1 = SELL
+	sideInt := 0     // 0 = BUY, 1 = SELL (for EIP-712)
+	sideStr := "BUY" // String for JSON payload
 
 	// Token amounts in 6 decimals (same as USDC)
 	sizeUnits := new(big.Float).Mul(big.NewFloat(size), big.NewFloat(1e6))
@@ -430,10 +481,12 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 		makerAmount = usdcInt    // We give USDC (6 decimals)
 		takerAmount = sizeInt    // We get tokens (6 decimals)
 		sideInt = 0
+		sideStr = "BUY"
 	} else {
 		makerAmount = sizeInt    // We give tokens (6 decimals)
 		takerAmount = usdcInt    // We get USDC (6 decimals)
 		sideInt = 1
+		sideStr = "SELL"
 	}
 
 	// Generate random salt
@@ -445,8 +498,9 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// Expiration: 0 for GTC orders (no expiration)
 	expiration := int64(0)
 
-	// Use checksummed addresses (Polymarket expects this format)
-	makerAddress := c.auth.GetAddress().Hex()
+	// For Magic wallets: maker = funder (where funds are), signer = private key wallet
+	// For EOA wallets: maker = signer = wallet address
+	makerAddress := c.funder.Hex()
 	signerAddress := c.auth.GetAddress().Hex()
 
 	// Build order struct
@@ -461,8 +515,9 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 		Expiration:    strconv.FormatInt(expiration, 10),
 		Nonce:         "0",
 		FeeRateBps:    "0",
-		Side:          sideInt,
-		SignatureType: 0, // EOA signature
+		Side:          sideStr,
+		SignatureType: c.signatureType, // Use client's signature type
+		SideInt:       sideInt,
 	}
 
 	// Sign the order using EIP-712
@@ -492,9 +547,8 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 		VerifyingContract: verifyingContract,
 	}
 
-	// Convert string values to big integers for EIP-712
-	salt := new(big.Int)
-	salt.SetString(order.Salt, 10)
+	// Convert values to big integers for EIP-712
+	salt := big.NewInt(order.Salt)
 	tokenId := new(big.Int)
 	tokenId.SetString(order.TokenID, 10)
 	makerAmount := new(big.Int)
@@ -520,7 +574,7 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 		"expiration":    expiration,
 		"nonce":         nonce,
 		"feeRateBps":    feeRateBps,
-		"side":          big.NewInt(int64(order.Side)),
+		"side":          big.NewInt(int64(order.SideInt)),
 		"signatureType": big.NewInt(int64(order.SignatureType)),
 	}
 
@@ -574,7 +628,7 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType OrderType) (*OrderResponse, error) {
 	payload := OrderRequest{
 		Order:     *order,
-		Owner:     c.auth.GetAddress().Hex(),
+		Owner:     c.apiCreds.APIKey, // Owner is the API key
 		OrderType: orderType,
 	}
 
@@ -627,6 +681,7 @@ func (c *ClobClient) addL2Headers(req *http.Request) {
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 
 	// Create signature for L2 auth
+	// Format: timestamp + method + path + body
 	message := timestamp + req.Method + req.URL.Path
 	if req.Body != nil {
 		// Read body for signature
@@ -635,15 +690,25 @@ func (c *ClobClient) addL2Headers(req *http.Request) {
 		message += string(bodyBytes)
 	}
 
+	log.Printf("[CLOB DEBUG] HMAC message: %s", message[:min(200, len(message))])
+
 	// HMAC signature using API secret
 	signature := c.hmacSign(message, c.apiCreds.APISecret)
+	log.Printf("[CLOB DEBUG] HMAC signature: %s", signature)
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("POLY_ADDRESS", c.auth.GetAddress().Hex())
+	req.Header.Set("POLY_ADDRESS", c.auth.GetAddress().Hex()) // Use signer address for L2 auth
 	req.Header.Set("POLY_API_KEY", c.apiCreds.APIKey)
 	req.Header.Set("POLY_PASSPHRASE", c.apiCreds.APIPassphrase)
 	req.Header.Set("POLY_TIMESTAMP", timestamp)
 	req.Header.Set("POLY_SIGNATURE", signature)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (c *ClobClient) hmacSign(message string, secret string) string {
@@ -664,11 +729,10 @@ func (c *ClobClient) hmacSign(message string, secret string) string {
 	return base64.URLEncoding.EncodeToString(h.Sum(nil))
 }
 
-func generateSalt() string {
+func generateSalt() int64 {
 	// Generate random salt (smaller number like Python SDK uses)
 	// Use current timestamp with some randomness
-	salt := time.Now().UnixNano() % 1000000000
-	return strconv.FormatInt(salt, 10)
+	return time.Now().UnixNano() % 1000000000
 }
 
 // GetPrivateKey returns the private key (needed for signing)

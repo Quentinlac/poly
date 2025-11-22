@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -75,6 +76,16 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	clobClient, err := api.NewClobClient("", auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CLOB client: %w", err)
+	}
+
+	// Configure for Magic/Email wallet if funder address is set
+	funderAddress := os.Getenv("POLYMARKET_FUNDER_ADDRESS")
+	if funderAddress != "" {
+		clobClient.SetFunder(funderAddress)
+		clobClient.SetSignatureType(1) // 1 = Magic/Email wallet (maker=funder, signer=EOA)
+		log.Printf("[CopyTrader] Configured for Magic wallet: funder=%s", funderAddress)
+	} else {
+		log.Printf("[CopyTrader] Using EOA wallet (no funder address set)")
 	}
 
 	// Set defaults
