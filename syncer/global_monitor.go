@@ -17,9 +17,10 @@ import (
 // GlobalTradeMonitor polls for ALL platform trades and redemptions.
 // This captures every trade happening on Polymarket for later analysis.
 type GlobalTradeMonitor struct {
-	subgraph *api.SubgraphClient
-	theGraph *api.TheGraphClient
-	store    storage.DataStore
+	subgraph    *api.SubgraphClient
+	theGraph    *api.TheGraphClient
+	polygonscan *api.PolygonscanClient
+	store       storage.DataStore
 
 	lastTradeTimestamp      int64
 	lastRedemptionTimestamp int64
@@ -31,10 +32,11 @@ type GlobalTradeMonitor struct {
 // NewGlobalTradeMonitor creates a new global trade monitor.
 func NewGlobalTradeMonitor(subgraph *api.SubgraphClient, theGraph *api.TheGraphClient, store storage.DataStore) *GlobalTradeMonitor {
 	return &GlobalTradeMonitor{
-		subgraph: subgraph,
-		theGraph: theGraph,
-		store:    store,
-		stop:     make(chan struct{}),
+		subgraph:    subgraph,
+		theGraph:    theGraph,
+		polygonscan: api.NewPolygonscanClient(),
+		store:       store,
+		stop:        make(chan struct{}),
 	}
 }
 
@@ -218,12 +220,39 @@ func (m *GlobalTradeMonitor) enrichRedemptionsWithMarketInfo(ctx context.Context
 }
 
 // convertTradesToDetails converts subgraph events to TradeDetail format.
-// Each trade event creates TWO trade details: one for maker, one for taker.
+// NEW: Queries Polygonscan to get the actual EOA sender for each transaction.
 func (m *GlobalTradeMonitor) convertTradesToDetails(events []api.OrderFilledEvent) []models.TradeDetail {
+	if len(events) == 0 {
+		return nil
+	}
+
+	// Collect unique transaction hashes
+	txHashes := make([]string, 0, len(events))
+	seen := make(map[string]bool)
+	for _, e := range events {
+		if !seen[e.TransactionHash] {
+			seen[e.TransactionHash] = true
+			txHashes = append(txHashes, e.TransactionHash)
+		}
+	}
+
+	// Fetch transaction senders from Polygonscan
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	txSenders := m.polygonscan.GetTransactionSenders(ctx, txHashes)
+
 	var details []models.TradeDetail
 
 	for _, e := range events {
 		timestamp, _ := strconv.ParseInt(e.Timestamp, 10, 64)
+
+		// Get the actual user (EOA) from Polygonscan
+		userAddress := txSenders[strings.ToLower(e.TransactionHash)]
+		if userAddress == "" {
+			// Fallback to maker if Polygonscan failed
+			userAddress = e.Maker
+			log.Printf("[global-monitor] Warning: Could not resolve EOA for tx %s, using maker %s", e.TransactionHash[:10]+"...", e.Maker[:10]+"...")
+		}
 
 		// Determine side based on asset IDs
 		makerSide := "SELL"
@@ -253,42 +282,21 @@ func (m *GlobalTradeMonitor) convertTradesToDetails(events []api.OrderFilledEven
 		// Calculate USDC value
 		usdcSize := size * price
 
-		// Create maker trade
-		makerTrade := models.TradeDetail{
-			ID:              e.ID + "-maker",
-			UserID:          e.Maker,
+		// Create ONE trade detail per event using the actual EOA
+		trade := models.TradeDetail{
+			ID:              e.ID,
+			UserID:          userAddress,
 			TransactionHash: e.TransactionHash,
 			MarketID:        assetID,
 			Side:            makerSide,
 			Type:            "TRADE",
-			Role:            "MAKER",
+			Role:            "TRADE",
 			Size:            size,
 			UsdcSize:        usdcSize,
 			Price:           price,
 			Timestamp:       time.Unix(timestamp, 0),
 		}
-		details = append(details, makerTrade)
-
-		// Create taker trade (opposite side)
-		takerSide := "BUY"
-		if makerSide == "BUY" {
-			takerSide = "SELL"
-		}
-
-		takerTrade := models.TradeDetail{
-			ID:              e.ID + "-taker",
-			UserID:          e.Taker,
-			TransactionHash: e.TransactionHash,
-			MarketID:        assetID,
-			Side:            takerSide,
-			Type:            "TRADE",
-			Role:            "TAKER",
-			Size:            size,
-			UsdcSize:        usdcSize,
-			Price:           price,
-			Timestamp:       time.Unix(timestamp, 0),
-		}
-		details = append(details, takerTrade)
+		details = append(details, trade)
 	}
 
 	return details

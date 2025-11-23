@@ -83,7 +83,7 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	if funderAddress != "" {
 		clobClient.SetFunder(funderAddress)
 		clobClient.SetSignatureType(1) // 1 = Magic/Email wallet (maker=funder, signer=EOA)
-		log.Printf("[CopyTrader] Configured for Magic wallet: funder=%s", funderAddress)
+		log.Printf("[CopyTrader] Configured for Magic wallet")
 	} else {
 		log.Printf("[CopyTrader] Using EOA wallet (no funder address set)")
 	}
