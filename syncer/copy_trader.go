@@ -93,7 +93,7 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		config.Multiplier = 0.05 // 1/20th
 	}
 	if config.MinOrderUSDC == 0 {
-		config.MinOrderUSDC = 1.0 // $1 minimum
+		config.MinOrderUSDC = 1.05 // Slightly above $1 minimum to avoid "min size: $1" errors
 	}
 	if config.CheckIntervalSec == 0 {
 		config.CheckIntervalSec = 2 // 2 seconds

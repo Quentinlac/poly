@@ -455,7 +455,6 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 		size = 0.01
 	}
 
-	log.Printf("[CLOB DEBUG] Rounded price: %.4f, size: %.4f", price, size)
 
 	// Convert to base units
 	// USDC: 6 decimals
@@ -531,13 +530,10 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 }
 
 func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
-	// Polymarket uses different contract addresses for neg_risk markets
-	var verifyingContract string
-	if negRisk {
-		verifyingContract = "0xC5d563A36AE78145C45a50134d48A1215220f80a" // NegRiskCTFExchange
-	} else {
-		verifyingContract = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // CTFExchange
-	}
+	// Always use NegRiskCTFExchange on Polygon mainnet
+	// The CTFExchange is for older contracts and gives "invalid signature" errors
+	verifyingContract := "0xC5d563A36AE78145C45a50134d48A1215220f80a" // NegRiskCTFExchange
+	_ = negRisk // Ignore negRisk parameter - always use NegRiskCTFExchange
 
 	chainID := math.NewHexOrDecimal256(c.chainID)
 	domain := apitypes.TypedDataDomain{
@@ -562,12 +558,20 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 	feeRateBps := new(big.Int)
 	feeRateBps.SetString(order.FeeRateBps, 10)
 
-	// Order message for EIP-712 - pass *big.Int for uint256 types
+	// Ensure addresses are in checksum format
+	makerAddr := common.HexToAddress(order.Maker).Hex()
+	signerAddr := common.HexToAddress(order.Signer).Hex()
+	takerAddr := common.HexToAddress(order.Taker).Hex()
+
+
+	// Order message for EIP-712
+	// Use *big.Int for uint256 types, and *big.Int for uint8 types too
+	// (go-ethereum's apitypes handles the encoding)
 	message := map[string]interface{}{
 		"salt":          salt,
-		"maker":         order.Maker,
-		"signer":        order.Signer,
-		"taker":         order.Taker,
+		"maker":         makerAddr,
+		"signer":        signerAddr,
+		"taker":         takerAddr,
 		"tokenId":       tokenId,
 		"makerAmount":   makerAmount,
 		"takerAmount":   takerAmount,
@@ -612,8 +616,6 @@ func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
 		return "", fmt.Errorf("failed to hash typed data: %w", err)
 	}
 
-	log.Printf("[CLOB DEBUG] EIP-712 hash: 0x%x", hash)
-
 	signature, err := crypto.Sign(hash, c.auth.privateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign: %w", err)
@@ -637,8 +639,6 @@ func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType Orde
 		return nil, err
 	}
 
-	log.Printf("[CLOB DEBUG] Order payload: %s", string(body))
-
 	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/order", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -661,9 +661,6 @@ func (c *ClobClient) postOrder(ctx context.Context, order *Order, orderType Orde
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-
-	log.Printf("[CLOB DEBUG] Response status: %d", resp.StatusCode)
-	log.Printf("[CLOB DEBUG] Response body: %s", string(respBody))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("post order failed: %d %s", resp.StatusCode, string(respBody))
@@ -690,14 +687,11 @@ func (c *ClobClient) addL2Headers(req *http.Request) {
 		message += string(bodyBytes)
 	}
 
-	log.Printf("[CLOB DEBUG] HMAC message: %s", message[:min(200, len(message))])
-
 	// HMAC signature using API secret
 	signature := c.hmacSign(message, c.apiCreds.APISecret)
-	log.Printf("[CLOB DEBUG] HMAC signature: %s", signature)
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("POLY_ADDRESS", c.auth.GetAddress().Hex()) // Use signer address for L2 auth
+	req.Header.Set("POLY_ADDRESS", c.auth.GetAddress().Hex())
 	req.Header.Set("POLY_API_KEY", c.apiCreds.APIKey)
 	req.Header.Set("POLY_PASSPHRASE", c.apiCreds.APIPassphrase)
 	req.Header.Set("POLY_TIMESTAMP", timestamp)
