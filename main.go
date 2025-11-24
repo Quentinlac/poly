@@ -112,6 +112,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/top-users", h.GetTopUsers)
+		api.GET("/users/imported", h.GetAllImportedUsers)
 		api.POST("/import-top-users", h.ImportTopUsers)
 		api.GET("/import-status/:id", h.GetImportStatus)
 	}
