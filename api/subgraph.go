@@ -537,11 +537,11 @@ func (e *OrderFilledEvent) ConvertToDataTradeForUser(userAddress string) DataTra
 		UsdcSize:        Numeric(usdcSize),
 		Price:           Numeric(price),
 		Timestamp:       timestamp,
-		Title:           "",      // Would need market lookup
+		Title:           "", // Would need market lookup
 		Slug:            "",
 		Icon:            "",
 		EventSlug:       "",
-		Outcome:         "",      // Would need market lookup
+		Outcome:         "", // Would need market lookup
 		OutcomeIndex:    0,
 		Name:            "",
 		Pseudonym:       "",
@@ -561,6 +561,20 @@ func (e *OrderFilledEvent) ConvertToDataTradeWithInfo(tokenMap map[string]TokenI
 		trade.Title = info.Title
 		trade.Slug = info.Slug
 		trade.Outcome = info.Outcome
+
+		// Normalize to user's outcome perspective (match Polymarket UI)
+		// If user sold "No", show as BUY "Yes" (the position they're getting)
+		// This makes copy trading intuitive - users see the actual position taken
+		if trade.Side == "SELL" && isComplementOutcome(info.Outcome) {
+			trade.Side = "BUY"
+			trade.Outcome = getComplementOutcome(info.Outcome)
+			trade.Price = Numeric(1 - trade.Price.Float64()) // Complement price
+		} else if trade.Side == "BUY" && isComplementOutcome(info.Outcome) {
+			// User bought "No" - normalize to SELL "Yes"
+			trade.Side = "SELL"
+			trade.Outcome = getComplementOutcome(info.Outcome)
+			trade.Price = Numeric(1 - trade.Price.Float64())
+		}
 	}
 
 	return trade
@@ -703,12 +717,12 @@ func GetUniqueTokenIDs(events []OrderFilledEvent) []string {
 
 // RedemptionEvent represents a redemption from the subgraph
 type RedemptionEvent struct {
-	ID          string   `json:"id"`
-	Payout      string   `json:"payout"`
-	Redeemer    string   `json:"redeemer"`
-	Timestamp   string   `json:"timestamp"`
-	Condition   string   `json:"condition"`   // conditionId - used to lookup market
-	IndexSets   []string `json:"indexSets"`   // which outcomes were redeemed
+	ID        string   `json:"id"`
+	Payout    string   `json:"payout"`
+	Redeemer  string   `json:"redeemer"`
+	Timestamp string   `json:"timestamp"`
+	Condition string   `json:"condition"` // conditionId - used to lookup market
+	IndexSets []string `json:"indexSets"` // which outcomes were redeemed
 }
 
 // RedemptionResponse represents the GraphQL response for redemptions
