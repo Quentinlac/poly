@@ -48,6 +48,9 @@ type DataStore interface {
 
 	// Analytics
 	GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error)
+
+	// Cache invalidation
+	InvalidateUserListCache(ctx context.Context) error
 }
 
 // Ensure both implementations satisfy the interface

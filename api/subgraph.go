@@ -375,6 +375,7 @@ func (c *SubgraphClient) fetchTradesByRoleSince(ctx context.Context, userAddress
 func (c *SubgraphClient) fetchTradesByRole(ctx context.Context, userAddress string, role string) ([]OrderFilledEvent, error) {
 	var allEvents []OrderFilledEvent
 	skip := 0
+	maxTrades := 100000 // Cap to prevent endless fetching
 
 	for {
 		query := fmt.Sprintf(`{
@@ -409,6 +410,17 @@ func (c *SubgraphClient) fetchTradesByRole(ctx context.Context, userAddress stri
 		}
 
 		allEvents = append(allEvents, events...)
+
+		// Log progress every 5000 trades
+		if len(allEvents)%5000 < SubgraphBatchSize {
+			log.Printf("[Subgraph] Fetching %s trades: %d so far...", role, len(allEvents))
+		}
+
+		// Cap to prevent endless fetching
+		if len(allEvents) >= maxTrades {
+			log.Printf("[Subgraph] Reached %s trade cap of %d for user %s", role, maxTrades, userAddress[:10])
+			break
+		}
 
 		if len(events) < SubgraphBatchSize {
 			break

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -1510,4 +1511,20 @@ func (s *PostgresStore) GetUserAnalyticsList(ctx context.Context, filter UserAna
 	}
 
 	return results, totalCount, rows.Err()
+}
+
+// InvalidateUserListCache clears all cached user lists from Redis
+func (s *PostgresStore) InvalidateUserListCache(ctx context.Context) error {
+	// Delete all user list cache keys (pattern: users:*)
+	keys, err := s.redis.Keys(ctx, "users:*").Result()
+	if err != nil {
+		return err
+	}
+	if len(keys) > 0 {
+		if err := s.redis.Del(ctx, keys...).Err(); err != nil {
+			return err
+		}
+		log.Printf("[Storage] Invalidated %d user list cache keys", len(keys))
+	}
+	return nil
 }

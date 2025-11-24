@@ -648,6 +648,9 @@ func (s *Service) runImportJob(jobID string, addresses []string) {
 
 	// Invalidate caches
 	s.InvalidateCaches()
+	if err := s.store.InvalidateUserListCache(context.Background()); err != nil {
+		log.Printf("[Import] Failed to invalidate user list cache: %v", err)
+	}
 }
 
 // ImportTopUsers fetches all historical trades for a list of users and stores them.
@@ -696,6 +699,9 @@ func (s *Service) ImportTopUsers(ctx context.Context, addresses []string) ([]Imp
 
 	// Invalidate caches after bulk import
 	s.InvalidateCaches()
+	if err := s.store.InvalidateUserListCache(ctx); err != nil {
+		log.Printf("[Import] Failed to invalidate user list cache: %v", err)
+	}
 
 	return results, nil
 }
