@@ -223,12 +223,14 @@ func (c *Client) GetActivity(ctx context.Context, params TradeQuery) ([]DataTrad
 	return activity, nil
 }
 
-// GetRedemptions fetches all REDEEM activities for a user.
+// GetRedemptions fetches REDEEM activities for a user.
 // This fetches token redemptions when markets resolve.
+// Capped at 50,000 redemptions to prevent excessive API calls for users with huge histories.
 func (c *Client) GetRedemptions(ctx context.Context, userAddress string) ([]DataTrade, error) {
 	var allRedemptions []DataTrade
 	offset := 0
 	batchSize := 500
+	maxRedemptions := 50000
 
 	for {
 		params := TradeQuery{
@@ -249,6 +251,12 @@ func (c *Client) GetRedemptions(ctx context.Context, userAddress string) ([]Data
 
 		allRedemptions = append(allRedemptions, redemptions...)
 		log.Printf("[API] Fetched %d redemptions (offset=%d, total=%d)", len(redemptions), offset, len(allRedemptions))
+
+		// Cap at maxRedemptions to prevent excessive API calls
+		if len(allRedemptions) >= maxRedemptions {
+			log.Printf("[API] Reached redemption cap of %d for user %s", maxRedemptions, userAddress[:10])
+			break
+		}
 
 		if len(redemptions) < batchSize {
 			break
