@@ -23,7 +23,7 @@ func main() {
 	if privateKey == "" {
 		log.Fatal("POLYMARKET_PRIVATE_KEY not set")
 	}
-	log.Printf("Private key found: %s...%s", privateKey[:6], privateKey[len(privateKey)-4:])
+	// Private key loaded successfully (not logging for security)
 
 	// Create auth
 	auth, err := api.NewAuth()
