@@ -28,6 +28,10 @@ type Service struct {
 	cacheMu       sync.RWMutex
 	rankingsCache map[string]rankingsCacheEntry
 	profileCache  map[string]userCacheEntry
+
+	// Job management
+	importJobs map[string]*ImportJob
+	jobsMu     sync.RWMutex
 }
 
 type rankingsCacheEntry struct {
@@ -65,6 +69,7 @@ func NewService(store storage.DataStore, cfg *config.Config, apiClient *api.Clie
 		subgraphClient: api.NewSubgraphClient(),
 		rankingsCache:  make(map[string]rankingsCacheEntry),
 		profileCache:   make(map[string]userCacheEntry),
+		importJobs:     make(map[string]*ImportJob),
 	}
 }
 
@@ -517,6 +522,119 @@ type ImportUserResult struct {
 	TradeCount  int     `json:"trade_count"`
 	ErrorMsg    string  `json:"error_msg,omitempty"`
 	DurationSec float64 `json:"duration_sec"`
+}
+
+// ImportJob represents an asynchronous import task
+type ImportJob struct {
+	ID          string             `json:"id"`
+	Status      string             `json:"status"`   // "pending", "running", "completed", "failed"
+	Progress    int                `json:"progress"` // 0-100
+	TotalUsers  int                `json:"total_users"`
+	Processed   int                `json:"processed"`
+	Results     []ImportUserResult `json:"results"`
+	Error       string             `json:"error,omitempty"`
+	CreatedAt   time.Time          `json:"created_at"`
+	CompletedAt time.Time          `json:"completed_at,omitempty"`
+}
+
+// StartImportJob initiates an asynchronous import job
+func (s *Service) StartImportJob(ctx context.Context, addresses []string) string {
+	jobID := fmt.Sprintf("job_%d", time.Now().UnixNano())
+
+	job := &ImportJob{
+		ID:         jobID,
+		Status:     "pending",
+		TotalUsers: len(addresses),
+		CreatedAt:  time.Now(),
+		Results:    make([]ImportUserResult, 0),
+	}
+
+	s.jobsMu.Lock()
+	s.importJobs[jobID] = job
+	s.jobsMu.Unlock()
+
+	// Run import in background
+	go s.runImportJob(jobID, addresses)
+
+	return jobID
+}
+
+// GetImportJob returns the status of an import job
+func (s *Service) GetImportJob(jobID string) *ImportJob {
+	s.jobsMu.RLock()
+	defer s.jobsMu.RUnlock()
+
+	if job, ok := s.importJobs[jobID]; ok {
+		// Return a copy to avoid race conditions
+		jobCopy := *job
+		return &jobCopy
+	}
+	return nil
+}
+
+// runImportJob executes the import job in background
+func (s *Service) runImportJob(jobID string, addresses []string) {
+	s.jobsMu.Lock()
+	job, ok := s.importJobs[jobID]
+	if !ok {
+		s.jobsMu.Unlock()
+		return
+	}
+	job.Status = "running"
+	s.jobsMu.Unlock()
+
+	// Worker pool configuration
+	const maxWorkers = 5
+	resultsChan := make(chan ImportUserResult, len(addresses))
+	addressChan := make(chan string, len(addresses))
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for addr := range addressChan {
+				// Use background context for async job
+				result := s.importSingleUser(context.Background(), addr)
+				resultsChan <- result
+			}
+		}()
+	}
+
+	for _, addr := range addresses {
+		addressChan <- addr
+	}
+	close(addressChan)
+
+	// Monitor progress
+	go func() {
+		processed := 0
+		for result := range resultsChan {
+			s.jobsMu.Lock()
+			if job, ok := s.importJobs[jobID]; ok {
+				job.Results = append(job.Results, result)
+				job.Processed++
+				processed++
+				job.Progress = int(float64(processed) / float64(job.TotalUsers) * 100)
+			}
+			s.jobsMu.Unlock()
+		}
+	}()
+
+	wg.Wait()
+	close(resultsChan)
+
+	// Mark completed
+	s.jobsMu.Lock()
+	if job, ok := s.importJobs[jobID]; ok {
+		job.Status = "completed"
+		job.CompletedAt = time.Now()
+		job.Progress = 100
+	}
+	s.jobsMu.Unlock()
+
+	// Invalidate caches
+	s.InvalidateCaches()
 }
 
 // ImportTopUsers fetches all historical trades for a list of users and stores them.
@@ -1191,10 +1309,10 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 	// Fetch REDEEM activities from REST API
 	if s.apiClient != nil {
 		redemptions, err := s.apiClient.GetActivity(ctx, api.TradeQuery{
-			User:   normalized,
-			Limit:  500,
-			Types:  []string{"REDEEM"},
-			After:  sinceTimestamp,
+			User:  normalized,
+			Limit: 500,
+			Types: []string{"REDEEM"},
+			After: sinceTimestamp,
 		})
 		if err != nil {
 			log.Printf("[Service] Warning: failed to fetch redemptions: %v", err)

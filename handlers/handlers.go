@@ -273,30 +273,31 @@ func (h *Handler) ImportTopUsers(c *gin.Context) {
 		return
 	}
 
-	if len(cleaned) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid addresses provided"})
-		return
-	}
+	// Start async import job
+	jobID := h.service.StartImportJob(c.Request.Context(), cleaned)
 
-	results, err := h.service.ImportTopUsers(c.Request.Context(), cleaned)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "import failed: " + err.Error()})
-		return
-	}
-
-	successCount := 0
-	for _, r := range results {
-		if r.Success {
-			successCount++
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"results":       results,
-		"total":         len(results),
-		"success_count": successCount,
-		"failed_count":  len(results) - successCount,
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "Import started",
+		"job_id":  jobID,
+		"count":   len(cleaned),
 	})
+}
+
+// GetImportStatus returns the status of an import job
+func (h *Handler) GetImportStatus(c *gin.Context) {
+	jobID := c.Param("id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job ID required"})
+		return
+	}
+
+	job := h.service.GetImportJob(jobID)
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, job)
 }
 
 // PrePopulateTokens fetches all tokens from CLOB API and saves them to database.

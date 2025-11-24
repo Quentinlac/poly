@@ -108,15 +108,12 @@ func main() {
 	r.GET("/", h.Index)
 	r.GET("/api/subjects", h.GetSubjects)
 
-	// API routes with query parameter validation
+	// API routes
 	api := r.Group("/api")
-	api.Use(middleware.ValidateQueryParams())
 	{
-		api.GET("/users/top", h.GetTopUsers)
-		api.GET("/users/imported", h.GetAllImportedUsers)
-		api.GET("/analytics", h.GetAnalyticsList)
+		api.GET("/top-users", h.GetTopUsers)
 		api.POST("/import-top-users", h.ImportTopUsers)
-		api.POST("/pre-populate-tokens", h.PrePopulateTokens)
+		api.GET("/import-status/:id", h.GetImportStatus)
 	}
 
 	// User-specific routes with ID validation
