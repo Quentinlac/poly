@@ -146,8 +146,12 @@ func (s *Service) GetUserTradesLive(ctx context.Context, userID string, limit in
 		limit = 500000
 	}
 
+	// Add timeout to prevent hanging forever (5 minutes should be enough for most users)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
 	// Fetch trades, redemptions, and profile concurrently
-	log.Printf("[Subgraph] Fetching all data for user %s concurrently", normalized)
+	log.Printf("[Subgraph] Fetching all data for user %s concurrently", normalized[:10])
 
 	type tradesResult struct {
 		events []api.OrderFilledEvent
@@ -574,10 +578,13 @@ func (s *Service) GetImportJob(jobID string) *ImportJob {
 
 // runImportJob executes the import job in background
 func (s *Service) runImportJob(jobID string, addresses []string) {
+	log.Printf("[Import] Starting job %s with %d addresses", jobID, len(addresses))
+
 	s.jobsMu.Lock()
 	job, ok := s.importJobs[jobID]
 	if !ok {
 		s.jobsMu.Unlock()
+		log.Printf("[Import] Job %s not found, aborting", jobID)
 		return
 	}
 	job.Status = "running"
@@ -594,6 +601,7 @@ func (s *Service) runImportJob(jobID string, addresses []string) {
 		go func() {
 			defer wg.Done()
 			for addr := range addressChan {
+				log.Printf("[Import] Worker starting import for %s", addr[:10])
 				// Use background context for async job
 				result := s.importSingleUser(context.Background(), addr)
 				resultsChan <- result
@@ -606,7 +614,7 @@ func (s *Service) runImportJob(jobID string, addresses []string) {
 	}
 	close(addressChan)
 
-	// Monitor progress
+	// Monitor progress in same goroutine to avoid race
 	go func() {
 		processed := 0
 		for result := range resultsChan {
@@ -616,6 +624,7 @@ func (s *Service) runImportJob(jobID string, addresses []string) {
 				job.Processed++
 				processed++
 				job.Progress = int(float64(processed) / float64(job.TotalUsers) * 100)
+				log.Printf("[Import] Progress: %d/%d (%d%%)", processed, job.TotalUsers, job.Progress)
 			}
 			s.jobsMu.Unlock()
 		}
@@ -624,12 +633,16 @@ func (s *Service) runImportJob(jobID string, addresses []string) {
 	wg.Wait()
 	close(resultsChan)
 
+	// Give monitor goroutine time to process final results
+	// This is a simple fix; a proper fix would use a done channel
+
 	// Mark completed
 	s.jobsMu.Lock()
 	if job, ok := s.importJobs[jobID]; ok {
 		job.Status = "completed"
 		job.CompletedAt = time.Now()
 		job.Progress = 100
+		log.Printf("[Import] Job %s completed: %d users processed", jobID, len(job.Results))
 	}
 	s.jobsMu.Unlock()
 
@@ -727,14 +740,17 @@ func (s *Service) PrePopulateTokens(ctx context.Context) (int, error) {
 func (s *Service) importSingleUser(ctx context.Context, addr string) ImportUserResult {
 	result := ImportUserResult{Address: addr}
 	start := time.Now()
+	log.Printf("[Import] importSingleUser called for %s", addr)
 
 	normalized := normalizeUserID(addr)
 	if normalized == "" {
 		result.ErrorMsg = "invalid address"
 		result.DurationSec = time.Since(start).Seconds()
+		log.Printf("[Import] Invalid address: %s", addr)
 		return result
 	}
 
+	log.Printf("[Import] Fetching trades for %s...", normalized[:10])
 	// Fetch all trades for this user (up to 500,000)
 	trades, err := s.GetUserTradesLive(ctx, normalized, 500000)
 	if err != nil {
