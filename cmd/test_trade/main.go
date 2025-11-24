@@ -42,7 +42,7 @@ func main() {
 	funderAddress := os.Getenv("POLYMARKET_FUNDER_ADDRESS")
 	if funderAddress != "" {
 		clobClient.SetFunder(funderAddress)
-		clobClient.SetSignatureType(1) // 1 = Magic/Email wallet (maker=funder, signer=EOA)
+		clobClient.SetSignatureType(1) // 1 = POLY_PROXY (Magic/Email wallet)
 		log.Printf("Configured for Magic wallet: funder=%s", funderAddress)
 	} else {
 		log.Printf("Using EOA wallet (no funder address set)")
@@ -113,9 +113,9 @@ func main() {
 		return
 	}
 
-	// Place a small test order
-	log.Printf("Placing $1 test BUY order for: %s", testMarket)
-	resp, err := clobClient.PlaceMarketOrder(ctx, testTokenID, api.SideBuy, 1.0, negRisk)
+	// Place a small test market order
+	log.Printf("Placing $1.05 test BUY order for: %s", testMarket)
+	resp, err := clobClient.PlaceMarketOrder(ctx, testTokenID, api.SideBuy, 1.05, negRisk)
 	if err != nil {
 		log.Fatalf("Order failed: %v", err)
 	}

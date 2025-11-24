@@ -1350,18 +1350,18 @@ type UserAnalyticsRecord struct {
 
 // UserAnalyticsFilter contains filter options for analytics queries
 type UserAnalyticsFilter struct {
-	MinPnL         *float64
-	MaxPnL         *float64
-	MinBets        *int
-	MaxBets        *int
-	MinPnLPercent  *float64
-	MaxPnLPercent  *float64
-	HideBots       bool
-	DataComplete   *bool
-	SortBy         string
-	SortDesc       bool
-	Limit          int
-	Offset         int
+	MinPnL        *float64
+	MaxPnL        *float64
+	MinBets       *int
+	MaxBets       *int
+	MinPnLPercent *float64
+	MaxPnLPercent *float64
+	HideBots      bool
+	DataComplete  *bool
+	SortBy        string
+	SortDesc      bool
+	Limit         int
+	Offset        int
 }
 
 // GetUserAnalyticsList returns filtered and sorted user analytics
@@ -1425,23 +1425,23 @@ func (s *PostgresStore) GetUserAnalyticsList(ctx context.Context, filter UserAna
 	// Build ORDER BY clause
 	sortColumn := "net_pnl"
 	validSorts := map[string]string{
-		"pnl":              "net_pnl",
-		"pnl_percent":      "pnl_percentage",
-		"bets":             "total_bets",
-		"buy":              "total_buy_usd",
-		"sell":             "total_sell_redeem_usd",
-		"avg_investment":   "avg_investment_per_market",
-		"trades_per_day":   "trades_per_day_avg",
-		"markets":          "unique_markets",
-		"fast_trades":      "fast_trades",
-		"avg_trades":       "avg_trades",
-		"slow_trades":      "slow_trades",
-		"fast_pnl":         "fast_avg_pnl",
-		"mid_pnl":          "mid_avg_pnl",
-		"slow_pnl":         "slow_avg_pnl",
-		"first_trade":      "first_trade_at",
-		"last_trade":       "last_trade_at",
-		"updated":          "updated_at",
+		"pnl":            "net_pnl",
+		"pnl_percent":    "pnl_percentage",
+		"bets":           "total_bets",
+		"buy":            "total_buy_usd",
+		"sell":           "total_sell_redeem_usd",
+		"avg_investment": "avg_investment_per_market",
+		"trades_per_day": "trades_per_day_avg",
+		"markets":        "unique_markets",
+		"fast_trades":    "fast_trades",
+		"avg_trades":     "avg_trades",
+		"slow_trades":    "slow_trades",
+		"fast_pnl":       "fast_avg_pnl",
+		"mid_pnl":        "mid_avg_pnl",
+		"slow_pnl":       "slow_avg_pnl",
+		"first_trade":    "first_trade_at",
+		"last_trade":     "last_trade_at",
+		"updated":        "updated_at",
 	}
 	if col, ok := validSorts[filter.SortBy]; ok {
 		sortColumn = col

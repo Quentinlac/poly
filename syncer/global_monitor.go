@@ -337,6 +337,7 @@ func (m *GlobalTradeMonitor) convertRedemptionsToDetails(events []api.Redemption
 }
 
 // enrichTradesWithTokenInfo looks up token metadata from the database and enriches trade details.
+// For missing tokens, it fetches them from the Gamma API and caches them.
 func (m *GlobalTradeMonitor) enrichTradesWithTokenInfo(ctx context.Context, trades []models.TradeDetail) []models.TradeDetail {
 	if len(trades) == 0 {
 		return trades
@@ -350,23 +351,63 @@ func (m *GlobalTradeMonitor) enrichTradesWithTokenInfo(ctx context.Context, trad
 		}
 	}
 
-	// Batch lookup all tokens
+	// Batch lookup all tokens from database
 	tokenInfoMap := make(map[string]*storage.TokenInfo)
+	missingTokens := []string{}
+
 	for tokenID := range tokenIDs {
 		info, err := m.store.GetTokenInfo(ctx, tokenID)
 		if err == nil && info != nil {
 			tokenInfoMap[tokenID] = info
+		} else {
+			missingTokens = append(missingTokens, tokenID)
+		}
+	}
+
+	// Fetch missing tokens from Gamma API
+	if len(missingTokens) > 0 {
+		log.Printf("[global-monitor] Fetching %d missing tokens from Gamma API", len(missingTokens))
+
+		apiTokenMap, err := m.subgraph.BuildTokenMap(ctx, missingTokens)
+		if err != nil {
+			log.Printf("[global-monitor] Warning: failed to fetch tokens from API: %v", err)
+		} else {
+			// Convert api.TokenInfo to storage.TokenInfo and save to cache
+			toCache := make(map[string]storage.TokenInfo)
+			for tokenID, apiInfo := range apiTokenMap {
+				storageInfo := storage.TokenInfo{
+					TokenID:     apiInfo.TokenID,
+					ConditionID: apiInfo.ConditionID,
+					Outcome:     apiInfo.Outcome,
+					Title:       apiInfo.Title,
+					Slug:        apiInfo.Slug,
+				}
+				toCache[tokenID] = storageInfo
+				tokenInfoMap[tokenID] = &storageInfo
+			}
+
+			// Save to cache for future use
+			if len(toCache) > 0 {
+				if err := m.store.SaveTokenCache(ctx, toCache); err != nil {
+					log.Printf("[global-monitor] Warning: failed to save token cache: %v", err)
+				} else {
+					log.Printf("[global-monitor] Cached %d new tokens", len(toCache))
+				}
+			}
 		}
 	}
 
 	// Enrich trades with token metadata
+	enrichedCount := 0
 	for i := range trades {
 		if info, ok := tokenInfoMap[trades[i].MarketID]; ok {
 			trades[i].Title = info.Title
 			trades[i].Outcome = info.Outcome
 			trades[i].Slug = info.Slug
+			enrichedCount++
 		}
 	}
 
+	log.Printf("[global-monitor] Enriched %d/%d trades with token metadata", enrichedCount, len(trades))
 	return trades
 }

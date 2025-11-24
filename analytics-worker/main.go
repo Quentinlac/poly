@@ -46,9 +46,9 @@ func main() {
 		dbURL = "postgres://polymarket:polymarket@localhost:15432/polymarket?sslmode=disable"
 	}
 
-	// Parse interval from environment (default 1 hour)
+	// Parse interval from environment (default 5 minutes)
 	intervalStr := os.Getenv("ANALYTICS_INTERVAL")
-	interval := 1 * time.Hour
+	interval := 5 * time.Minute
 	if intervalStr != "" {
 		if d, err := time.ParseDuration(intervalStr); err == nil {
 			interval = d
