@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"html/template"
 	"log"
 	"os"
@@ -73,46 +72,8 @@ func main() {
 
 	log.Println("[main] Global trade monitor started (trades: 2s, redemptions: 5min)")
 
-	// Start copy trader for automated trade copying
-	copyTraderEnabled := os.Getenv("COPY_TRADER_ENABLED")
-	if copyTraderEnabled == "true" || copyTraderEnabled == "1" {
-		copyConfig := syncer.CopyTraderConfig{
-			Enabled:          true,
-			Multiplier:       0.05, // 1/20th
-			MinOrderUSDC:     1.0,  // $1 minimum
-			CheckIntervalSec: 2,    // 2 seconds
-		}
-
-		// Parse custom multiplier if set
-		if mult := os.Getenv("COPY_TRADER_MULTIPLIER"); mult != "" {
-			if v, err := strconv.ParseFloat(mult, 64); err == nil {
-				copyConfig.Multiplier = v
-			}
-		}
-
-		// Parse custom minimum if set
-		if minUSDC := os.Getenv("COPY_TRADER_MIN_USDC"); minUSDC != "" {
-			if v, err := strconv.ParseFloat(minUSDC, 64); err == nil {
-				copyConfig.MinOrderUSDC = v
-			}
-		}
-
-		copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
-		if err != nil {
-			log.Printf("[main] Warning: failed to create copy trader: %v", err)
-		} else {
-			ctx := context.Background()
-			if err := copyTrader.Start(ctx); err != nil {
-				log.Printf("[main] Warning: failed to start copy trader: %v", err)
-			} else {
-				defer copyTrader.Stop()
-				log.Printf("[main] Copy trader started (multiplier=%.2f, minUSDC=$%.2f)",
-					copyConfig.Multiplier, copyConfig.MinOrderUSDC)
-			}
-		}
-	} else {
-		log.Println("[main] Copy trader disabled (set COPY_TRADER_ENABLED=true to enable)")
-	}
+	// Copy trader has been moved to cmd/worker/main.go
+	// Run it separately: go run cmd/worker/main.go
 
 	// Set up router
 	r := gin.Default()

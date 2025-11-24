@@ -55,6 +55,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  copy-trader-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymarket-copy-trader
+    command: go run cmd/worker/main.go
+    environment:
+      # PostgreSQL connection
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-polymarket}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-polymarket123}
+      - POSTGRES_DB=${POSTGRES_DB:-polymarket}
+      # Redis connection
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # Copy trader config
+      - COPY_TRADER_MULTIPLIER=${COPY_TRADER_MULTIPLIER:-0.05}
+      - COPY_TRADER_MIN_USDC=${COPY_TRADER_MIN_USDC:-1.0}
+      # Polymarket credentials
+      - POLYMARKET_PRIVATE_KEY=${POLYMARKET_PRIVATE_KEY}
+      - POLYMARKET_FUNDER_ADDRESS=${POLYMARKET_FUNDER_ADDRESS}
+      - POLYMARKET_API_URL=${POLYMARKET_API_URL:-https://clob.polymarket.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: polymarket-postgres
