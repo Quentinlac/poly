@@ -1012,5 +1012,12 @@ func (s *Store) DeleteUserCopySettings(ctx context.Context, userAddress string) 
 
 // GetUserAnalyticsList stub (not implemented for SQLite Store)
 func (s *Store) GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error) {
-	return nil, 0, nil
+	// SQLite implementation doesn't have user analytics
+	return []UserAnalyticsRecord{}, 0, nil
+}
+
+// InvalidateUserListCache is a no-op for SQLite as it doesn't use external caching for user lists
+func (s *Store) InvalidateUserListCache(ctx context.Context) error {
+	// SQLite doesn't use Redis caching, so there's nothing to invalidate
+	return nil
 }
