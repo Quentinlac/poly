@@ -38,7 +38,7 @@ type UserAnalytics struct {
 }
 
 func main() {
-	log.Println("[Analytics Worker] Starting...")
+	log.Println("[Analytics Worker] Starting v2...")
 
 	// Get database connection string from environment
 	dbURL := os.Getenv("DATABASE_URL")
