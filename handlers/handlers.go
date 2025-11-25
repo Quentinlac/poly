@@ -568,7 +568,7 @@ func (h *Handler) PrivilegedKnowledgePage(c *gin.Context) {
 	})
 }
 
-// GetPrivilegedKnowledgeAPI returns privileged knowledge analysis data
+// GetPrivilegedKnowledgeAPI returns privileged knowledge analysis data (pre-computed)
 func (h *Handler) GetPrivilegedKnowledgeAPI(c *gin.Context) {
 	// Parse time window (minutes)
 	timeWindowStr := c.DefaultQuery("window", "5")
@@ -577,24 +577,31 @@ func (h *Handler) GetPrivilegedKnowledgeAPI(c *gin.Context) {
 		timeWindow = 5
 	}
 
-	// Parse price threshold (percentage as decimal, e.g., 30 = 0.30)
+	// Parse price threshold (percentage, e.g., 30 = 30%)
 	thresholdStr := c.DefaultQuery("threshold", "30")
-	thresholdPct, err := strconv.ParseFloat(thresholdStr, 64)
+	thresholdPct, err := strconv.Atoi(thresholdStr)
 	if err != nil || thresholdPct <= 0 {
 		thresholdPct = 30
 	}
-	threshold := thresholdPct / 100.0 // Convert 30 to 0.30
 
-	results, err := h.service.GetPrivilegedKnowledgeAnalysis(c.Request.Context(), timeWindow, threshold)
+	results, meta, err := h.service.GetPrivilegedKnowledgeAnalysis(c.Request.Context(), timeWindow, thresholdPct)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to analyze: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load analysis: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"users":         results,
 		"count":         len(results),
 		"time_window":   timeWindow,
 		"threshold_pct": thresholdPct,
-	})
+	}
+
+	// Add metadata if available
+	if meta != nil && !meta.LastComputedAt.IsZero() {
+		response["last_computed_at"] = meta.LastComputedAt
+		response["computation_duration_sec"] = meta.DurationSec
+	}
+
+	c.JSON(http.StatusOK, response)
 }

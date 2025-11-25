@@ -337,10 +337,14 @@
                 <h3>Price Threshold</h3>
                 <div class="value" id="stat-threshold">+30%</div>
             </div>
+            <div class="stat-card">
+                <h3>Last Computed</h3>
+                <div class="value" id="stat-computed" style="font-size: 1em;">-</div>
+            </div>
         </div>
 
         <div id="loading" class="loading">
-            <p>Loading analysis... (this may take a minute)</p>
+            <p>Loading pre-computed analysis...</p>
         </div>
 
         <div id="error" class="error hidden"></div>
@@ -394,6 +398,15 @@
                 document.getElementById('stat-users').textContent = data.count || 0;
                 document.getElementById('stat-window').textContent = formatTime(windowMin);
                 document.getElementById('stat-threshold').textContent = `+${thresholdPct}%`;
+
+                // Show last computed time
+                if (data.last_computed_at) {
+                    const computed = new Date(data.last_computed_at);
+                    const ago = Math.round((Date.now() - computed.getTime()) / 60000);
+                    document.getElementById('stat-computed').textContent = `${ago} min ago`;
+                } else {
+                    document.getElementById('stat-computed').textContent = 'Not yet';
+                }
 
                 renderResults(data.users || []);
 

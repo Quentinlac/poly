@@ -432,3 +432,33 @@ CREATE TABLE IF NOT EXISTS user_copy_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_copy_settings_enabled ON user_copy_settings(enabled);
+
+-- ============================================================================
+-- PRIVILEGED KNOWLEDGE ANALYSIS (Pre-computed)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS privileged_analysis (
+    id SERIAL PRIMARY KEY,
+    time_window_minutes INTEGER NOT NULL,
+    price_threshold_pct INTEGER NOT NULL,
+    user_address VARCHAR(42) NOT NULL,
+    hit_count INTEGER NOT NULL,
+    total_buys INTEGER NOT NULL,
+    hit_rate DECIMAL(10, 4) NOT NULL,
+    hits_json JSONB NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(time_window_minutes, price_threshold_pct, user_address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_privileged_window_threshold ON privileged_analysis(time_window_minutes, price_threshold_pct);
+CREATE INDEX IF NOT EXISTS idx_privileged_hit_count ON privileged_analysis(time_window_minutes, price_threshold_pct, hit_count DESC);
+CREATE INDEX IF NOT EXISTS idx_privileged_computed ON privileged_analysis(computed_at);
+
+-- Track when each analysis was last computed
+CREATE TABLE IF NOT EXISTS privileged_analysis_meta (
+    time_window_minutes INTEGER NOT NULL,
+    price_threshold_pct INTEGER NOT NULL,
+    last_computed_at TIMESTAMPTZ NOT NULL,
+    computation_duration_sec DECIMAL(10, 2),
+    user_count INTEGER,
+    PRIMARY KEY (time_window_minutes, price_threshold_pct)
+);

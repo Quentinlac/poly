@@ -1353,13 +1353,13 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 	return allTrades, nil
 }
 
-// GetPrivilegedKnowledgeAnalysis finds users with potential privileged knowledge
-func (s *Service) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThreshold float64) ([]storage.PrivilegedUser, error) {
+// GetPrivilegedKnowledgeAnalysis reads pre-computed results
+func (s *Service) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThresholdPct int) ([]storage.PrivilegedUser, *storage.PrivilegedAnalysisMeta, error) {
 	// Type assert to PostgresStore since this method is only on PostgresStore
 	pgStore, ok := s.store.(*storage.PostgresStore)
 	if !ok {
-		return nil, fmt.Errorf("privileged knowledge analysis requires PostgreSQL store")
+		return nil, nil, fmt.Errorf("privileged knowledge analysis requires PostgreSQL store")
 	}
 
-	return pgStore.GetPrivilegedKnowledgeAnalysis(ctx, timeWindowMinutes, priceThreshold)
+	return pgStore.GetPrivilegedKnowledgeAnalysis(ctx, timeWindowMinutes, priceThresholdPct)
 }

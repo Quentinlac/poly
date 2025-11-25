@@ -1650,26 +1650,74 @@ type PrivilegedUser struct {
 	Hits        []PrivilegedHit `json:"hits"`
 }
 
-// GetPrivilegedKnowledgeAnalysis finds users whose buys are followed by price increases
-// timeWindowMinutes: how long to look after buy (5, 10, 30, 120, 360)
-// priceThreshold: minimum price increase (0.30 = 30%, 0.50 = 50%, 0.80 = 80%)
-func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThreshold float64) ([]PrivilegedUser, error) {
-	// Cache key based on parameters
-	cacheKey := fmt.Sprintf("privileged:%d:%.2f", timeWindowMinutes, priceThreshold)
+// PrivilegedAnalysisMeta contains metadata about when analysis was computed
+type PrivilegedAnalysisMeta struct {
+	TimeWindowMinutes int
+	PriceThresholdPct int
+	LastComputedAt    time.Time
+	DurationSec       float64
+	UserCount         int
+}
 
-	// Check Redis cache first (cache for 5 minutes - this is expensive)
-	cached, err := s.redis.Get(ctx, cacheKey).Bytes()
-	if err == nil {
-		var results []PrivilegedUser
-		if json.Unmarshal(cached, &results) == nil {
-			return results, nil
+// GetPrivilegedKnowledgeAnalysis reads pre-computed results from database
+func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThresholdPct int) ([]PrivilegedUser, *PrivilegedAnalysisMeta, error) {
+	// Read from pre-computed table
+	rows, err := s.pool.Query(ctx, `
+		SELECT user_address, hit_count, total_buys, hit_rate, hits_json
+		FROM privileged_analysis
+		WHERE time_window_minutes = $1 AND price_threshold_pct = $2
+		ORDER BY hit_count DESC
+		LIMIT 100
+	`, timeWindowMinutes, priceThresholdPct)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read privileged analysis: %w", err)
+	}
+	defer rows.Close()
+
+	var results []PrivilegedUser
+	for rows.Next() {
+		var user PrivilegedUser
+		var hitsJSON []byte
+
+		err := rows.Scan(&user.UserAddress, &user.HitCount, &user.TotalBuys, &user.HitRate, &hitsJSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("scan privileged user: %w", err)
 		}
+
+		if err := json.Unmarshal(hitsJSON, &user.Hits); err != nil {
+			log.Printf("[Storage] Warning: failed to unmarshal hits for %s: %v", user.UserAddress, err)
+			user.Hits = []PrivilegedHit{}
+		}
+
+		results = append(results, user)
 	}
 
-	// Query to find privileged knowledge indicators
-	// 1. Find all BUY trades
-	// 2. For each BUY, check if there's a subsequent trade at higher price within time window
-	// 3. Group by user
+	// Get metadata
+	var meta PrivilegedAnalysisMeta
+	meta.TimeWindowMinutes = timeWindowMinutes
+	meta.PriceThresholdPct = priceThresholdPct
+
+	err = s.pool.QueryRow(ctx, `
+		SELECT last_computed_at, COALESCE(computation_duration_sec, 0), COALESCE(user_count, 0)
+		FROM privileged_analysis_meta
+		WHERE time_window_minutes = $1 AND price_threshold_pct = $2
+	`, timeWindowMinutes, priceThresholdPct).Scan(&meta.LastComputedAt, &meta.DurationSec, &meta.UserCount)
+	if err != nil {
+		// No meta yet, that's okay
+		meta.LastComputedAt = time.Time{}
+	}
+
+	return results, &meta, rows.Err()
+}
+
+// ComputeAndSavePrivilegedAnalysis runs the expensive query and saves results to database
+func (s *PostgresStore) ComputeAndSavePrivilegedAnalysis(ctx context.Context, timeWindowMinutes int, priceThresholdPct int) error {
+	startTime := time.Now()
+	priceThreshold := float64(priceThresholdPct) / 100.0
+
+	log.Printf("[Privileged] Computing %dmin/+%d%% analysis...", timeWindowMinutes, priceThresholdPct)
+
+	// Heavy query to find privileged knowledge indicators
 	query := `
 		WITH user_buys AS (
 			SELECT
@@ -1732,7 +1780,7 @@ func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, time
 	interval := fmt.Sprintf("%d minutes", timeWindowMinutes)
 	rows, err := s.pool.Query(ctx, query, interval, priceThreshold)
 	if err != nil {
-		return nil, fmt.Errorf("privileged knowledge query: %w", err)
+		return fmt.Errorf("privileged knowledge query: %w", err)
 	}
 	defer rows.Close()
 
@@ -1743,15 +1791,13 @@ func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, time
 
 		err := rows.Scan(&user.UserAddress, &user.HitCount, &user.TotalBuys, &hitsJSON)
 		if err != nil {
-			return nil, fmt.Errorf("scan privileged user: %w", err)
+			return fmt.Errorf("scan privileged user: %w", err)
 		}
 
 		if err := json.Unmarshal(hitsJSON, &user.Hits); err != nil {
-			log.Printf("[Storage] Warning: failed to unmarshal hits for %s: %v", user.UserAddress, err)
 			user.Hits = []PrivilegedHit{}
 		}
 
-		// Calculate hit rate
 		if user.TotalBuys > 0 {
 			user.HitRate = float64(user.HitCount) / float64(user.TotalBuys) * 100
 		}
@@ -1759,10 +1805,45 @@ func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, time
 		results = append(results, user)
 	}
 
-	// Cache for 5 minutes
-	if data, err := json.Marshal(results); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 5*time.Minute)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate results: %w", err)
 	}
 
-	return results, rows.Err()
+	// Delete old results for this window/threshold
+	_, err = s.pool.Exec(ctx, `
+		DELETE FROM privileged_analysis
+		WHERE time_window_minutes = $1 AND price_threshold_pct = $2
+	`, timeWindowMinutes, priceThresholdPct)
+	if err != nil {
+		return fmt.Errorf("delete old results: %w", err)
+	}
+
+	// Insert new results
+	for _, user := range results {
+		hitsJSON, _ := json.Marshal(user.Hits)
+		_, err = s.pool.Exec(ctx, `
+			INSERT INTO privileged_analysis (time_window_minutes, price_threshold_pct, user_address, hit_count, total_buys, hit_rate, hits_json, computed_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		`, timeWindowMinutes, priceThresholdPct, user.UserAddress, user.HitCount, user.TotalBuys, user.HitRate, hitsJSON)
+		if err != nil {
+			return fmt.Errorf("insert result: %w", err)
+		}
+	}
+
+	// Update metadata
+	duration := time.Since(startTime).Seconds()
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO privileged_analysis_meta (time_window_minutes, price_threshold_pct, last_computed_at, computation_duration_sec, user_count)
+		VALUES ($1, $2, NOW(), $3, $4)
+		ON CONFLICT (time_window_minutes, price_threshold_pct) DO UPDATE SET
+			last_computed_at = NOW(),
+			computation_duration_sec = $3,
+			user_count = $4
+	`, timeWindowMinutes, priceThresholdPct, duration, len(results))
+	if err != nil {
+		return fmt.Errorf("update meta: %w", err)
+	}
+
+	log.Printf("[Privileged] Computed %dmin/+%d%%: %d users in %.1fs", timeWindowMinutes, priceThresholdPct, len(results), duration)
+	return nil
 }
