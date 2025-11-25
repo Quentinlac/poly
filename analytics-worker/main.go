@@ -557,8 +557,14 @@ func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWind
 	log.Printf("[Privileged] Computing %dmin/+%d%% analysis...", timeWindowMinutes, priceThresholdPct)
 
 	// Heavy query to find privileged knowledge indicators
+	// Limited to 400K most recent trades to avoid timeout/disk issues
 	query := `
-	WITH user_buys AS (
+	WITH recent_trades AS (
+		SELECT * FROM global_trades
+		ORDER BY timestamp DESC
+		LIMIT 400000
+	),
+	user_buys AS (
 		SELECT
 			user_address,
 			asset,
@@ -566,11 +572,10 @@ func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWind
 			timestamp,
 			title,
 			outcome
-		FROM global_trades
+		FROM recent_trades
 		WHERE side = 'BUY'
 		AND type = 'TRADE'
 		AND price > 0
-		AND timestamp > NOW() - INTERVAL '30 days'
 	),
 	price_hits AS (
 		SELECT
@@ -583,7 +588,7 @@ func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWind
 			MIN(gt.price) as hit_price,
 			MIN(gt.timestamp) as hit_time
 		FROM user_buys ub
-		JOIN global_trades gt ON gt.asset = ub.asset
+		JOIN recent_trades gt ON gt.asset = ub.asset
 		WHERE gt.timestamp > ub.timestamp
 		AND gt.timestamp <= ub.timestamp + $1::interval
 		AND gt.price >= ub.price * (1 + $2)
