@@ -564,11 +564,13 @@ func aggregatePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool) {
 		query := fmt.Sprintf(`
 			WITH user_stats AS (
 				SELECT
-					user_address,
+					tsf.user_address,
 					COUNT(*) as total_buys,
 					SUM(CASE WHEN %s THEN 1 ELSE 0 END) as hit_count
-				FROM trade_spike_flags
-				GROUP BY user_address
+				FROM trade_spike_flags tsf
+				LEFT JOIN user_analytics ua ON tsf.user_address = ua.user_address
+				WHERE ua.is_bot IS NOT TRUE
+				GROUP BY tsf.user_address
 				HAVING SUM(CASE WHEN %s THEN 1 ELSE 0 END) >= 3
 			),
 			user_hits AS (
