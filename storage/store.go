@@ -352,6 +352,34 @@ func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([
 	return trades, nil
 }
 
+// ListUserTradeIDs returns only trade IDs for a user - lightweight for deduplication
+func (s *Store) ListUserTradeIDs(ctx context.Context, userID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id FROM user_trades
+        WHERE user_address = ?
+        ORDER BY datetime(timestamp) DESC
+        LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, rows.Err()
+}
+
 func (s *Store) saveUserTx(ctx context.Context, tx *sql.Tx, user models.User) error {
 	lastActive := timeString(user.LastActive)
 	lastSynced := timeString(user.LastSyncedAt)

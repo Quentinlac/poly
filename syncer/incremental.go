@@ -71,7 +71,8 @@ func (w *IncrementalWorker) Start() {
 			case <-w.stop:
 				return
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), interval-500*time.Millisecond)
+				// Use 10 second timeout - queries can be slow under load
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				if err := w.tick(ctx); err != nil {
 					log.Printf("[incremental] tick error: %v", err)
 				}
@@ -171,21 +172,21 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	}
 
 	// Process new trades - check for duplicates before inserting
-	// Get existing trade IDs to avoid duplicates
-	existingTrades, err := w.store.ListUserTrades(ctx, user.Address, 10000)
+	// Get existing trade IDs to avoid duplicates (lightweight query - only IDs)
+	existingIDs, err := w.store.ListUserTradeIDs(ctx, user.Address, 10000)
 	if err != nil {
 		return fmt.Errorf("list existing trades: %w", err)
 	}
 
-	existingIDs := make(map[string]bool, len(existingTrades))
-	for _, t := range existingTrades {
-		existingIDs[t.ID] = true
+	existingIDMap := make(map[string]bool, len(existingIDs))
+	for _, id := range existingIDs {
+		existingIDMap[id] = true
 	}
 
 	// Filter out duplicates
 	newTradeDetails := make([]models.TradeDetail, 0, len(trades))
 	for _, trade := range trades {
-		if !existingIDs[trade.ID] {
+		if !existingIDMap[trade.ID] {
 			newTradeDetails = append(newTradeDetails, trade)
 		}
 	}

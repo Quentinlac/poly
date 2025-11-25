@@ -330,6 +330,48 @@ func (s *PostgresStore) ListUserTrades(ctx context.Context, userID string, limit
 	return trades, rows.Err()
 }
 
+// ListUserTradeIDs returns only trade IDs for a user - lightweight for deduplication
+func (s *PostgresStore) ListUserTradeIDs(ctx context.Context, userID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+
+	// Check Redis cache first
+	cacheKey := fmt.Sprintf("trade_ids:%s:%d", userID, limit)
+	cached, err := s.redis.SMembers(ctx, cacheKey).Result()
+	if err == nil && len(cached) > 0 {
+		return cached, nil
+	}
+
+	// Query PostgreSQL - only fetch id column
+	rows, err := s.pool.Query(ctx, `
+		SELECT id FROM user_trades
+		WHERE user_id = $1
+		ORDER BY timestamp DESC
+		LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	// Cache for 30 seconds (shorter since it's used frequently)
+	if len(ids) > 0 {
+		s.redis.SAdd(ctx, cacheKey, ids)
+		s.redis.Expire(ctx, cacheKey, 30*time.Second)
+	}
+
+	return ids, rows.Err()
+}
+
 func (s *PostgresStore) saveUserTx(ctx context.Context, tx pgx.Tx, user models.User) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO users (id, username, address, total_trades, total_pnl, win_rate, consistency, last_active, last_synced_at, updated_at)

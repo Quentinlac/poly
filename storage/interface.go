@@ -23,6 +23,7 @@ type DataStore interface {
 	SaveTrades(ctx context.Context, trades []models.TradeDetail, markProcessed bool) error
 	SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error
 	ListUserTrades(ctx context.Context, userID string, limit int) ([]models.TradeDetail, error)
+	ListUserTradeIDs(ctx context.Context, userID string, limit int) ([]string, error) // Lightweight - only IDs
 	GetUserTradeCount(ctx context.Context, userID string) (int, error)
 
 	// Analysis cache operations
