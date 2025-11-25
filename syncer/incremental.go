@@ -200,8 +200,8 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 		return nil
 	}
 
-	// Save new trades
-	if err := w.store.SaveTrades(ctx, newTradeDetails); err != nil {
+	// Save new trades - do NOT mark as processed so copy trader can pick them up
+	if err := w.store.SaveTrades(ctx, newTradeDetails, false); err != nil {
 		return fmt.Errorf("save trades: %w", err)
 	}
 

@@ -20,7 +20,7 @@ type DataStore interface {
 
 	// Trade operations
 	ReplaceTrades(ctx context.Context, trades map[string][]models.TradeDetail) error
-	SaveTrades(ctx context.Context, trades []models.TradeDetail) error
+	SaveTrades(ctx context.Context, trades []models.TradeDetail, markProcessed bool) error
 	SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error
 	ListUserTrades(ctx context.Context, userID string, limit int) ([]models.TradeDetail, error)
 	GetUserTradeCount(ctx context.Context, userID string) (int, error)

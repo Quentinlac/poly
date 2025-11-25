@@ -152,7 +152,9 @@ func (s *Store) ReplaceTrades(ctx context.Context, trades map[string][]models.Tr
 }
 
 // SaveTrades upserts a batch of trades (used for importing user data).
-func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail) error {
+// If markProcessed is true, trades are also marked as processed to skip copy trading.
+// Note: SQLite backend does not support copy trading, so markProcessed is ignored here.
+func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail, markProcessed bool) error {
 	if len(trades) == 0 {
 		return nil
 	}

@@ -779,8 +779,9 @@ func (s *Service) importSingleUser(ctx context.Context, addr string) ImportUserR
 	}
 
 	// Now save trades (foreign key constraint satisfied)
+	// Mark as processed to skip copy trading for historical trades
 	if len(trades) > 0 {
-		if err := s.store.SaveTrades(ctx, trades); err != nil {
+		if err := s.store.SaveTrades(ctx, trades, true); err != nil {
 			result.ErrorMsg = fmt.Sprintf("failed to save trades: %v", err)
 			result.DurationSec = time.Since(start).Seconds()
 			return result

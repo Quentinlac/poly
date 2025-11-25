@@ -155,7 +155,8 @@ func (s *PostgresStore) ReplaceAllUsers(ctx context.Context, users []models.User
 }
 
 // SaveTrades upserts a batch of trades using batch insert
-func (s *PostgresStore) SaveTrades(ctx context.Context, trades []models.TradeDetail) error {
+// If markProcessed is true, trades are also marked as processed to skip copy trading
+func (s *PostgresStore) SaveTrades(ctx context.Context, trades []models.TradeDetail, markProcessed bool) error {
 	if len(trades) == 0 {
 		return nil
 	}
@@ -200,6 +201,15 @@ func (s *PostgresStore) SaveTrades(ctx context.Context, trades []models.TradeDet
 	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("batch exec %d: %w", i, err)
+		}
+	}
+
+	// Mark trades as processed if requested (skip copy trading for historical trades)
+	if markProcessed {
+		for _, trade := range trades {
+			if err := s.MarkTradeProcessed(ctx, trade.ID); err != nil {
+				return fmt.Errorf("mark trade processed %s: %w", trade.ID, err)
+			}
 		}
 	}
 
