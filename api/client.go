@@ -314,6 +314,29 @@ func (c *Client) GetClosedPositions(ctx context.Context, params ClosedPositionsQ
 	return positions, nil
 }
 
+// GetOpenPositions fetches current open positions (holdings) for a user.
+// This uses the data-api /positions endpoint.
+func (c *Client) GetOpenPositions(ctx context.Context, userAddress string) ([]OpenPosition, error) {
+	if userAddress == "" {
+		return nil, fmt.Errorf("user address is required for open positions")
+	}
+
+	values := url.Values{}
+	values.Set("user", userAddress)
+
+	resp, err := c.doRequest(ctx, http.MethodGet, c.DataBaseURL, "/positions", values, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var positions []OpenPosition
+	if err := json.NewDecoder(resp.Body).Decode(&positions); err != nil {
+		return nil, fmt.Errorf("failed to decode open positions: %w", err)
+	}
+	return positions, nil
+}
+
 func (c *Client) doRequest(ctx context.Context, method, baseURL, path string, query url.Values, useAuth bool) (*http.Response, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + path
 	if query != nil && len(query) > 0 {

@@ -21,6 +21,7 @@ type CopyTrader struct {
 	config     CopyTraderConfig
 	running    bool
 	stopCh     chan struct{}
+	myAddress  string // Our wallet address for position lookups
 }
 
 // CopyTraderConfig holds configuration for copy trading
@@ -28,6 +29,7 @@ type CopyTraderConfig struct {
 	Enabled          bool
 	Multiplier       float64 // 0.05 = 1/20th
 	MinOrderUSDC     float64 // Minimum order size
+	MaxPriceSlippage float64 // Max price above trader's price (0.20 = 20%)
 	CheckIntervalSec int     // Poll frequency
 }
 
@@ -95,8 +97,17 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	if config.MinOrderUSDC == 0 {
 		config.MinOrderUSDC = 1.05 // Slightly above $1 minimum to avoid "min size: $1" errors
 	}
+	if config.MaxPriceSlippage == 0 {
+		config.MaxPriceSlippage = 0.20 // 20% max slippage above trader's price
+	}
 	if config.CheckIntervalSec == 0 {
 		config.CheckIntervalSec = 2 // 2 seconds
+	}
+
+	// Determine our wallet address for position lookups
+	myAddress := funderAddress
+	if myAddress == "" {
+		myAddress = auth.GetAddress().Hex()
 	}
 
 	return &CopyTrader{
@@ -105,6 +116,7 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		clobClient: clobClient,
 		config:     config,
 		stopCh:     make(chan struct{}),
+		myAddress:  myAddress,
 	}, nil
 }
 
@@ -260,8 +272,36 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 		log.Printf("[CopyTrader] BUY amount below minimum, using $%.2f", intendedUSDC)
 	}
 
-	log.Printf("[CopyTrader] BUY: Original=$%.2f, Copy=$%.4f, Market=%s, Outcome=%s",
-		trade.UsdcSize, intendedUSDC, trade.Title, trade.Outcome)
+	// Get order book FIRST to check price before buying
+	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to get order book: %v", err)
+		log.Printf("[CopyTrader] BUY failed: %s", errMsg)
+		return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "failed", errMsg, "")
+	}
+
+	if len(book.Asks) == 0 {
+		errMsg := "no asks in order book - no liquidity"
+		log.Printf("[CopyTrader] BUY failed: %s", errMsg)
+		return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "failed", errMsg, "")
+	}
+
+	// Check max price protection - don't pay more than X% above trader's price
+	bestAskPrice := 0.0
+	if len(book.Asks) > 0 {
+		fmt.Sscanf(book.Asks[0].Price, "%f", &bestAskPrice)
+	}
+	maxAllowedPrice := trade.Price * (1 + ct.config.MaxPriceSlippage)
+
+	if bestAskPrice > maxAllowedPrice {
+		errMsg := fmt.Sprintf("price too high: best ask %.4f > max allowed %.4f (trader paid %.4f + %.0f%% slippage)",
+			bestAskPrice, maxAllowedPrice, trade.Price, ct.config.MaxPriceSlippage*100)
+		log.Printf("[CopyTrader] BUY skipped: %s", errMsg)
+		return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, bestAskPrice, 0, "skipped", errMsg, "")
+	}
+
+	log.Printf("[CopyTrader] BUY: Original=$%.2f@%.4f, Copy=$%.4f, CurrentAsk=%.4f, MaxPrice=%.4f, Market=%s, Outcome=%s",
+		trade.UsdcSize, trade.Price, intendedUSDC, bestAskPrice, maxAllowedPrice, trade.Title, trade.Outcome)
 
 	// Place market order
 	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideBuy, intendedUSDC, negRisk)
@@ -276,12 +316,9 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 		return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "")
 	}
 
-	// Get order book to estimate what we got
-	book, _ := ct.clobClient.GetOrderBook(ctx, tokenID)
+	// Estimate what we got from the order book
 	var avgPrice, sizeBought, actualUSDC float64
-	if book != nil {
-		sizeBought, avgPrice, actualUSDC = api.CalculateOptimalFill(book, api.SideBuy, intendedUSDC)
-	}
+	sizeBought, avgPrice, actualUSDC = api.CalculateOptimalFill(book, api.SideBuy, intendedUSDC)
 
 	log.Printf("[CopyTrader] BUY success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f",
 		resp.OrderID, resp.Status, sizeBought, avgPrice)
@@ -303,76 +340,113 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 }
 
 func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
-	// Get our current position for this market/outcome
-	position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
-	if err != nil || position.Size <= 0 {
-		log.Printf("[CopyTrader] SELL: No position to sell for %s/%s", trade.Title, trade.Outcome)
-		return nil
+	// Try to get actual position from Polymarket API first
+	var sellSize float64
+	actualPositions, err := ct.client.GetOpenPositions(ctx, ct.myAddress)
+	if err != nil {
+		log.Printf("[CopyTrader] SELL: Warning: failed to fetch actual positions: %v, falling back to local tracking", err)
+	} else {
+		// Find matching position by tokenID
+		for _, pos := range actualPositions {
+			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
+				sellSize = pos.Size.Float64()
+				log.Printf("[CopyTrader] SELL: Found actual position from API: %.4f tokens", sellSize)
+				break
+			}
+		}
 	}
 
-	log.Printf("[CopyTrader] SELL: Our position=%.4f tokens, Market=%s, Outcome=%s",
-		position.Size, trade.Title, trade.Outcome)
+	// Fall back to local tracking if API didn't return position
+	if sellSize <= 0 {
+		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
+		if err != nil || position.Size <= 0 {
+			log.Printf("[CopyTrader] SELL: No position to sell for %s/%s (checked both API and local)", trade.Title, trade.Outcome)
+			return nil
+		}
+		sellSize = position.Size
+		log.Printf("[CopyTrader] SELL: Using local position: %.4f tokens", sellSize)
+	}
 
-	// Get order book to estimate price
+	log.Printf("[CopyTrader] SELL: Selling %.4f tokens, Market=%s, Outcome=%s",
+		sellSize, trade.Title, trade.Outcome)
+
+	// Get order book to find best prices
 	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get order book: %v", err)
 		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", errMsg, "")
 	}
 
-	// Calculate expected USDC from selling our position
-	_, avgPrice, expectedUSDC := api.CalculateOptimalFill(book, api.SideSell, position.Size*1.0) // size * avgPrice estimate
-
-	// Place sell order for entire position
-	// For sell, we need to convert to limit order at best bid
 	if len(book.Bids) == 0 {
-		errMsg := "no bids in order book"
+		errMsg := "no bids in order book - no liquidity"
 		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", errMsg, "")
 	}
 
+	// Get best bid price
+	bestBidPrice := 0.0
+	fmt.Sscanf(book.Bids[0].Price, "%f", &bestBidPrice)
+
+	// Retry logic: try different price levels
+	// 1. First try at trader's price (if high enough)
+	// 2. Then try at best bid
+	// 3. Finally try at 95% of best bid (more aggressive)
+	priceLevels := []struct {
+		price float64
+		desc  string
+	}{
+		{trade.Price, "trader's price"},
+		{bestBidPrice, "best bid"},
+		{bestBidPrice * 0.95, "aggressive (95% of best bid)"},
+	}
+
 	var resp *api.OrderResponse
+	var successPrice float64
+	var lastErr error
 
-	// If user sold at high price (>= 0.96), use limit order at same price
-	// to avoid selling cheaper in a market that's about to resolve
-	if trade.Price >= 0.96 {
-		log.Printf("[CopyTrader] SELL: High price detected (%.4f >= 0.96), using limit order at same price",
-			trade.Price)
-		resp, err = ct.clobClient.PlaceLimitOrder(ctx, tokenID, api.SideSell, position.Size, trade.Price, negRisk)
-		if err != nil {
-			errMsg := fmt.Sprintf("limit sell order failed: %v", err)
-			log.Printf("[CopyTrader] SELL failed: %s", errMsg)
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, trade.Price, position.Size, "failed", errMsg, "")
+	for _, level := range priceLevels {
+		// Skip if price is too low (< 0.01) or would result in tiny USDC
+		if level.price < 0.01 || sellSize*level.price < 0.5 {
+			log.Printf("[CopyTrader] SELL: Skipping %s (price=%.4f too low)", level.desc, level.price)
+			continue
 		}
-		expectedUSDC = position.Size * trade.Price
-		avgPrice = trade.Price
-	} else {
-		// Use market order to sell everything
-		resp, err = ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, position.Size*avgPrice, negRisk)
-		if err != nil {
-			errMsg := fmt.Sprintf("sell order failed: %v", err)
-			log.Printf("[CopyTrader] SELL failed: %s", errMsg)
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, position.Size, "failed", errMsg, "")
+
+		log.Printf("[CopyTrader] SELL: Trying %s at %.4f for %.4f tokens", level.desc, level.price, sellSize)
+
+		resp, lastErr = ct.clobClient.PlaceLimitOrder(ctx, tokenID, api.SideSell, sellSize, level.price, negRisk)
+		if lastErr != nil {
+			log.Printf("[CopyTrader] SELL: %s failed: %v", level.desc, lastErr)
+			continue
 		}
+
+		if resp.Success {
+			successPrice = level.price
+			log.Printf("[CopyTrader] SELL success (%s): OrderID=%s, Status=%s, Size=%.4f, Price=%.4f",
+				level.desc, resp.OrderID, resp.Status, sellSize, level.price)
+			break
+		}
+
+		log.Printf("[CopyTrader] SELL: %s rejected: %s", level.desc, resp.ErrorMsg)
+		lastErr = fmt.Errorf(resp.ErrorMsg)
 	}
 
-	if !resp.Success {
-		log.Printf("[CopyTrader] SELL rejected: %s", resp.ErrorMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, avgPrice, position.Size, "failed", resp.ErrorMsg, "")
+	// All attempts failed
+	if resp == nil || !resp.Success {
+		errMsg := "all sell attempts failed"
+		if lastErr != nil {
+			errMsg = fmt.Sprintf("all sell attempts failed: %v", lastErr)
+		}
+		log.Printf("[CopyTrader] SELL failed: %s", errMsg)
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, bestBidPrice, sellSize, "failed", errMsg, "")
 	}
 
-	orderType := "market"
-	if trade.Price >= 0.96 {
-		orderType = "limit"
-	}
-	log.Printf("[CopyTrader] SELL success (%s): OrderID=%s, Status=%s, Size=%.4f, Price=%.4f, ExpectedUSDC=%.4f",
-		orderType, resp.OrderID, resp.Status, position.Size, avgPrice, expectedUSDC)
+	expectedUSDC := sellSize * successPrice
 
-	// Clear position
+	// Clear local position tracking
 	if err := ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome); err != nil {
 		log.Printf("[CopyTrader] Warning: failed to clear position: %v", err)
 	}
 
-	return ct.logCopyTrade(ctx, trade, tokenID, 0, expectedUSDC, avgPrice, position.Size, "executed", "", resp.OrderID)
+	return ct.logCopyTrade(ctx, trade, tokenID, 0, expectedUSDC, successPrice, sellSize, "executed", "", resp.OrderID)
 }
 
 func (ct *CopyTrader) logCopyTrade(ctx context.Context, trade models.TradeDetail, tokenID string, intended, actual, price, size float64, status, errReason, orderID string) error {

@@ -97,11 +97,12 @@ func main() {
 			Enabled:          true,
 			Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
 			MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+			MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
 			CheckIntervalSec: 2,
 		}
 
-		log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, interval=%ds",
-			copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.CheckIntervalSec)
+		log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",
+			copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.MaxPriceSlippage*100, copyConfig.CheckIntervalSec)
 
 		// Create copy trader
 		copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)

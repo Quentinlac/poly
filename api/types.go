@@ -117,3 +117,19 @@ type ClosedPosition struct {
 	OutcomeIndex int     `json:"outcomeIndex"`
 	EventSlug    string  `json:"eventSlug"`
 }
+
+// OpenPosition represents an open position (current holdings) for a user.
+type OpenPosition struct {
+	Asset        string  `json:"asset"`        // Token ID
+	ConditionID  string  `json:"conditionId"`
+	Size         Numeric `json:"size"`         // Number of tokens held
+	AvgPrice     Numeric `json:"avgPrice"`     // Average purchase price
+	CurPrice     Numeric `json:"curPrice"`     // Current market price
+	RealizedPNL  Numeric `json:"realizedPnl"`
+	Title        string  `json:"title"`
+	Slug         string  `json:"slug"`
+	Outcome      string  `json:"outcome"`
+	OutcomeIndex int     `json:"outcomeIndex"`
+	EventSlug    string  `json:"eventSlug"`
+	ProxyWallet  string  `json:"proxyWallet"`
+}
