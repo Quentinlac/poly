@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"html/template"
 	"log"
 	"os"
@@ -72,8 +73,31 @@ func main() {
 
 	log.Println("[main] Global trade monitor started (trades: 2s, redemptions: 5min)")
 
-	// Copy trader has been moved to cmd/worker/main.go
-	// Run it separately: go run cmd/worker/main.go
+	// Start copy trader (copies trades from tracked users to our account)
+	copyConfig := syncer.CopyTraderConfig{
+		Enabled:          true,
+		Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
+		MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+		MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
+		CheckIntervalSec: 2,
+	}
+
+	log.Printf("[main] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",
+		copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.MaxPriceSlippage*100, copyConfig.CheckIntervalSec)
+
+	copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
+	if err != nil {
+		log.Printf("[main] Warning: Failed to create copy trader: %v", err)
+		log.Println("[main] Copy trader will be disabled")
+	} else {
+		ctx := context.Background()
+		if err := copyTrader.Start(ctx); err != nil {
+			log.Printf("[main] Warning: Failed to start copy trader: %v", err)
+		} else {
+			defer copyTrader.Stop()
+			log.Println("[main] Copy trader started successfully")
+		}
+	}
 
 	// Set up router
 	r := gin.Default()
@@ -143,4 +167,14 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// getEnvFloat retrieves a float from environment or returns default
+func getEnvFloat(key string, defaultVal float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return defaultVal
 }
