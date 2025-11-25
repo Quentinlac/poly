@@ -6,11 +6,19 @@ WORKDIR /app
 # Install dependencies
 RUN apk add --no-cache git
 
-# Copy everything (parent module + analytics-worker)
+# Copy parent go.mod and go.sum first
+COPY go.mod go.sum ./
+
+# Download parent module dependencies
+RUN go mod download
+
+# Copy everything else
 COPY . .
 
-# Download dependencies from analytics-worker directory
+# Build from analytics-worker directory
 WORKDIR /app/analytics-worker
+
+# Download analytics-worker specific dependencies
 RUN go mod download
 
 # Build the binary
