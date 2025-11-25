@@ -44,3 +44,6 @@ cache/
 conv.md
 
 analytics-worker/analytics-worker
+
+# DB sync script (contains credentials)
+sync-prod-db.sh
