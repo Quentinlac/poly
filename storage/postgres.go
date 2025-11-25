@@ -563,14 +563,62 @@ func (s *PostgresStore) hydrateSubjectDetails(ctx context.Context, users []*mode
 
 // DeleteUser removes a user
 func (s *PostgresStore) DeleteUser(ctx context.Context, userID string) error {
-	result, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	// Start transaction to delete from all tables
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Get trade IDs for this user to delete from processed_trades
+	rows, err := tx.Query(ctx, `SELECT id FROM user_trades WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("failed to get trade IDs: %w", err)
+	}
+	var tradeIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan trade ID: %w", err)
+		}
+		tradeIDs = append(tradeIDs, id)
+	}
+	rows.Close()
+
+	// Delete from processed_trades
+	if len(tradeIDs) > 0 {
+		_, err = tx.Exec(ctx, `DELETE FROM processed_trades WHERE trade_id = ANY($1)`, tradeIDs)
+		if err != nil {
+			return fmt.Errorf("failed to delete processed trades: %w", err)
+		}
+	}
+
+	// Delete from user_copy_settings
+	_, err = tx.Exec(ctx, `DELETE FROM user_copy_settings WHERE user_address = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete user copy settings: %w", err)
+	}
+
+	// Delete from user_trades
+	_, err = tx.Exec(ctx, `DELETE FROM user_trades WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete user trades: %w", err)
+	}
+
+	// Delete from users table
+	result, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
 	if err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
 
-	if result.RowsAffected() == 0 {
-		return fmt.Errorf("user not found: %s", userID)
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// Log what was deleted (result may be 0 if user wasn't in users table but had trades)
+	log.Printf("[Storage] Deleted user %s: %d from users table, %d trades", userID, result.RowsAffected(), len(tradeIDs))
 
 	// Clear caches
 	s.redis.Del(ctx, fmt.Sprintf("user:%s", userID))
