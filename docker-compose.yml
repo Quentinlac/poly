@@ -43,7 +43,7 @@ services:
   analytics-worker:
     build:
       context: .
-      dockerfile: analytics-worker/Dockerfile
+      dockerfile: Dockerfile.analytics-worker
     container_name: polymarket-analytics-worker
     environment:
       # PostgreSQL connection (uses internal Docker network)
