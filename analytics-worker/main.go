@@ -73,18 +73,22 @@ func main() {
 	log.Println("[Analytics Worker] Connected to database")
 
 	// Ensure analytics table exists
+	log.Println("[Analytics Worker] Creating analytics table...")
 	if err := createAnalyticsTable(ctx, pool); err != nil {
 		log.Fatalf("Failed to create analytics table: %v", err)
 	}
+	log.Println("[Analytics Worker] Analytics table ready")
 
 	// Setup signal handling for graceful shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	// Ensure privileged analysis tables exist
+	log.Println("[Analytics Worker] Creating privileged tables...")
 	if err := createPrivilegedTables(ctx, pool); err != nil {
 		log.Fatalf("Failed to create privileged tables: %v", err)
 	}
+	log.Println("[Analytics Worker] Privileged tables ready")
 
 	// Run immediately on start
 	log.Printf("[Analytics Worker] Running initial analytics computation...")
@@ -563,12 +567,26 @@ func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
 		PRIMARY KEY (time_window_minutes, price_threshold_pct)
 	);
 
-	-- Index for efficient spike detection
-	CREATE INDEX IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price);
 	`
 
 	_, err := pool.Exec(ctx, query)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Create index for spike detection in background (CONCURRENTLY to not block)
+	// This may take a while on large tables but won't block other operations
+	go func() {
+		log.Println("[Privileged] Creating index on global_trades (this may take a few minutes)...")
+		_, err := pool.Exec(context.Background(), `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price)`)
+		if err != nil {
+			log.Printf("[Privileged] Warning: index creation failed (may already exist): %v", err)
+		} else {
+			log.Println("[Privileged] Index created successfully")
+		}
+	}()
+
+	return nil
 }
 
 func computeAllPrivileged(ctx context.Context, pool *pgxpool.Pool) {
