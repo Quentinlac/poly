@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -323,6 +324,20 @@ func (c *ClobClient) GetOrderBook(ctx context.Context, tokenID string) (*OrderBo
 	if err := json.NewDecoder(resp.Body).Decode(&book); err != nil {
 		return nil, fmt.Errorf("failed to decode order book: %w", err)
 	}
+
+	// Sort asks ascending (lowest/best price first) - we want to buy at lowest prices
+	sort.Slice(book.Asks, func(i, j int) bool {
+		priceI, _ := strconv.ParseFloat(book.Asks[i].Price, 64)
+		priceJ, _ := strconv.ParseFloat(book.Asks[j].Price, 64)
+		return priceI < priceJ
+	})
+
+	// Sort bids descending (highest/best price first) - we want to sell at highest prices
+	sort.Slice(book.Bids, func(i, j int) bool {
+		priceI, _ := strconv.ParseFloat(book.Bids[i].Price, 64)
+		priceJ, _ := strconv.ParseFloat(book.Bids[j].Price, 64)
+		return priceI > priceJ
+	})
 
 	return &book, nil
 }
