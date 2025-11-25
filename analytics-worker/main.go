@@ -509,83 +509,91 @@ var spikeColumnNames = []string{
 }
 
 func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
-	query := `
-	-- Pre-computed spike flags per trade (incremental, computed once per trade)
-	CREATE TABLE IF NOT EXISTS trade_spike_flags (
-		trade_id VARCHAR(150) PRIMARY KEY,
-		user_address VARCHAR(42) NOT NULL,
-		asset VARCHAR(100) NOT NULL,
-		title TEXT,
-		outcome TEXT,
-		buy_price DECIMAL NOT NULL,
-		buy_time TIMESTAMPTZ NOT NULL,
-		-- Spike flags for all 15 combinations (window_threshold)
-		spike_5m_30 BOOLEAN DEFAULT FALSE,
-		spike_5m_50 BOOLEAN DEFAULT FALSE,
-		spike_5m_80 BOOLEAN DEFAULT FALSE,
-		spike_10m_30 BOOLEAN DEFAULT FALSE,
-		spike_10m_50 BOOLEAN DEFAULT FALSE,
-		spike_10m_80 BOOLEAN DEFAULT FALSE,
-		spike_30m_30 BOOLEAN DEFAULT FALSE,
-		spike_30m_50 BOOLEAN DEFAULT FALSE,
-		spike_30m_80 BOOLEAN DEFAULT FALSE,
-		spike_2h_30 BOOLEAN DEFAULT FALSE,
-		spike_2h_50 BOOLEAN DEFAULT FALSE,
-		spike_2h_80 BOOLEAN DEFAULT FALSE,
-		spike_6h_30 BOOLEAN DEFAULT FALSE,
-		spike_6h_50 BOOLEAN DEFAULT FALSE,
-		spike_6h_80 BOOLEAN DEFAULT FALSE,
-		computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);
+	// Create tables one by one with logging to identify hangs
 
-	CREATE INDEX IF NOT EXISTS idx_spike_flags_user ON trade_spike_flags(user_address);
-	CREATE INDEX IF NOT EXISTS idx_spike_flags_time ON trade_spike_flags(buy_time);
-
-	-- Aggregated results per user (rebuilt from spike flags)
-	CREATE TABLE IF NOT EXISTS privileged_analysis (
-		id SERIAL PRIMARY KEY,
-		time_window_minutes INTEGER NOT NULL,
-		price_threshold_pct INTEGER NOT NULL,
-		user_address VARCHAR(42) NOT NULL,
-		hit_count INTEGER NOT NULL,
-		total_buys INTEGER NOT NULL,
-		hit_rate DECIMAL(10, 4) NOT NULL,
-		hits_json JSONB NOT NULL,
-		computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		UNIQUE(time_window_minutes, price_threshold_pct, user_address)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_privileged_window_threshold ON privileged_analysis(time_window_minutes, price_threshold_pct);
-	CREATE INDEX IF NOT EXISTS idx_privileged_hit_count ON privileged_analysis(time_window_minutes, price_threshold_pct, hit_count DESC);
-
-	CREATE TABLE IF NOT EXISTS privileged_analysis_meta (
-		time_window_minutes INTEGER NOT NULL,
-		price_threshold_pct INTEGER NOT NULL,
-		last_computed_at TIMESTAMPTZ NOT NULL,
-		computation_duration_sec DECIMAL(10, 2),
-		user_count INTEGER,
-		PRIMARY KEY (time_window_minutes, price_threshold_pct)
-	);
-
-	`
-
-	_, err := pool.Exec(ctx, query)
+	log.Println("[Privileged] Creating trade_spike_flags table...")
+	_, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS trade_spike_flags (
+			trade_id VARCHAR(150) PRIMARY KEY,
+			user_address VARCHAR(42) NOT NULL,
+			asset VARCHAR(100) NOT NULL,
+			title TEXT,
+			outcome TEXT,
+			buy_price DECIMAL NOT NULL,
+			buy_time TIMESTAMPTZ NOT NULL,
+			spike_5m_30 BOOLEAN DEFAULT FALSE,
+			spike_5m_50 BOOLEAN DEFAULT FALSE,
+			spike_5m_80 BOOLEAN DEFAULT FALSE,
+			spike_10m_30 BOOLEAN DEFAULT FALSE,
+			spike_10m_50 BOOLEAN DEFAULT FALSE,
+			spike_10m_80 BOOLEAN DEFAULT FALSE,
+			spike_30m_30 BOOLEAN DEFAULT FALSE,
+			spike_30m_50 BOOLEAN DEFAULT FALSE,
+			spike_30m_80 BOOLEAN DEFAULT FALSE,
+			spike_2h_30 BOOLEAN DEFAULT FALSE,
+			spike_2h_50 BOOLEAN DEFAULT FALSE,
+			spike_2h_80 BOOLEAN DEFAULT FALSE,
+			spike_6h_30 BOOLEAN DEFAULT FALSE,
+			spike_6h_50 BOOLEAN DEFAULT FALSE,
+			spike_6h_80 BOOLEAN DEFAULT FALSE,
+			computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`)
 	if err != nil {
-		return err
+		return fmt.Errorf("create trade_spike_flags: %w", err)
+	}
+
+	log.Println("[Privileged] Creating spike flags indexes...")
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_spike_flags_user ON trade_spike_flags(user_address)`)
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_spike_flags_time ON trade_spike_flags(buy_time)`)
+
+	log.Println("[Privileged] Creating privileged_analysis table...")
+	_, err = pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS privileged_analysis (
+			id SERIAL PRIMARY KEY,
+			time_window_minutes INTEGER NOT NULL,
+			price_threshold_pct INTEGER NOT NULL,
+			user_address VARCHAR(42) NOT NULL,
+			hit_count INTEGER NOT NULL,
+			total_buys INTEGER NOT NULL,
+			hit_rate DECIMAL(10, 4) NOT NULL,
+			hits_json JSONB NOT NULL,
+			computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(time_window_minutes, price_threshold_pct, user_address)
+		)`)
+	if err != nil {
+		return fmt.Errorf("create privileged_analysis: %w", err)
+	}
+
+	log.Println("[Privileged] Creating privileged_analysis indexes...")
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_privileged_window_threshold ON privileged_analysis(time_window_minutes, price_threshold_pct)`)
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_privileged_hit_count ON privileged_analysis(time_window_minutes, price_threshold_pct, hit_count DESC)`)
+
+	log.Println("[Privileged] Creating privileged_analysis_meta table...")
+	_, err = pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS privileged_analysis_meta (
+			time_window_minutes INTEGER NOT NULL,
+			price_threshold_pct INTEGER NOT NULL,
+			last_computed_at TIMESTAMPTZ NOT NULL,
+			computation_duration_sec DECIMAL(10, 2),
+			user_count INTEGER,
+			PRIMARY KEY (time_window_minutes, price_threshold_pct)
+		)`)
+	if err != nil {
+		return fmt.Errorf("create privileged_analysis_meta: %w", err)
 	}
 
 	// Create index for spike detection in background (CONCURRENTLY to not block)
-	// This may take a while on large tables but won't block other operations
 	go func() {
-		log.Println("[Privileged] Creating index on global_trades (this may take a few minutes)...")
+		log.Println("[Privileged] Creating index on global_trades in background...")
 		_, err := pool.Exec(context.Background(), `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price)`)
 		if err != nil {
-			log.Printf("[Privileged] Warning: index creation failed (may already exist): %v", err)
+			log.Printf("[Privileged] Index creation note: %v", err)
 		} else {
-			log.Println("[Privileged] Index created successfully")
+			log.Println("[Privileged] Index on global_trades created")
 		}
 	}()
 
+	log.Println("[Privileged] All tables created")
 	return nil
 }
 
