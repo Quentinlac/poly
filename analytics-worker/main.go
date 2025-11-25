@@ -495,8 +495,49 @@ var privilegedCombinations = []struct {
 	{360, 30}, {360, 50}, {360, 80},
 }
 
+// Column names for each combination in trade_spike_flags
+var spikeColumnNames = []string{
+	"spike_5m_30", "spike_5m_50", "spike_5m_80",
+	"spike_10m_30", "spike_10m_50", "spike_10m_80",
+	"spike_30m_30", "spike_30m_50", "spike_30m_80",
+	"spike_2h_30", "spike_2h_50", "spike_2h_80",
+	"spike_6h_30", "spike_6h_50", "spike_6h_80",
+}
+
 func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
 	query := `
+	-- Pre-computed spike flags per trade (incremental, computed once per trade)
+	CREATE TABLE IF NOT EXISTS trade_spike_flags (
+		trade_id VARCHAR(150) PRIMARY KEY,
+		user_address VARCHAR(42) NOT NULL,
+		asset VARCHAR(100) NOT NULL,
+		title TEXT,
+		outcome TEXT,
+		buy_price DECIMAL NOT NULL,
+		buy_time TIMESTAMPTZ NOT NULL,
+		-- Spike flags for all 15 combinations (window_threshold)
+		spike_5m_30 BOOLEAN DEFAULT FALSE,
+		spike_5m_50 BOOLEAN DEFAULT FALSE,
+		spike_5m_80 BOOLEAN DEFAULT FALSE,
+		spike_10m_30 BOOLEAN DEFAULT FALSE,
+		spike_10m_50 BOOLEAN DEFAULT FALSE,
+		spike_10m_80 BOOLEAN DEFAULT FALSE,
+		spike_30m_30 BOOLEAN DEFAULT FALSE,
+		spike_30m_50 BOOLEAN DEFAULT FALSE,
+		spike_30m_80 BOOLEAN DEFAULT FALSE,
+		spike_2h_30 BOOLEAN DEFAULT FALSE,
+		spike_2h_50 BOOLEAN DEFAULT FALSE,
+		spike_2h_80 BOOLEAN DEFAULT FALSE,
+		spike_6h_30 BOOLEAN DEFAULT FALSE,
+		spike_6h_50 BOOLEAN DEFAULT FALSE,
+		spike_6h_80 BOOLEAN DEFAULT FALSE,
+		computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_spike_flags_user ON trade_spike_flags(user_address);
+	CREATE INDEX IF NOT EXISTS idx_spike_flags_time ON trade_spike_flags(buy_time);
+
+	-- Aggregated results per user (rebuilt from spike flags)
 	CREATE TABLE IF NOT EXISTS privileged_analysis (
 		id SERIAL PRIMARY KEY,
 		time_window_minutes INTEGER NOT NULL,
@@ -521,6 +562,9 @@ func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
 		user_count INTEGER,
 		PRIMARY KEY (time_window_minutes, price_threshold_pct)
 	);
+
+	-- Index for efficient spike detection
+	CREATE INDEX IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price);
 	`
 
 	_, err := pool.Exec(ctx, query)
@@ -529,147 +573,205 @@ func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
 
 func computeAllPrivileged(ctx context.Context, pool *pgxpool.Pool) {
 	startTime := time.Now()
-	log.Printf("[Privileged] Starting computation of %d combinations...", len(privilegedCombinations))
+	log.Printf("[Privileged] Starting incremental spike detection...")
 
-	successful := 0
-	for _, combo := range privilegedCombinations {
-		// Use a longer timeout for heavy queries (5 minutes per query)
-		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// Step 1: Process unprocessed BUY trades (older than 6h to ensure all windows complete)
+	processed, err := processUnprocessedTrades(ctx, pool)
+	if err != nil {
+		log.Printf("[Privileged] Error processing trades: %v", err)
+		return
+	}
+	log.Printf("[Privileged] Processed %d new trades", processed)
 
-		err := computePrivilegedAnalysis(queryCtx, pool, combo.Window, combo.Threshold)
-		cancel()
-
+	// Step 2: Aggregate spike flags into privileged_analysis for each combination
+	for i, combo := range privilegedCombinations {
+		colName := spikeColumnNames[i]
+		err := aggregatePrivilegedUsers(ctx, pool, combo.Window, combo.Threshold, colName)
 		if err != nil {
-			log.Printf("[Privileged] Error computing %dmin/+%d%%: %v", combo.Window, combo.Threshold, err)
-		} else {
-			successful++
+			log.Printf("[Privileged] Error aggregating %dmin/+%d%%: %v", combo.Window, combo.Threshold, err)
 		}
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("[Privileged] Completed %d/%d combinations in %v", successful, len(privilegedCombinations), duration.Round(time.Second))
+	log.Printf("[Privileged] Completed in %v", duration.Round(time.Second))
 }
 
-func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWindowMinutes int, priceThresholdPct int) error {
-	startTime := time.Now()
-	priceThreshold := float64(priceThresholdPct) / 100.0
-	interval := fmt.Sprintf("%d minutes", timeWindowMinutes)
+// processUnprocessedTrades finds BUY trades not yet in trade_spike_flags and computes their spike flags
+func processUnprocessedTrades(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	// Find unprocessed buys (older than 6h to ensure 360min window is complete)
+	// Process in batches of 10000
+	batchSize := 10000
+	totalProcessed := 0
 
-	log.Printf("[Privileged] Computing %dmin/+%d%% analysis...", timeWindowMinutes, priceThresholdPct)
-
-	// Ensure we have the optimal index (runs once, no-op if exists)
-	_, _ = pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price)`)
-
-	// Single efficient query using LATERAL + LIMIT 1
-	// For each BUY, find IF (not all) there was a price spike - stops at first hit
-	// Uses 24h lookback to keep query under 2 minutes
-	query := `
-	WITH user_buys AS (
-		SELECT user_address, asset, price, timestamp, title, outcome
-		FROM global_trades
-		WHERE side = 'BUY' AND type = 'TRADE' AND price > 0
-		AND timestamp > NOW() - INTERVAL '24 hours'
-	),
-	hits AS (
-		SELECT
-			ub.user_address,
-			ub.title,
-			ub.outcome,
-			ub.price as buy_price,
-			ub.timestamp as buy_time,
-			hit.price as hit_price,
-			hit.timestamp as hit_time
-		FROM user_buys ub
-		LEFT JOIN LATERAL (
-			SELECT price, timestamp
-			FROM global_trades gt
-			WHERE gt.asset = ub.asset
-			AND gt.timestamp > ub.timestamp
-			AND gt.timestamp <= ub.timestamp + $1::interval
-			AND gt.price >= ub.price * (1 + $2)
-			ORDER BY gt.timestamp
-			LIMIT 1
-		) hit ON true
-		WHERE hit.price IS NOT NULL
-	),
-	user_buy_counts AS (
-		SELECT user_address, COUNT(*) as total_buys
-		FROM user_buys  -- Already filtered to 24h in CTE above
-		GROUP BY user_address
-	)
-	SELECT
-		h.user_address,
-		COUNT(*) as hit_count,
-		COALESCE(ubc.total_buys, 0) as total_buys,
-		json_agg(json_build_object(
-			'title', h.title,
-			'outcome', h.outcome,
-			'buy_price', h.buy_price,
-			'hit_price', h.hit_price,
-			'price_gain', ((h.hit_price - h.buy_price) / h.buy_price * 100),
-			'buy_time', h.buy_time,
-			'hit_time', h.hit_time,
-			'minutes_to', EXTRACT(EPOCH FROM (h.hit_time - h.buy_time)) / 60
-		) ORDER BY h.buy_time DESC) as hits
-	FROM hits h
-	LEFT JOIN user_buy_counts ubc ON ubc.user_address = h.user_address
-	GROUP BY h.user_address, ubc.total_buys
-	HAVING COUNT(*) >= 3
-	ORDER BY COUNT(*) DESC
-	LIMIT 100
-	`
-
-	rows, err := pool.Query(ctx, query, interval, priceThreshold)
-	if err != nil {
-		return fmt.Errorf("privileged query: %w", err)
-	}
-	defer rows.Close()
-
-	type privilegedUser struct {
-		UserAddress string
-		HitCount    int
-		TotalBuys   int
-		HitRate     float64
-		HitsJSON    []byte
-	}
-
-	var results []privilegedUser
-	for rows.Next() {
-		var user privilegedUser
-		err := rows.Scan(&user.UserAddress, &user.HitCount, &user.TotalBuys, &user.HitsJSON)
+	for {
+		// Get batch of unprocessed trades
+		rows, err := pool.Query(ctx, `
+			SELECT g.id, g.user_address, g.asset, g.title, g.outcome, g.price, g.timestamp
+			FROM global_trades g
+			LEFT JOIN trade_spike_flags t ON g.id = t.trade_id
+			WHERE g.side = 'BUY'
+			AND g.type = 'TRADE'
+			AND g.price > 0
+			AND g.timestamp < NOW() - INTERVAL '6 hours'
+			AND t.trade_id IS NULL
+			ORDER BY g.timestamp ASC
+			LIMIT $1
+		`, batchSize)
 		if err != nil {
-			return fmt.Errorf("scan privileged user: %w", err)
+			return totalProcessed, fmt.Errorf("query unprocessed: %w", err)
 		}
 
-		if user.TotalBuys > 0 {
-			user.HitRate = float64(user.HitCount) / float64(user.TotalBuys) * 100
+		type tradeInfo struct {
+			ID          string
+			UserAddress string
+			Asset       string
+			Title       string
+			Outcome     string
+			Price       float64
+			Timestamp   time.Time
 		}
 
-		results = append(results, user)
+		var trades []tradeInfo
+		for rows.Next() {
+			var t tradeInfo
+			var title, outcome *string
+			if err := rows.Scan(&t.ID, &t.UserAddress, &t.Asset, &title, &outcome, &t.Price, &t.Timestamp); err != nil {
+				rows.Close()
+				return totalProcessed, fmt.Errorf("scan trade: %w", err)
+			}
+			if title != nil {
+				t.Title = *title
+			}
+			if outcome != nil {
+				t.Outcome = *outcome
+			}
+			trades = append(trades, t)
+		}
+		rows.Close()
+
+		if len(trades) == 0 {
+			break // No more unprocessed trades
+		}
+
+		log.Printf("[Privileged] Processing batch of %d trades (oldest: %s)", len(trades), trades[0].Timestamp.Format("2006-01-02 15:04"))
+
+		// For each trade, compute all 15 spike flags
+		for _, trade := range trades {
+			spikeFlags := make([]bool, 15)
+
+			// Check each combination
+			for i, combo := range privilegedCombinations {
+				interval := fmt.Sprintf("%d minutes", combo.Window)
+				threshold := float64(combo.Threshold) / 100.0
+
+				// Check if price spiked within window
+				var exists bool
+				err := pool.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM global_trades
+						WHERE asset = $1
+						AND timestamp > $2
+						AND timestamp <= $2 + $3::interval
+						AND price >= $4 * (1 + $5)
+						LIMIT 1
+					)
+				`, trade.Asset, trade.Timestamp, interval, trade.Price, threshold).Scan(&exists)
+
+				if err != nil {
+					log.Printf("[Privileged] Warning: error checking spike for %s: %v", trade.ID[:16], err)
+					continue
+				}
+				spikeFlags[i] = exists
+			}
+
+			// Insert into trade_spike_flags
+			_, err := pool.Exec(ctx, `
+				INSERT INTO trade_spike_flags (
+					trade_id, user_address, asset, title, outcome, buy_price, buy_time,
+					spike_5m_30, spike_5m_50, spike_5m_80,
+					spike_10m_30, spike_10m_50, spike_10m_80,
+					spike_30m_30, spike_30m_50, spike_30m_80,
+					spike_2h_30, spike_2h_50, spike_2h_80,
+					spike_6h_30, spike_6h_50, spike_6h_80
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+				ON CONFLICT (trade_id) DO NOTHING
+			`, trade.ID, trade.UserAddress, trade.Asset, trade.Title, trade.Outcome, trade.Price, trade.Timestamp,
+				spikeFlags[0], spikeFlags[1], spikeFlags[2],
+				spikeFlags[3], spikeFlags[4], spikeFlags[5],
+				spikeFlags[6], spikeFlags[7], spikeFlags[8],
+				spikeFlags[9], spikeFlags[10], spikeFlags[11],
+				spikeFlags[12], spikeFlags[13], spikeFlags[14])
+
+			if err != nil {
+				log.Printf("[Privileged] Warning: error inserting spike flags: %v", err)
+			}
+		}
+
+		totalProcessed += len(trades)
+
+		// If we got less than batch size, we're done
+		if len(trades) < batchSize {
+			break
+		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate results: %w", err)
-	}
+	return totalProcessed, nil
+}
 
-	// Delete old results for this window/threshold
-	_, err = pool.Exec(ctx, `
+// aggregatePrivilegedUsers aggregates spike flags into privileged_analysis table
+func aggregatePrivilegedUsers(ctx context.Context, pool *pgxpool.Pool, windowMin, thresholdPct int, colName string) error {
+	startTime := time.Now()
+
+	// Delete old results for this combination
+	_, err := pool.Exec(ctx, `
 		DELETE FROM privileged_analysis
 		WHERE time_window_minutes = $1 AND price_threshold_pct = $2
-	`, timeWindowMinutes, priceThresholdPct)
+	`, windowMin, thresholdPct)
 	if err != nil {
-		return fmt.Errorf("delete old results: %w", err)
+		return fmt.Errorf("delete old: %w", err)
 	}
 
-	// Insert new results
-	for _, user := range results {
-		_, err = pool.Exec(ctx, `
-			INSERT INTO privileged_analysis (time_window_minutes, price_threshold_pct, user_address, hit_count, total_buys, hit_rate, hits_json, computed_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-		`, timeWindowMinutes, priceThresholdPct, user.UserAddress, user.HitCount, user.TotalBuys, user.HitRate, user.HitsJSON)
-		if err != nil {
-			return fmt.Errorf("insert result: %w", err)
-		}
+	// Aggregate from spike flags - users with >= 3 hits
+	query := fmt.Sprintf(`
+		WITH user_stats AS (
+			SELECT
+				user_address,
+				COUNT(*) as total_buys,
+				SUM(CASE WHEN %s THEN 1 ELSE 0 END) as hit_count
+			FROM trade_spike_flags
+			GROUP BY user_address
+			HAVING SUM(CASE WHEN %s THEN 1 ELSE 0 END) >= 3
+		),
+		user_hits AS (
+			SELECT
+				user_address, title, outcome, buy_price, buy_time
+			FROM trade_spike_flags
+			WHERE %s = true
+		)
+		INSERT INTO privileged_analysis (time_window_minutes, price_threshold_pct, user_address, hit_count, total_buys, hit_rate, hits_json)
+		SELECT
+			$1, $2,
+			us.user_address,
+			us.hit_count,
+			us.total_buys,
+			(us.hit_count::decimal / us.total_buys * 100),
+			COALESCE((
+				SELECT json_agg(json_build_object(
+					'title', uh.title,
+					'outcome', uh.outcome,
+					'buy_price', uh.buy_price,
+					'buy_time', uh.buy_time
+				) ORDER BY uh.buy_time DESC)
+				FROM user_hits uh WHERE uh.user_address = us.user_address
+			), '[]'::json)
+		FROM user_stats us
+		ORDER BY us.hit_count DESC
+		LIMIT 100
+	`, colName, colName, colName)
+
+	result, err := pool.Exec(ctx, query, windowMin, thresholdPct)
+	if err != nil {
+		return fmt.Errorf("aggregate: %w", err)
 	}
 
 	// Update metadata
@@ -681,11 +783,8 @@ func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWind
 			last_computed_at = NOW(),
 			computation_duration_sec = $3,
 			user_count = $4
-	`, timeWindowMinutes, priceThresholdPct, duration, len(results))
-	if err != nil {
-		return fmt.Errorf("update meta: %w", err)
-	}
+	`, windowMin, thresholdPct, duration, result.RowsAffected())
 
-	log.Printf("[Privileged] Computed %dmin/+%d%%: %d users in %.1fs", timeWindowMinutes, priceThresholdPct, len(results), duration)
-	return nil
+	log.Printf("[Privileged] Aggregated %dmin/+%d%%: %d users in %.1fs", windowMin, thresholdPct, result.RowsAffected(), duration)
+	return err
 }
