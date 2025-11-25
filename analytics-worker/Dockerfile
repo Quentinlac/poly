@@ -6,26 +6,24 @@ WORKDIR /app
 # Install dependencies
 RUN apk add --no-cache git
 
-# Copy everything (both parent module and analytics-worker)
-COPY . .
-
-# Build from analytics-worker directory
-WORKDIR /app/analytics-worker
-
-# Download all dependencies (will resolve parent module via replace directive)
+# Copy go mod files
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker .
+# Copy source code
+COPY . .
 
-# Final stage
+# Build the analytics worker binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./cmd/analytics-worker
+
+# Runtime stage
 FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /root/
 
-# Copy the binary from builder
+# Copy the binary
 COPY --from=builder /app/analytics-worker .
 
 # Set timezone
