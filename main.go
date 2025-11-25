@@ -99,12 +99,6 @@ func main() {
 		}
 	}
 
-	// Start privileged knowledge analysis worker (computes every 15 minutes)
-	privilegedWorker := syncer.NewPrivilegedWorker(store)
-	privilegedWorker.Start()
-	defer privilegedWorker.Stop()
-	log.Println("[main] Privileged knowledge worker started (15-minute interval)")
-
 	// Set up router
 	r := gin.Default()
 

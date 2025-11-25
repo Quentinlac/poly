@@ -81,17 +81,30 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	// Ensure privileged analysis tables exist
+	if err := createPrivilegedTables(ctx, pool); err != nil {
+		log.Fatalf("Failed to create privileged tables: %v", err)
+	}
+
 	// Run immediately on start
 	log.Printf("[Analytics Worker] Running initial analytics computation...")
 	if err := computeAnalytics(ctx, pool, botThreshold); err != nil {
 		log.Printf("[Analytics Worker] Error computing analytics: %v", err)
 	}
 
+	// Run privileged analysis on start
+	log.Printf("[Analytics Worker] Running initial privileged knowledge computation...")
+	computeAllPrivileged(ctx, pool)
+
 	// Start ticker for periodic runs
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	log.Printf("[Analytics Worker] Running every %v", interval)
+	// Privileged analysis runs every 15 minutes (3x per analytics interval)
+	privilegedTicker := time.NewTicker(15 * time.Minute)
+	defer privilegedTicker.Stop()
+
+	log.Printf("[Analytics Worker] Running analytics every %v, privileged every 15m", interval)
 
 	for {
 		select {
@@ -103,6 +116,9 @@ func main() {
 			if err := computeAnalytics(ctx, pool, botThreshold); err != nil {
 				log.Printf("[Analytics Worker] Error computing analytics: %v", err)
 			}
+		case <-privilegedTicker.C:
+			log.Printf("[Analytics Worker] Running scheduled privileged computation...")
+			computeAllPrivileged(ctx, pool)
 		}
 	}
 }
@@ -460,5 +476,214 @@ func upsertAnalytics(ctx context.Context, pool *pgxpool.Pool, analytics []UserAn
 		}
 	}
 
+	return nil
+}
+
+// ============================================================================
+// PRIVILEGED KNOWLEDGE ANALYSIS
+// ============================================================================
+
+// All combinations to compute
+var privilegedCombinations = []struct {
+	Window    int // minutes
+	Threshold int // percentage
+}{
+	{5, 30}, {5, 50}, {5, 80},
+	{10, 30}, {10, 50}, {10, 80},
+	{30, 30}, {30, 50}, {30, 80},
+	{120, 30}, {120, 50}, {120, 80},
+	{360, 30}, {360, 50}, {360, 80},
+}
+
+func createPrivilegedTables(ctx context.Context, pool *pgxpool.Pool) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS privileged_analysis (
+		id SERIAL PRIMARY KEY,
+		time_window_minutes INTEGER NOT NULL,
+		price_threshold_pct INTEGER NOT NULL,
+		user_address VARCHAR(42) NOT NULL,
+		hit_count INTEGER NOT NULL,
+		total_buys INTEGER NOT NULL,
+		hit_rate DECIMAL(10, 4) NOT NULL,
+		hits_json JSONB NOT NULL,
+		computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE(time_window_minutes, price_threshold_pct, user_address)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_privileged_window_threshold ON privileged_analysis(time_window_minutes, price_threshold_pct);
+	CREATE INDEX IF NOT EXISTS idx_privileged_hit_count ON privileged_analysis(time_window_minutes, price_threshold_pct, hit_count DESC);
+
+	CREATE TABLE IF NOT EXISTS privileged_analysis_meta (
+		time_window_minutes INTEGER NOT NULL,
+		price_threshold_pct INTEGER NOT NULL,
+		last_computed_at TIMESTAMPTZ NOT NULL,
+		computation_duration_sec DECIMAL(10, 2),
+		user_count INTEGER,
+		PRIMARY KEY (time_window_minutes, price_threshold_pct)
+	);
+	`
+
+	_, err := pool.Exec(ctx, query)
+	return err
+}
+
+func computeAllPrivileged(ctx context.Context, pool *pgxpool.Pool) {
+	startTime := time.Now()
+	log.Printf("[Privileged] Starting computation of %d combinations...", len(privilegedCombinations))
+
+	successful := 0
+	for _, combo := range privilegedCombinations {
+		// Use a longer timeout for heavy queries (5 minutes per query)
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+
+		err := computePrivilegedAnalysis(queryCtx, pool, combo.Window, combo.Threshold)
+		cancel()
+
+		if err != nil {
+			log.Printf("[Privileged] Error computing %dmin/+%d%%: %v", combo.Window, combo.Threshold, err)
+		} else {
+			successful++
+		}
+	}
+
+	duration := time.Since(startTime)
+	log.Printf("[Privileged] Completed %d/%d combinations in %v", successful, len(privilegedCombinations), duration.Round(time.Second))
+}
+
+func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWindowMinutes int, priceThresholdPct int) error {
+	startTime := time.Now()
+	priceThreshold := float64(priceThresholdPct) / 100.0
+
+	log.Printf("[Privileged] Computing %dmin/+%d%% analysis...", timeWindowMinutes, priceThresholdPct)
+
+	// Heavy query to find privileged knowledge indicators
+	query := `
+	WITH user_buys AS (
+		SELECT
+			user_address,
+			asset,
+			price,
+			timestamp,
+			title,
+			outcome
+		FROM global_trades
+		WHERE side = 'BUY'
+		AND type = 'TRADE'
+		AND price > 0
+		AND timestamp > NOW() - INTERVAL '30 days'
+	),
+	price_hits AS (
+		SELECT
+			ub.user_address,
+			ub.asset,
+			ub.title,
+			ub.outcome,
+			ub.price as buy_price,
+			ub.timestamp as buy_time,
+			MIN(gt.price) as hit_price,
+			MIN(gt.timestamp) as hit_time
+		FROM user_buys ub
+		JOIN global_trades gt ON gt.asset = ub.asset
+		WHERE gt.timestamp > ub.timestamp
+		AND gt.timestamp <= ub.timestamp + $1::interval
+		AND gt.price >= ub.price * (1 + $2)
+		GROUP BY ub.user_address, ub.asset, ub.title, ub.outcome, ub.price, ub.timestamp
+	),
+	user_buy_counts AS (
+		SELECT user_address, COUNT(*) as total_buys
+		FROM user_buys
+		GROUP BY user_address
+	)
+	SELECT
+		ph.user_address,
+		COUNT(*) as hit_count,
+		COALESCE(ubc.total_buys, 0) as total_buys,
+		json_agg(json_build_object(
+			'title', ph.title,
+			'outcome', ph.outcome,
+			'buy_price', ph.buy_price,
+			'hit_price', ph.hit_price,
+			'price_gain', ((ph.hit_price - ph.buy_price) / ph.buy_price * 100),
+			'buy_time', ph.buy_time,
+			'hit_time', ph.hit_time,
+			'minutes_to', EXTRACT(EPOCH FROM (ph.hit_time - ph.buy_time)) / 60
+		) ORDER BY ph.buy_time DESC) as hits
+	FROM price_hits ph
+	LEFT JOIN user_buy_counts ubc ON ubc.user_address = ph.user_address
+	GROUP BY ph.user_address, ubc.total_buys
+	HAVING COUNT(*) >= 3
+	ORDER BY COUNT(*) DESC
+	LIMIT 100
+	`
+
+	interval := fmt.Sprintf("%d minutes", timeWindowMinutes)
+	rows, err := pool.Query(ctx, query, interval, priceThreshold)
+	if err != nil {
+		return fmt.Errorf("privileged knowledge query: %w", err)
+	}
+	defer rows.Close()
+
+	type privilegedUser struct {
+		UserAddress string
+		HitCount    int
+		TotalBuys   int
+		HitRate     float64
+		HitsJSON    []byte
+	}
+
+	var results []privilegedUser
+	for rows.Next() {
+		var user privilegedUser
+		err := rows.Scan(&user.UserAddress, &user.HitCount, &user.TotalBuys, &user.HitsJSON)
+		if err != nil {
+			return fmt.Errorf("scan privileged user: %w", err)
+		}
+
+		if user.TotalBuys > 0 {
+			user.HitRate = float64(user.HitCount) / float64(user.TotalBuys) * 100
+		}
+
+		results = append(results, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate results: %w", err)
+	}
+
+	// Delete old results for this window/threshold
+	_, err = pool.Exec(ctx, `
+		DELETE FROM privileged_analysis
+		WHERE time_window_minutes = $1 AND price_threshold_pct = $2
+	`, timeWindowMinutes, priceThresholdPct)
+	if err != nil {
+		return fmt.Errorf("delete old results: %w", err)
+	}
+
+	// Insert new results
+	for _, user := range results {
+		_, err = pool.Exec(ctx, `
+			INSERT INTO privileged_analysis (time_window_minutes, price_threshold_pct, user_address, hit_count, total_buys, hit_rate, hits_json, computed_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		`, timeWindowMinutes, priceThresholdPct, user.UserAddress, user.HitCount, user.TotalBuys, user.HitRate, user.HitsJSON)
+		if err != nil {
+			return fmt.Errorf("insert result: %w", err)
+		}
+	}
+
+	// Update metadata
+	duration := time.Since(startTime).Seconds()
+	_, err = pool.Exec(ctx, `
+		INSERT INTO privileged_analysis_meta (time_window_minutes, price_threshold_pct, last_computed_at, computation_duration_sec, user_count)
+		VALUES ($1, $2, NOW(), $3, $4)
+		ON CONFLICT (time_window_minutes, price_threshold_pct) DO UPDATE SET
+			last_computed_at = NOW(),
+			computation_duration_sec = $3,
+			user_count = $4
+	`, timeWindowMinutes, priceThresholdPct, duration, len(results))
+	if err != nil {
+		return fmt.Errorf("update meta: %w", err)
+	}
+
+	log.Printf("[Privileged] Computed %dmin/+%d%%: %d users in %.1fs", timeWindowMinutes, priceThresholdPct, len(results), duration)
 	return nil
 }
