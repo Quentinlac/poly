@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: #0f0f23;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            overflow: hidden;
+            color: #e0e0e0;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .nav-links {
+            padding: 10px 30px;
+            background: #1a1a2e;
+            border-bottom: 1px solid #333;
+        }
+
+        .nav-links a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+
+        .tabs-container {
+            display: flex;
+            background: #1a1a2e;
+            border-bottom: 2px solid #333;
+            flex-wrap: wrap;
+        }
+
+        .tab-group {
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #333;
+        }
+
+        .tab-group-label {
+            padding: 8px 15px;
+            background: #252545;
+            color: #888;
+            font-size: 0.75em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            text-align: center;
+        }
+
+        .tab-group-buttons {
+            display: flex;
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #888;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab:hover {
+            background: #252545;
+            color: #ccc;
+        }
+
+        .tab.active {
+            color: #e74c3c;
+            border-bottom-color: #e74c3c;
+            background: #1f1f35;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+            color: #888;
+        }
+
+        .loading.hidden {
+            display: none;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 30px;
+            background: #1a1a2e;
+        }
+
+        .stat-card {
+            background: #252545;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        .stat-card h3 {
+            color: #888;
+            font-size: 0.85em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-card .value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #e74c3c;
+        }
+
+        .results-container {
+            padding: 20px;
+        }
+
+        .user-card {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+
+        .user-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: #252545;
+            cursor: pointer;
+        }
+
+        .user-header:hover {
+            background: #2a2a55;
+        }
+
+        .user-address {
+            font-family: monospace;
+            color: #667eea;
+            font-size: 0.95em;
+        }
+
+        .user-stats {
+            display: flex;
+            gap: 20px;
+        }
+
+        .user-stat {
+            text-align: center;
+        }
+
+        .user-stat-label {
+            font-size: 0.75em;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        .user-stat-value {
+            font-size: 1.2em;
+            font-weight: 700;
+            color: #e74c3c;
+        }
+
+        .user-stat-value.positive {
+            color: #27ae60;
+        }
+
+        .hits-table {
+            display: none;
+            padding: 15px 20px;
+            background: #0f0f23;
+        }
+
+        .hits-table.expanded {
+            display: block;
+        }
+
+        .hits-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        .hits-table th {
+            padding: 10px;
+            text-align: left;
+            background: #1a1a2e;
+            color: #888;
+            font-weight: 600;
+            border-bottom: 1px solid #333;
+        }
+
+        .hits-table td {
+            padding: 10px;
+            border-bottom: 1px solid #222;
+            color: #ccc;
+        }
+
+        .hits-table tr:hover {
+            background: #1a1a2e;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .badge-gain {
+            background: rgba(39, 174, 96, 0.2);
+            color: #27ae60;
+        }
+
+        .error {
+            background: rgba(231, 76, 60, 0.2);
+            color: #e74c3c;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px;
+            border: 1px solid #e74c3c;
+        }
+
+        .error.hidden {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Privileged Knowledge Detector</h1>
+            <p>Find traders whose buys are followed by significant price increases</p>
+        </div>
+
+        <div class="nav-links">
+            <a href="/">Back to Dashboard</a>
+        </div>
+
+        <div class="tabs-container">
+            <div class="tab-group">
+                <div class="tab-group-label">5 Minutes</div>
+                <div class="tab-group-buttons">
+                    <button class="tab active" data-window="5" data-threshold="30" onclick="loadData(5, 30)">+30%</button>
+                    <button class="tab" data-window="5" data-threshold="50" onclick="loadData(5, 50)">+50%</button>
+                    <button class="tab" data-window="5" data-threshold="80" onclick="loadData(5, 80)">+80%</button>
+                </div>
+            </div>
+            <div class="tab-group">
+                <div class="tab-group-label">10 Minutes</div>
+                <div class="tab-group-buttons">
+                    <button class="tab" data-window="10" data-threshold="30" onclick="loadData(10, 30)">+30%</button>
+                    <button class="tab" data-window="10" data-threshold="50" onclick="loadData(10, 50)">+50%</button>
+                    <button class="tab" data-window="10" data-threshold="80" onclick="loadData(10, 80)">+80%</button>
+                </div>
+            </div>
+            <div class="tab-group">
+                <div class="tab-group-label">30 Minutes</div>
+                <div class="tab-group-buttons">
+                    <button class="tab" data-window="30" data-threshold="30" onclick="loadData(30, 30)">+30%</button>
+                    <button class="tab" data-window="30" data-threshold="50" onclick="loadData(30, 50)">+50%</button>
+                    <button class="tab" data-window="30" data-threshold="80" onclick="loadData(30, 80)">+80%</button>
+                </div>
+            </div>
+            <div class="tab-group">
+                <div class="tab-group-label">2 Hours</div>
+                <div class="tab-group-buttons">
+                    <button class="tab" data-window="120" data-threshold="30" onclick="loadData(120, 30)">+30%</button>
+                    <button class="tab" data-window="120" data-threshold="50" onclick="loadData(120, 50)">+50%</button>
+                    <button class="tab" data-window="120" data-threshold="80" onclick="loadData(120, 80)">+80%</button>
+                </div>
+            </div>
+            <div class="tab-group">
+                <div class="tab-group-label">6 Hours</div>
+                <div class="tab-group-buttons">
+                    <button class="tab" data-window="360" data-threshold="30" onclick="loadData(360, 30)">+30%</button>
+                    <button class="tab" data-window="360" data-threshold="50" onclick="loadData(360, 50)">+50%</button>
+                    <button class="tab" data-window="360" data-threshold="80" onclick="loadData(360, 80)">+80%</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="stats" class="stats" style="display: none;">
+            <div class="stat-card">
+                <h3>Users Found</h3>
+                <div class="value" id="stat-users">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Time Window</h3>
+                <div class="value" id="stat-window">5 min</div>
+            </div>
+            <div class="stat-card">
+                <h3>Price Threshold</h3>
+                <div class="value" id="stat-threshold">+30%</div>
+            </div>
+        </div>
+
+        <div id="loading" class="loading">
+            <p>Loading analysis... (this may take a minute)</p>
+        </div>
+
+        <div id="error" class="error hidden"></div>
+
+        <div id="results" class="results-container"></div>
+    </div>
+
+    <script>
+        let currentWindow = 5;
+        let currentThreshold = 30;
+
+        function formatTime(minutes) {
+            if (minutes < 60) return `${minutes} min`;
+            return `${(minutes / 60).toFixed(0)} hr`;
+        }
+
+        function formatDateTime(dateStr) {
+            if (!dateStr) return '-';
+            const d = new Date(dateStr);
+            return d.toLocaleString();
+        }
+
+        async function loadData(windowMin, thresholdPct) {
+            currentWindow = windowMin;
+            currentThreshold = thresholdPct;
+
+            // Update active tab
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+                if (parseInt(tab.dataset.window) === windowMin && parseInt(tab.dataset.threshold) === thresholdPct) {
+                    tab.classList.add('active');
+                }
+            });
+
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('error').classList.add('hidden');
+            document.getElementById('stats').style.display = 'none';
+            document.getElementById('results').innerHTML = '';
+
+            try {
+                const response = await fetch(`/api/privileged?window=${windowMin}&threshold=${thresholdPct}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load analysis');
+                }
+
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('stats').style.display = 'grid';
+
+                document.getElementById('stat-users').textContent = data.count || 0;
+                document.getElementById('stat-window').textContent = formatTime(windowMin);
+                document.getElementById('stat-threshold').textContent = `+${thresholdPct}%`;
+
+                renderResults(data.users || []);
+
+            } catch (error) {
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('error').classList.remove('hidden');
+                document.getElementById('error').textContent = 'Error: ' + error.message;
+            }
+        }
+
+        function renderResults(users) {
+            const container = document.getElementById('results');
+
+            if (!users || users.length === 0) {
+                container.innerHTML = '<div style="text-align: center; padding: 60px; color: #888;">No users found matching these criteria</div>';
+                return;
+            }
+
+            let html = '';
+            users.forEach((user, idx) => {
+                const hitsHtml = user.hits.map(hit => `
+                    <tr>
+                        <td>${hit.title || '-'}</td>
+                        <td>${hit.outcome || '-'}</td>
+                        <td>$${hit.buy_price.toFixed(4)}</td>
+                        <td>$${hit.hit_price.toFixed(4)}</td>
+                        <td><span class="badge badge-gain">+${hit.price_gain.toFixed(1)}%</span></td>
+                        <td>${hit.minutes_to.toFixed(1)} min</td>
+                        <td>${formatDateTime(hit.buy_time)}</td>
+                    </tr>
+                `).join('');
+
+                html += `
+                    <div class="user-card">
+                        <div class="user-header" onclick="toggleHits(${idx})">
+                            <div>
+                                <a href="https://polymarket.com/profile/${user.user_address}" target="_blank" class="user-address">
+                                    ${user.user_address}
+                                </a>
+                            </div>
+                            <div class="user-stats">
+                                <div class="user-stat">
+                                    <div class="user-stat-label">Hits</div>
+                                    <div class="user-stat-value">${user.hit_count}</div>
+                                </div>
+                                <div class="user-stat">
+                                    <div class="user-stat-label">Total Buys</div>
+                                    <div class="user-stat-value positive">${user.total_buys}</div>
+                                </div>
+                                <div class="user-stat">
+                                    <div class="user-stat-label">Hit Rate</div>
+                                    <div class="user-stat-value">${user.hit_rate.toFixed(1)}%</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="hits-${idx}" class="hits-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Market</th>
+                                        <th>Outcome</th>
+                                        <th>Buy Price</th>
+                                        <th>Hit Price</th>
+                                        <th>Gain</th>
+                                        <th>Time to Hit</th>
+                                        <th>Buy Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${hitsHtml}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        }
+
+        function toggleHits(idx) {
+            const el = document.getElementById(`hits-${idx}`);
+            el.classList.toggle('expanded');
+        }
+
+        // Load default data on page load
+        loadData(5, 30);
+    </script>
+</body>
+
+</html>

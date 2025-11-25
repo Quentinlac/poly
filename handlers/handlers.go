@@ -560,3 +560,41 @@ func (h *Handler) GetAnalyticsList(c *gin.Context) {
 		"limit":       filter.Limit,
 	})
 }
+
+// PrivilegedKnowledgePage renders the privileged knowledge analysis page
+func (h *Handler) PrivilegedKnowledgePage(c *gin.Context) {
+	c.HTML(http.StatusOK, "privileged.html", gin.H{
+		"title": "Privileged Knowledge Analysis",
+	})
+}
+
+// GetPrivilegedKnowledgeAPI returns privileged knowledge analysis data
+func (h *Handler) GetPrivilegedKnowledgeAPI(c *gin.Context) {
+	// Parse time window (minutes)
+	timeWindowStr := c.DefaultQuery("window", "5")
+	timeWindow, err := strconv.Atoi(timeWindowStr)
+	if err != nil || timeWindow <= 0 {
+		timeWindow = 5
+	}
+
+	// Parse price threshold (percentage as decimal, e.g., 30 = 0.30)
+	thresholdStr := c.DefaultQuery("threshold", "30")
+	thresholdPct, err := strconv.ParseFloat(thresholdStr, 64)
+	if err != nil || thresholdPct <= 0 {
+		thresholdPct = 30
+	}
+	threshold := thresholdPct / 100.0 // Convert 30 to 0.30
+
+	results, err := h.service.GetPrivilegedKnowledgeAnalysis(c.Request.Context(), timeWindow, threshold)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to analyze: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"users":         results,
+		"count":         len(results),
+		"time_window":   timeWindow,
+		"threshold_pct": thresholdPct,
+	})
+}

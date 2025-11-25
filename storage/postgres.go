@@ -1628,3 +1628,141 @@ func (s *PostgresStore) InvalidateUserListCache(ctx context.Context) error {
 	}
 	return nil
 }
+
+// PrivilegedHit represents a single instance where a user's buy was followed by a price increase
+type PrivilegedHit struct {
+	Title       string    `json:"title"`
+	Outcome     string    `json:"outcome"`
+	BuyPrice    float64   `json:"buy_price"`
+	HitPrice    float64   `json:"hit_price"`
+	PriceGain   float64   `json:"price_gain"` // percentage gain
+	BuyTime     time.Time `json:"buy_time"`
+	HitTime     time.Time `json:"hit_time"`
+	MinutesTo   float64   `json:"minutes_to"` // minutes until price hit
+}
+
+// PrivilegedUser represents a user with potential privileged knowledge
+type PrivilegedUser struct {
+	UserAddress string          `json:"user_address"`
+	HitCount    int             `json:"hit_count"`
+	TotalBuys   int             `json:"total_buys"`
+	HitRate     float64         `json:"hit_rate"` // percentage of buys that hit
+	Hits        []PrivilegedHit `json:"hits"`
+}
+
+// GetPrivilegedKnowledgeAnalysis finds users whose buys are followed by price increases
+// timeWindowMinutes: how long to look after buy (5, 10, 30, 120, 360)
+// priceThreshold: minimum price increase (0.30 = 30%, 0.50 = 50%, 0.80 = 80%)
+func (s *PostgresStore) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThreshold float64) ([]PrivilegedUser, error) {
+	// Cache key based on parameters
+	cacheKey := fmt.Sprintf("privileged:%d:%.2f", timeWindowMinutes, priceThreshold)
+
+	// Check Redis cache first (cache for 5 minutes - this is expensive)
+	cached, err := s.redis.Get(ctx, cacheKey).Bytes()
+	if err == nil {
+		var results []PrivilegedUser
+		if json.Unmarshal(cached, &results) == nil {
+			return results, nil
+		}
+	}
+
+	// Query to find privileged knowledge indicators
+	// 1. Find all BUY trades
+	// 2. For each BUY, check if there's a subsequent trade at higher price within time window
+	// 3. Group by user
+	query := `
+		WITH user_buys AS (
+			SELECT
+				user_address,
+				asset,
+				price,
+				timestamp,
+				title,
+				outcome
+			FROM global_trades
+			WHERE side = 'BUY'
+			AND type = 'TRADE'
+			AND price > 0
+			AND timestamp > NOW() - INTERVAL '30 days'
+		),
+		price_hits AS (
+			SELECT
+				ub.user_address,
+				ub.asset,
+				ub.title,
+				ub.outcome,
+				ub.price as buy_price,
+				ub.timestamp as buy_time,
+				MIN(gt.price) as hit_price,
+				MIN(gt.timestamp) as hit_time
+			FROM user_buys ub
+			JOIN global_trades gt ON gt.asset = ub.asset
+			WHERE gt.timestamp > ub.timestamp
+			AND gt.timestamp <= ub.timestamp + $1::interval
+			AND gt.price >= ub.price * (1 + $2)
+			GROUP BY ub.user_address, ub.asset, ub.title, ub.outcome, ub.price, ub.timestamp
+		),
+		user_buy_counts AS (
+			SELECT user_address, COUNT(*) as total_buys
+			FROM user_buys
+			GROUP BY user_address
+		)
+		SELECT
+			ph.user_address,
+			COUNT(*) as hit_count,
+			COALESCE(ubc.total_buys, 0) as total_buys,
+			json_agg(json_build_object(
+				'title', ph.title,
+				'outcome', ph.outcome,
+				'buy_price', ph.buy_price,
+				'hit_price', ph.hit_price,
+				'price_gain', ((ph.hit_price - ph.buy_price) / ph.buy_price * 100),
+				'buy_time', ph.buy_time,
+				'hit_time', ph.hit_time,
+				'minutes_to', EXTRACT(EPOCH FROM (ph.hit_time - ph.buy_time)) / 60
+			) ORDER BY ph.buy_time DESC) as hits
+		FROM price_hits ph
+		LEFT JOIN user_buy_counts ubc ON ubc.user_address = ph.user_address
+		GROUP BY ph.user_address, ubc.total_buys
+		HAVING COUNT(*) >= 3
+		ORDER BY COUNT(*) DESC
+		LIMIT 100
+	`
+
+	interval := fmt.Sprintf("%d minutes", timeWindowMinutes)
+	rows, err := s.pool.Query(ctx, query, interval, priceThreshold)
+	if err != nil {
+		return nil, fmt.Errorf("privileged knowledge query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []PrivilegedUser
+	for rows.Next() {
+		var user PrivilegedUser
+		var hitsJSON []byte
+
+		err := rows.Scan(&user.UserAddress, &user.HitCount, &user.TotalBuys, &hitsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("scan privileged user: %w", err)
+		}
+
+		if err := json.Unmarshal(hitsJSON, &user.Hits); err != nil {
+			log.Printf("[Storage] Warning: failed to unmarshal hits for %s: %v", user.UserAddress, err)
+			user.Hits = []PrivilegedHit{}
+		}
+
+		// Calculate hit rate
+		if user.TotalBuys > 0 {
+			user.HitRate = float64(user.HitCount) / float64(user.TotalBuys) * 100
+		}
+
+		results = append(results, user)
+	}
+
+	// Cache for 5 minutes
+	if data, err := json.Marshal(results); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 5*time.Minute)
+	}
+
+	return results, rows.Err()
+}

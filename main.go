@@ -139,7 +139,11 @@ func main() {
 		api.GET("/users/imported", h.GetAllImportedUsers)
 		api.POST("/import-top-users", h.ImportTopUsers)
 		api.GET("/import-status/:id", h.GetImportStatus)
+		api.GET("/privileged", h.GetPrivilegedKnowledgeAPI)
 	}
+
+	// Privileged knowledge analysis page
+	r.GET("/privileged", h.PrivilegedKnowledgePage)
 
 	// User-specific routes with ID validation
 	userRoutes := r.Group("/api/users/:id")
