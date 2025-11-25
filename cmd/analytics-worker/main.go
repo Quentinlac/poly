@@ -12,8 +12,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 
 	"polymarket-analyzer/api"
+	"polymarket-analyzer/config"
+	"polymarket-analyzer/service"
 	"polymarket-analyzer/storage"
 	"polymarket-analyzer/syncer"
 )
@@ -43,7 +46,12 @@ type UserAnalytics struct {
 }
 
 func main() {
-	log.Println("[Worker] Starting combined analytics + copy trader worker...")
+	log.Println("[Worker] Starting combined analytics + incremental sync + copy trader worker...")
+
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		log.Println("[Worker] No .env file found, using environment variables")
+	}
 
 	// Get database connection string from environment
 	dbURL := os.Getenv("DATABASE_URL")
@@ -63,7 +71,7 @@ func main() {
 	// Bot detection threshold (trades per day)
 	botThreshold := 100.0
 
-	// Connect to database
+	// Connect to database for analytics
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -77,20 +85,37 @@ func main() {
 	}
 	log.Println("[Worker] Connected to database")
 
-	// Initialize storage for copy trader
+	// Load config for incremental worker
+	cfgPath := os.Getenv("POLYMARKET_CONFIG")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Printf("[Worker] Warning: Failed to load config: %v, using defaults", err)
+		cfg = &config.Config{}
+	}
+
+	// Initialize storage for copy trader and incremental worker
 	store, err := storage.NewPostgres()
 	if err != nil {
-		log.Printf("[Worker] Warning: Failed to init storage for copy trader: %v", err)
-		log.Println("[Worker] Copy trader will be disabled")
+		log.Printf("[Worker] Warning: Failed to init storage: %v", err)
+		log.Println("[Worker] Copy trader and incremental sync will be disabled")
 	} else {
 		defer store.Close()
 
-		// Initialize API client for copy trader
+		// Initialize API client
 		baseURL := os.Getenv("POLYMARKET_API_URL")
 		if baseURL == "" {
 			baseURL = "https://clob.polymarket.com"
 		}
 		apiClient := api.NewClient(baseURL)
+
+		// Create service for incremental worker
+		svc := service.NewService(store, cfg, apiClient)
+
+		// Start incremental worker (fetches new trades from tracked users every 2 seconds)
+		incrementalWorker := syncer.NewIncrementalWorker(apiClient, store, cfg, svc)
+		incrementalWorker.Start()
+		defer incrementalWorker.Stop()
+		log.Println("[Worker] Incremental sync started (2-second polling for tracked users)")
 
 		// Configure copy trader
 		copyConfig := syncer.CopyTraderConfig{
