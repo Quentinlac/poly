@@ -462,24 +462,24 @@ func validatePendingSpikes(ctx context.Context, pool *pgxpool.Pool, asset string
 	// For each window/threshold: if buy_time is within window AND buy_price qualifies for spike, set flag TRUE
 	_, err := pool.Exec(ctx, `
 		UPDATE pending_spike_checks SET
-			spike_5m_30  = spike_5m_30  OR (buy_time > $3 - INTERVAL '5 minutes'   AND buy_price <= $2 / 1.30),
-			spike_5m_50  = spike_5m_50  OR (buy_time > $3 - INTERVAL '5 minutes'   AND buy_price <= $2 / 1.50),
-			spike_5m_80  = spike_5m_80  OR (buy_time > $3 - INTERVAL '5 minutes'   AND buy_price <= $2 / 1.80),
-			spike_10m_30 = spike_10m_30 OR (buy_time > $3 - INTERVAL '10 minutes'  AND buy_price <= $2 / 1.30),
-			spike_10m_50 = spike_10m_50 OR (buy_time > $3 - INTERVAL '10 minutes'  AND buy_price <= $2 / 1.50),
-			spike_10m_80 = spike_10m_80 OR (buy_time > $3 - INTERVAL '10 minutes'  AND buy_price <= $2 / 1.80),
-			spike_30m_30 = spike_30m_30 OR (buy_time > $3 - INTERVAL '30 minutes'  AND buy_price <= $2 / 1.30),
-			spike_30m_50 = spike_30m_50 OR (buy_time > $3 - INTERVAL '30 minutes'  AND buy_price <= $2 / 1.50),
-			spike_30m_80 = spike_30m_80 OR (buy_time > $3 - INTERVAL '30 minutes'  AND buy_price <= $2 / 1.80),
-			spike_2h_30  = spike_2h_30  OR (buy_time > $3 - INTERVAL '2 hours'     AND buy_price <= $2 / 1.30),
-			spike_2h_50  = spike_2h_50  OR (buy_time > $3 - INTERVAL '2 hours'     AND buy_price <= $2 / 1.50),
-			spike_2h_80  = spike_2h_80  OR (buy_time > $3 - INTERVAL '2 hours'     AND buy_price <= $2 / 1.80),
-			spike_6h_30  = spike_6h_30  OR (buy_time > $3 - INTERVAL '6 hours'     AND buy_price <= $2 / 1.30),
-			spike_6h_50  = spike_6h_50  OR (buy_time > $3 - INTERVAL '6 hours'     AND buy_price <= $2 / 1.50),
-			spike_6h_80  = spike_6h_80  OR (buy_time > $3 - INTERVAL '6 hours'     AND buy_price <= $2 / 1.80)
+			spike_5m_30  = spike_5m_30  OR (buy_time > ($3::timestamptz - INTERVAL '5 minutes')   AND buy_price <= $2 / 1.30),
+			spike_5m_50  = spike_5m_50  OR (buy_time > ($3::timestamptz - INTERVAL '5 minutes')   AND buy_price <= $2 / 1.50),
+			spike_5m_80  = spike_5m_80  OR (buy_time > ($3::timestamptz - INTERVAL '5 minutes')   AND buy_price <= $2 / 1.80),
+			spike_10m_30 = spike_10m_30 OR (buy_time > ($3::timestamptz - INTERVAL '10 minutes')  AND buy_price <= $2 / 1.30),
+			spike_10m_50 = spike_10m_50 OR (buy_time > ($3::timestamptz - INTERVAL '10 minutes')  AND buy_price <= $2 / 1.50),
+			spike_10m_80 = spike_10m_80 OR (buy_time > ($3::timestamptz - INTERVAL '10 minutes')  AND buy_price <= $2 / 1.80),
+			spike_30m_30 = spike_30m_30 OR (buy_time > ($3::timestamptz - INTERVAL '30 minutes')  AND buy_price <= $2 / 1.30),
+			spike_30m_50 = spike_30m_50 OR (buy_time > ($3::timestamptz - INTERVAL '30 minutes')  AND buy_price <= $2 / 1.50),
+			spike_30m_80 = spike_30m_80 OR (buy_time > ($3::timestamptz - INTERVAL '30 minutes')  AND buy_price <= $2 / 1.80),
+			spike_2h_30  = spike_2h_30  OR (buy_time > ($3::timestamptz - INTERVAL '2 hours')     AND buy_price <= $2 / 1.30),
+			spike_2h_50  = spike_2h_50  OR (buy_time > ($3::timestamptz - INTERVAL '2 hours')     AND buy_price <= $2 / 1.50),
+			spike_2h_80  = spike_2h_80  OR (buy_time > ($3::timestamptz - INTERVAL '2 hours')     AND buy_price <= $2 / 1.80),
+			spike_6h_30  = spike_6h_30  OR (buy_time > ($3::timestamptz - INTERVAL '6 hours')     AND buy_price <= $2 / 1.30),
+			spike_6h_50  = spike_6h_50  OR (buy_time > ($3::timestamptz - INTERVAL '6 hours')     AND buy_price <= $2 / 1.50),
+			spike_6h_80  = spike_6h_80  OR (buy_time > ($3::timestamptz - INTERVAL '6 hours')     AND buy_price <= $2 / 1.80)
 		WHERE asset = $1
-		  AND buy_time > $3 - INTERVAL '6 hours'
-		  AND buy_time < $3
+		  AND buy_time > ($3::timestamptz - INTERVAL '6 hours')
+		  AND buy_time < $3::timestamptz
 	`, asset, currentPrice, currentTime)
 
 	if err != nil {
