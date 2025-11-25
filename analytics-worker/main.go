@@ -6,11 +6,16 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"polymarket-analyzer/api"
+	"polymarket-analyzer/storage"
+	"polymarket-analyzer/syncer"
 )
 
 // UserAnalytics represents computed metrics for a user
@@ -38,7 +43,7 @@ type UserAnalytics struct {
 }
 
 func main() {
-	log.Println("[Analytics Worker] Starting...")
+	log.Println("[Worker] Starting combined analytics + copy trader worker...")
 
 	// Get database connection string from environment
 	dbURL := os.Getenv("DATABASE_URL")
@@ -70,7 +75,49 @@ func main() {
 	if err := pool.Ping(ctx); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
 	}
-	log.Println("[Analytics Worker] Connected to database")
+	log.Println("[Worker] Connected to database")
+
+	// Initialize storage for copy trader
+	store, err := storage.NewPostgres()
+	if err != nil {
+		log.Printf("[Worker] Warning: Failed to init storage for copy trader: %v", err)
+		log.Println("[Worker] Copy trader will be disabled")
+	} else {
+		defer store.Close()
+
+		// Initialize API client for copy trader
+		baseURL := os.Getenv("POLYMARKET_API_URL")
+		if baseURL == "" {
+			baseURL = "https://clob.polymarket.com"
+		}
+		apiClient := api.NewClient(baseURL)
+
+		// Configure copy trader
+		copyConfig := syncer.CopyTraderConfig{
+			Enabled:          true,
+			Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
+			MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+			CheckIntervalSec: 2,
+		}
+
+		log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, interval=%ds",
+			copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.CheckIntervalSec)
+
+		// Create copy trader
+		copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
+		if err != nil {
+			log.Printf("[Worker] Warning: Failed to create copy trader: %v", err)
+			log.Println("[Worker] Copy trader will be disabled")
+		} else {
+			// Start copy trader
+			if err := copyTrader.Start(ctx); err != nil {
+				log.Printf("[Worker] Warning: Failed to start copy trader: %v", err)
+			} else {
+				defer copyTrader.Stop()
+				log.Println("[Worker] Copy trader started successfully")
+			}
+		}
+	}
 
 	// Ensure analytics table exists
 	if err := createAnalyticsTable(ctx, pool); err != nil {
@@ -461,4 +508,14 @@ func upsertAnalytics(ctx context.Context, pool *pgxpool.Pool, analytics []UserAn
 	}
 
 	return nil
+}
+
+// getEnvFloat retrieves a float from environment or returns default
+func getEnvFloat(key string, defaultVal float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return defaultVal
 }

@@ -42,27 +42,15 @@ services:
 
   analytics-worker:
     build:
-      context: ./analytics-worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: analytics-worker/Dockerfile
     container_name: polymarket-analytics-worker
     environment:
       # PostgreSQL connection (uses internal Docker network)
       - DATABASE_URL=postgres://${POSTGRES_USER:-polymarket}:${POSTGRES_PASSWORD:-polymarket123}@postgres:5432/${POSTGRES_DB:-polymarket}?sslmode=disable
       # Analytics interval (default 1 hour)
       - ANALYTICS_INTERVAL=${ANALYTICS_INTERVAL:-1h}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  copy-trader-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: polymarket-copy-trader
-    command: go run cmd/worker/main.go
-    environment:
-      # PostgreSQL connection
+      # PostgreSQL connection for copy trader (same format as main app)
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-polymarket}

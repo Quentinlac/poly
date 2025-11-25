@@ -6,14 +6,12 @@ WORKDIR /app
 # Install dependencies
 RUN apk add --no-cache git
 
-# Copy go mod files
-COPY go.mod go.sum* ./
-
-# Download dependencies
-RUN go mod download
-
-# Copy source code
+# Copy everything (parent module + analytics-worker)
 COPY . .
+
+# Download dependencies from analytics-worker directory
+WORKDIR /app/analytics-worker
+RUN go mod download
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker .
