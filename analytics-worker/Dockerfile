@@ -7,24 +7,25 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 # Copy go mod files
-COPY go.mod ./
-COPY go.sum* ./
+COPY go.mod go.sum* ./
+
+# Download dependencies
 RUN go mod download
 
 # Copy source code
 COPY . .
 
-# Build the analytics worker binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./cmd/analytics-worker
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker .
 
-# Runtime stage
+# Final stage
 FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /root/
 
-# Copy the binary
+# Copy the binary from builder
 COPY --from=builder /app/analytics-worker .
 
 # Set timezone
