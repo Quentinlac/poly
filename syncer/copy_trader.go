@@ -225,10 +225,17 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		return nil
 	}
 
-	// Get token ID from market
-	tokenID, negRisk, err := ct.getTokenIDForTrade(ctx, trade)
+	// Verify the token matches the intended outcome
+	// trade.MarketID is the token ID, but trade.Outcome might not match the actual token's outcome
+	tokenID, actualOutcome, negRisk, err := ct.getVerifiedTokenID(ctx, trade)
 	if err != nil {
 		return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get token ID: %v", err), "")
+	}
+
+	// Update trade outcome if it was wrong
+	if actualOutcome != "" && actualOutcome != trade.Outcome {
+		log.Printf("[CopyTrader] WARNING: Corrected outcome from '%s' to '%s' for %s", trade.Outcome, actualOutcome, trade.Title)
+		trade.Outcome = actualOutcome
 	}
 
 	if trade.Side == "BUY" {
@@ -240,25 +247,45 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	return nil
 }
 
-func (ct *CopyTrader) getTokenIDForTrade(ctx context.Context, trade models.TradeDetail) (string, bool, error) {
+// getVerifiedTokenID looks up the token info and verifies/corrects the outcome.
+// Returns: tokenID, actualOutcome, negRisk, error
+// If the trade.MarketID is already a token ID, it verifies what outcome that token actually corresponds to.
+func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.TradeDetail) (string, string, bool, error) {
 	log.Printf("[CopyTrader] DEBUG getTokenID: trade.MarketID=%s, trade.Outcome=%s, trade.Title=%s",
 		trade.MarketID, trade.Outcome, trade.Title)
 
-	// First check token_map_cache
-	tokenID, negRisk, err := ct.store.GetTokenIDFromCache(ctx, trade.MarketID, trade.Outcome)
-	if err == nil && tokenID != "" {
-		log.Printf("[CopyTrader] DEBUG getTokenID: CACHE HIT - returning tokenID=%s (different=%v)",
-			tokenID, tokenID != trade.MarketID)
-		return tokenID, negRisk, nil
+	// First, look up the token info from cache to see what outcome this token actually is
+	tokenInfo, err := ct.store.GetTokenInfo(ctx, trade.MarketID)
+	if err == nil && tokenInfo != nil {
+		// Found the token - check if the outcome matches
+		if tokenInfo.Outcome != trade.Outcome {
+			log.Printf("[CopyTrader] DEBUG getTokenID: OUTCOME MISMATCH! Token is %s but trade says %s",
+				tokenInfo.Outcome, trade.Outcome)
+			// The trade.MarketID is the wrong token - we need to find the correct one
+			// Look up the sibling token with the correct outcome
+			siblingToken, err := ct.store.GetTokenByConditionAndOutcome(ctx, tokenInfo.ConditionID, trade.Outcome)
+			if err == nil && siblingToken != nil {
+				log.Printf("[CopyTrader] DEBUG getTokenID: Found correct token %s for outcome %s",
+					siblingToken.TokenID, trade.Outcome)
+				return siblingToken.TokenID, trade.Outcome, false, nil
+			}
+			// Couldn't find sibling, use the token we have but return its actual outcome
+			log.Printf("[CopyTrader] DEBUG getTokenID: Using original token %s with corrected outcome %s",
+				trade.MarketID, tokenInfo.Outcome)
+			return trade.MarketID, tokenInfo.Outcome, false, nil
+		}
+		// Outcome matches, use as-is
+		log.Printf("[CopyTrader] DEBUG getTokenID: Token verified - outcome=%s matches", tokenInfo.Outcome)
+		return trade.MarketID, trade.Outcome, false, nil
 	}
 
-	// If not cached, try to get from CLOB market info using condition ID
-	// The MarketID field might be the condition ID or token ID
+	// Token not in cache - try CLOB API
 	market, err := ct.clobClient.GetMarket(ctx, trade.MarketID)
 	if err != nil {
-		// Try using MarketID as token ID directly
-		log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket failed (%v), using trade.MarketID directly as tokenID", err)
-		return trade.MarketID, false, nil
+		// GetMarket failed (trade.MarketID is likely a token ID, not condition ID)
+		log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket failed (%v), using trade.MarketID directly", err)
+		// We don't know the actual outcome, so return empty to use trade.Outcome
+		return trade.MarketID, "", false, nil
 	}
 
 	// Find matching token by outcome
@@ -269,15 +296,13 @@ func (ct *CopyTrader) getTokenIDForTrade(ctx context.Context, trade models.Trade
 		if strings.EqualFold(token.Outcome, trade.Outcome) {
 			// Cache it for next time
 			ct.store.CacheTokenID(ctx, trade.MarketID, trade.Outcome, token.TokenID, market.NegRisk)
-			log.Printf("[CopyTrader] DEBUG getTokenID: MATCHED - returning tokenID=%s (different from MarketID=%v)",
-				token.TokenID, token.TokenID != trade.MarketID)
-			return token.TokenID, market.NegRisk, nil
+			return token.TokenID, trade.Outcome, market.NegRisk, nil
 		}
 	}
 
 	// Fallback: use MarketID as token ID
 	log.Printf("[CopyTrader] DEBUG getTokenID: NO MATCH in tokens, falling back to trade.MarketID")
-	return trade.MarketID, false, nil
+	return trade.MarketID, "", false, nil
 }
 
 func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {

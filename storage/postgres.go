@@ -928,6 +928,23 @@ func (s *PostgresStore) GetTokenByCondition(ctx context.Context, conditionID str
 	return &info, nil
 }
 
+// GetTokenByConditionAndOutcome retrieves token information for a specific condition ID and outcome
+func (s *PostgresStore) GetTokenByConditionAndOutcome(ctx context.Context, conditionID, outcome string) (*TokenInfo, error) {
+	var info TokenInfo
+	err := s.pool.QueryRow(ctx, `
+		SELECT token_id, condition_id, outcome, title, slug
+		FROM token_map_cache
+		WHERE condition_id = $1 AND outcome = $2
+		LIMIT 1
+	`, conditionID, outcome).Scan(&info.TokenID, &info.ConditionID, &info.Outcome, &info.Title, &info.Slug)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
 // ReplaceTrades overwrites all trades (used for full refresh)
 func (s *PostgresStore) ReplaceTrades(ctx context.Context, trades map[string][]models.TradeDetail) error {
 	tx, err := s.pool.Begin(ctx)
