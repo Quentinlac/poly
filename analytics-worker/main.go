@@ -555,120 +555,73 @@ func computePrivilegedAnalysis(ctx context.Context, pool *pgxpool.Pool, timeWind
 	priceThreshold := float64(priceThresholdPct) / 100.0
 	interval := fmt.Sprintf("%d minutes", timeWindowMinutes)
 
-	log.Printf("[Privileged] Computing %dmin/+%d%% analysis (incremental by asset)...", timeWindowMinutes, priceThresholdPct)
+	log.Printf("[Privileged] Computing %dmin/+%d%% analysis...", timeWindowMinutes, priceThresholdPct)
 
-	// Step 1: Get unique assets from recent trades
-	assetRows, err := pool.Query(ctx, `
-		SELECT DISTINCT asset FROM global_trades
-		WHERE timestamp > NOW() - INTERVAL '7 days'
-		AND side = 'BUY' AND type = 'TRADE'
-	`)
-	if err != nil {
-		return fmt.Errorf("get assets: %w", err)
-	}
+	// Ensure we have the optimal index (runs once, no-op if exists)
+	_, _ = pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_gt_asset_ts_price ON global_trades(asset, timestamp, price)`)
 
-	var assets []string
-	for assetRows.Next() {
-		var asset string
-		if err := assetRows.Scan(&asset); err != nil {
-			assetRows.Close()
-			return fmt.Errorf("scan asset: %w", err)
-		}
-		assets = append(assets, asset)
-	}
-	assetRows.Close()
-
-	log.Printf("[Privileged] Found %d unique assets to process", len(assets))
-
-	// Step 2: Create temp table for partial results
-	_, err = pool.Exec(ctx, `
-		CREATE TEMP TABLE IF NOT EXISTS priv_hits_temp (
-			user_address VARCHAR(42),
-			title TEXT,
-			outcome TEXT,
-			buy_price DECIMAL,
-			hit_price DECIMAL,
-			buy_time TIMESTAMPTZ,
-			hit_time TIMESTAMPTZ
-		) ON COMMIT DROP
-	`)
-	if err != nil {
-		return fmt.Errorf("create temp table: %w", err)
-	}
-
-	// Step 3: Process each asset (small queries)
-	processed := 0
-	for _, asset := range assets {
-		// Per-asset query - much smaller join
-		_, err := pool.Exec(ctx, `
-			INSERT INTO priv_hits_temp
-			SELECT
-				ub.user_address,
-				ub.title,
-				ub.outcome,
-				ub.price as buy_price,
-				MIN(gt.price) as hit_price,
-				ub.timestamp as buy_time,
-				MIN(gt.timestamp) as hit_time
-			FROM global_trades ub
-			JOIN global_trades gt ON gt.asset = ub.asset
-			WHERE ub.asset = $1
-			AND ub.side = 'BUY' AND ub.type = 'TRADE' AND ub.price > 0
-			AND gt.timestamp > ub.timestamp
-			AND gt.timestamp <= ub.timestamp + $2::interval
-			AND gt.price >= ub.price * (1 + $3)
-			GROUP BY ub.user_address, ub.title, ub.outcome, ub.price, ub.timestamp
-		`, asset, interval, priceThreshold)
-
-		if err != nil {
-			log.Printf("[Privileged] Warning: error processing asset %s: %v", asset[:16], err)
-			continue
-		}
-		processed++
-
-		// Log progress every 100 assets
-		if processed%100 == 0 {
-			log.Printf("[Privileged] Processed %d/%d assets...", processed, len(assets))
-		}
-	}
-
-	log.Printf("[Privileged] Processed %d assets, aggregating results...", processed)
-
-	// Step 4: Get user buy counts
-	// Step 5: Aggregate results from temp table
+	// Single efficient query using LATERAL + LIMIT 1
+	// For each BUY, find IF (not all) there was a price spike - stops at first hit
+	// Uses 24h lookback to keep query under 2 minutes
 	query := `
-		WITH user_buy_counts AS (
-			SELECT user_address, COUNT(*) as total_buys
-			FROM global_trades
-			WHERE side = 'BUY' AND type = 'TRADE' AND price > 0
-			AND timestamp > NOW() - INTERVAL '7 days'
-			GROUP BY user_address
-		)
+	WITH user_buys AS (
+		SELECT user_address, asset, price, timestamp, title, outcome
+		FROM global_trades
+		WHERE side = 'BUY' AND type = 'TRADE' AND price > 0
+		AND timestamp > NOW() - INTERVAL '24 hours'
+	),
+	hits AS (
 		SELECT
-			ph.user_address,
-			COUNT(*) as hit_count,
-			COALESCE(ubc.total_buys, 0) as total_buys,
-			json_agg(json_build_object(
-				'title', ph.title,
-				'outcome', ph.outcome,
-				'buy_price', ph.buy_price,
-				'hit_price', ph.hit_price,
-				'price_gain', ((ph.hit_price - ph.buy_price) / ph.buy_price * 100),
-				'buy_time', ph.buy_time,
-				'hit_time', ph.hit_time,
-				'minutes_to', EXTRACT(EPOCH FROM (ph.hit_time - ph.buy_time)) / 60
-			) ORDER BY ph.buy_time DESC) as hits
-		FROM priv_hits_temp ph
-		LEFT JOIN user_buy_counts ubc ON ubc.user_address = ph.user_address
-		GROUP BY ph.user_address, ubc.total_buys
-		HAVING COUNT(*) >= 3
-		ORDER BY COUNT(*) DESC
-		LIMIT 100
+			ub.user_address,
+			ub.title,
+			ub.outcome,
+			ub.price as buy_price,
+			ub.timestamp as buy_time,
+			hit.price as hit_price,
+			hit.timestamp as hit_time
+		FROM user_buys ub
+		LEFT JOIN LATERAL (
+			SELECT price, timestamp
+			FROM global_trades gt
+			WHERE gt.asset = ub.asset
+			AND gt.timestamp > ub.timestamp
+			AND gt.timestamp <= ub.timestamp + $1::interval
+			AND gt.price >= ub.price * (1 + $2)
+			ORDER BY gt.timestamp
+			LIMIT 1
+		) hit ON true
+		WHERE hit.price IS NOT NULL
+	),
+	user_buy_counts AS (
+		SELECT user_address, COUNT(*) as total_buys
+		FROM user_buys  -- Already filtered to 24h in CTE above
+		GROUP BY user_address
+	)
+	SELECT
+		h.user_address,
+		COUNT(*) as hit_count,
+		COALESCE(ubc.total_buys, 0) as total_buys,
+		json_agg(json_build_object(
+			'title', h.title,
+			'outcome', h.outcome,
+			'buy_price', h.buy_price,
+			'hit_price', h.hit_price,
+			'price_gain', ((h.hit_price - h.buy_price) / h.buy_price * 100),
+			'buy_time', h.buy_time,
+			'hit_time', h.hit_time,
+			'minutes_to', EXTRACT(EPOCH FROM (h.hit_time - h.buy_time)) / 60
+		) ORDER BY h.buy_time DESC) as hits
+	FROM hits h
+	LEFT JOIN user_buy_counts ubc ON ubc.user_address = h.user_address
+	GROUP BY h.user_address, ubc.total_buys
+	HAVING COUNT(*) >= 3
+	ORDER BY COUNT(*) DESC
+	LIMIT 100
 	`
 
-	rows, err := pool.Query(ctx, query)
+	rows, err := pool.Query(ctx, query, interval, priceThreshold)
 	if err != nil {
-		return fmt.Errorf("aggregate results: %w", err)
+		return fmt.Errorf("privileged query: %w", err)
 	}
 	defer rows.Close()
 
