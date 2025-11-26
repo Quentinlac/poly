@@ -1386,7 +1386,8 @@
 
                 document.getElementById('myusers-loading').classList.remove('active');
 
-                if (!data.users || data.users.length === 0) {
+                const rankings = data.rankings || [];
+                if (rankings.length === 0) {
                     document.getElementById('myusers-list').innerHTML = `
                         <div class="empty-state">
                             <div class="empty-state-icon">📊</div>
@@ -1396,17 +1397,18 @@
                 }
 
                 let html = '';
-                data.users.forEach(user => {
-                    const pnlClass = (user.total_pnl || 0) >= 0 ? 'positive' : 'negative';
+                rankings.forEach(ranking => {
+                    const user = ranking.user || {};
+                    const pnl = user.total_pnl || 0;
+                    const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+                    const userId = user.id || '';
                     html += `
-                        <div class="user-card">
-                            <div class="user-info">
-                                <a href="https://polymarket.com/profile/${user.id}" target="_blank" class="user-address">${user.id.substring(0, 12)}...</a>
-                                <span class="user-stats">Trades: ${user.total_trades || 0} | P&L: <span class="${pnlClass}">${formatMoney(user.total_pnl || 0)}</span></span>
+                        <div class="user-card" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;padding:12px;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <div style="display:flex;flex-direction:column;gap:2px;">
+                                <a href="https://polymarket.com/profile/${userId}" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);text-decoration:none;">${userId.substring(0, 14)}...</a>
+                                <span style="font-size:10px;color:var(--text-muted);">Trades: ${user.total_trades || 0} | P&L: <span style="color:var(--${pnlClass === 'positive' ? 'green' : 'red'});">${formatMoney(pnl)}</span> | Win: ${((user.win_rate || 0) * 100).toFixed(0)}%</span>
                             </div>
-                            <div class="user-actions">
-                                <button class="btn btn-secondary" onclick="deleteUser('${user.id}')">Remove</button>
-                            </div>
+                            <button class="btn btn-secondary" onclick="deleteUser('${userId}')">Remove</button>
                         </div>`;
                 });
                 document.getElementById('myusers-list').innerHTML = html;
