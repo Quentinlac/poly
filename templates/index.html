@@ -430,18 +430,84 @@
         <!-- ANALYTICS TAB -->
         <div id="tab-analytics" class="tab-content active">
             <div class="filters">
+                <!-- Row 1: Performance filters -->
                 <div class="filter-group">
                     <div class="filter-item">
-                        <label for="minBets">Min Bets</label>
-                        <input type="number" id="minBets" min="0" step="10" placeholder="e.g. 10">
+                        <label>P&L ($)</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minPnl" step="100" placeholder="Min" style="width:80px;">
+                            <input type="number" id="maxPnl" step="100" placeholder="Max" style="width:80px;">
+                        </div>
                     </div>
                     <div class="filter-item">
-                        <label for="minPnl">Min P&L ($)</label>
-                        <input type="number" id="minPnl" step="100" placeholder="e.g. 100">
+                        <label>P&L %</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minPnlPercent" step="10" placeholder="Min" style="width:70px;">
+                            <input type="number" id="maxPnlPercent" step="10" placeholder="Max" style="width:70px;">
+                        </div>
                     </div>
                     <div class="filter-item">
-                        <label for="maxPnl">Max P&L ($)</label>
-                        <input type="number" id="maxPnl" step="100" placeholder="e.g. 10000">
+                        <label>Volume ($)</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minVolume" step="1000" placeholder="Min" style="width:80px;">
+                            <input type="number" id="maxVolume" step="1000" placeholder="Max" style="width:80px;">
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <label>Bets</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minBets" min="0" step="10" placeholder="Min" style="width:70px;">
+                            <input type="number" id="maxBets" min="0" step="10" placeholder="Max" style="width:70px;">
+                        </div>
+                    </div>
+                </div>
+                <!-- Row 2: Activity filters -->
+                <div class="filter-group" style="margin-top: 10px;">
+                    <div class="filter-item">
+                        <label>Markets</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minMarkets" min="0" step="1" placeholder="Min" style="width:60px;">
+                            <input type="number" id="maxMarkets" min="0" step="1" placeholder="Max" style="width:60px;">
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <label>Avg/Market ($)</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minAvgInvestment" step="100" placeholder="Min" style="width:70px;">
+                            <input type="number" id="maxAvgInvestment" step="100" placeholder="Max" style="width:70px;">
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <label>Trades/Day</label>
+                        <div style="display:flex;gap:5px;">
+                            <input type="number" id="minTradesPerDay" step="0.5" placeholder="Min" style="width:60px;">
+                            <input type="number" id="maxTradesPerDay" step="0.5" placeholder="Max" style="width:60px;">
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <label>Last Active</label>
+                        <select id="lastActiveDays" style="width:120px;">
+                            <option value="">Any time</option>
+                            <option value="1">Last 24h</option>
+                            <option value="7">Last 7 days</option>
+                            <option value="30">Last 30 days</option>
+                            <option value="90">Last 90 days</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- Row 3: Options and actions -->
+                <div class="filter-group" style="margin-top: 10px; align-items: center;">
+                    <div class="filter-item">
+                        <div class="filter-toggle">
+                            <input type="checkbox" id="hideBots" checked>
+                            <label for="hideBots" style="font-weight:500;color:#495057;">Hide bots</label>
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <div class="filter-toggle">
+                            <input type="checkbox" id="dataComplete">
+                            <label for="dataComplete" style="font-weight:500;color:#495057;">Complete data only</label>
+                        </div>
                     </div>
                     <div class="filter-item">
                         <label for="analyticsLimit">Limit</label>
@@ -452,24 +518,9 @@
                             <option value="5000">5,000</option>
                         </select>
                     </div>
-                </div>
-                <div class="filter-group" style="margin-top: 15px;">
                     <div class="filter-item">
-                        <label>&nbsp;</label>
-                        <div class="filter-toggle">
-                            <input type="checkbox" id="hideBots">
-                            <label for="hideBots" style="font-weight:500;color:#495057;">Hide bots</label>
-                        </div>
-                    </div>
-                    <div class="filter-item">
-                        <label>&nbsp;</label>
-                        <div class="filter-toggle">
-                            <input type="checkbox" id="dataComplete">
-                            <label for="dataComplete" style="font-weight:500;color:#495057;">Complete data only</label>
-                        </div>
-                    </div>
-                    <div class="filter-item" style="align-self: flex-end;">
                         <button class="btn" onclick="loadAnalytics()">Load Analytics</button>
+                        <button class="btn" onclick="resetAnalyticsFilters()" style="background:#6c757d;margin-left:5px;">Reset</button>
                     </div>
                 </div>
             </div>
@@ -591,21 +642,50 @@
 
         // Analytics functions
         async function loadAnalytics() {
-            const minBets = document.getElementById('minBets').value;
-            const minPnl = document.getElementById('minPnl').value;
-            const maxPnl = document.getElementById('maxPnl').value;
-            const limit = document.getElementById('analyticsLimit').value;
-            const hideBots = document.getElementById('hideBots').checked;
-            const dataComplete = document.getElementById('dataComplete').checked;
-
             const params = new URLSearchParams();
-            params.set('limit', limit);
+            params.set('limit', document.getElementById('analyticsLimit').value);
             params.set('sort', analyticsSortColumn);
             params.set('order', analyticsSortDesc ? 'desc' : 'asc');
 
-            if (minBets) params.set('min_bets', minBets);
+            // Performance filters
+            const minPnl = document.getElementById('minPnl').value;
+            const maxPnl = document.getElementById('maxPnl').value;
+            const minPnlPercent = document.getElementById('minPnlPercent').value;
+            const maxPnlPercent = document.getElementById('maxPnlPercent').value;
+            const minVolume = document.getElementById('minVolume').value;
+            const maxVolume = document.getElementById('maxVolume').value;
+            const minBets = document.getElementById('minBets').value;
+            const maxBets = document.getElementById('maxBets').value;
+
+            // Activity filters
+            const minMarkets = document.getElementById('minMarkets').value;
+            const maxMarkets = document.getElementById('maxMarkets').value;
+            const minAvgInvestment = document.getElementById('minAvgInvestment').value;
+            const maxAvgInvestment = document.getElementById('maxAvgInvestment').value;
+            const minTradesPerDay = document.getElementById('minTradesPerDay').value;
+            const maxTradesPerDay = document.getElementById('maxTradesPerDay').value;
+            const lastActiveDays = document.getElementById('lastActiveDays').value;
+
+            // Boolean filters
+            const hideBots = document.getElementById('hideBots').checked;
+            const dataComplete = document.getElementById('dataComplete').checked;
+
+            // Add all params
             if (minPnl) params.set('min_pnl', minPnl);
             if (maxPnl) params.set('max_pnl', maxPnl);
+            if (minPnlPercent) params.set('min_pnl_percent', minPnlPercent);
+            if (maxPnlPercent) params.set('max_pnl_percent', maxPnlPercent);
+            if (minVolume) params.set('min_volume', minVolume);
+            if (maxVolume) params.set('max_volume', maxVolume);
+            if (minBets) params.set('min_bets', minBets);
+            if (maxBets) params.set('max_bets', maxBets);
+            if (minMarkets) params.set('min_markets', minMarkets);
+            if (maxMarkets) params.set('max_markets', maxMarkets);
+            if (minAvgInvestment) params.set('min_avg_investment', minAvgInvestment);
+            if (maxAvgInvestment) params.set('max_avg_investment', maxAvgInvestment);
+            if (minTradesPerDay) params.set('min_trades_per_day', minTradesPerDay);
+            if (maxTradesPerDay) params.set('max_trades_per_day', maxTradesPerDay);
+            if (lastActiveDays) params.set('last_active_days', lastActiveDays);
             if (hideBots) params.set('hide_bots', '1');
             if (dataComplete) params.set('data_complete', '1');
 
@@ -693,6 +773,35 @@
             });
 
             loadAnalytics();
+        }
+
+        function resetAnalyticsFilters() {
+            // Reset all input fields
+            document.getElementById('minPnl').value = '';
+            document.getElementById('maxPnl').value = '';
+            document.getElementById('minPnlPercent').value = '';
+            document.getElementById('maxPnlPercent').value = '';
+            document.getElementById('minVolume').value = '';
+            document.getElementById('maxVolume').value = '';
+            document.getElementById('minBets').value = '';
+            document.getElementById('maxBets').value = '';
+            document.getElementById('minMarkets').value = '';
+            document.getElementById('maxMarkets').value = '';
+            document.getElementById('minAvgInvestment').value = '';
+            document.getElementById('maxAvgInvestment').value = '';
+            document.getElementById('minTradesPerDay').value = '';
+            document.getElementById('maxTradesPerDay').value = '';
+            document.getElementById('lastActiveDays').value = '';
+            document.getElementById('analyticsLimit').value = '100';
+            document.getElementById('hideBots').checked = true;
+            document.getElementById('dataComplete').checked = false;
+
+            // Reset sort
+            analyticsSortColumn = 'pnl';
+            analyticsSortDesc = true;
+            document.querySelectorAll('#analytics-table th').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+            });
         }
 
         function renderTable(rankings) {

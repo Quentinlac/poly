@@ -1468,18 +1468,27 @@ type UserAnalyticsRecord struct {
 
 // UserAnalyticsFilter contains filter options for analytics queries
 type UserAnalyticsFilter struct {
-	MinPnL        *float64
-	MaxPnL        *float64
-	MinBets       *int
-	MaxBets       *int
-	MinPnLPercent *float64
-	MaxPnLPercent *float64
-	HideBots      bool
-	DataComplete  *bool
-	SortBy        string
-	SortDesc      bool
-	Limit         int
-	Offset        int
+	MinPnL           *float64
+	MaxPnL           *float64
+	MinBets          *int
+	MaxBets          *int
+	MinPnLPercent    *float64
+	MaxPnLPercent    *float64
+	MinVolume        *float64 // Total buy USD
+	MaxVolume        *float64
+	MinMarkets       *int
+	MaxMarkets       *int
+	MinAvgInvestment *float64
+	MaxAvgInvestment *float64
+	MinTradesPerDay  *float64
+	MaxTradesPerDay  *float64
+	LastActiveDays   *int // Only users active within N days
+	HideBots         bool
+	DataComplete     *bool
+	SortBy           string
+	SortDesc         bool
+	Limit            int
+	Offset           int
 }
 
 // GetUserAnalyticsList returns filtered and sorted user analytics
@@ -1518,6 +1527,49 @@ func (s *PostgresStore) GetUserAnalyticsList(ctx context.Context, filter UserAna
 		conditions = append(conditions, fmt.Sprintf("pnl_percentage <= $%d", argNum))
 		args = append(args, *filter.MaxPnLPercent)
 		argNum++
+	}
+	if filter.MinVolume != nil {
+		conditions = append(conditions, fmt.Sprintf("total_buy_usd >= $%d", argNum))
+		args = append(args, *filter.MinVolume)
+		argNum++
+	}
+	if filter.MaxVolume != nil {
+		conditions = append(conditions, fmt.Sprintf("total_buy_usd <= $%d", argNum))
+		args = append(args, *filter.MaxVolume)
+		argNum++
+	}
+	if filter.MinMarkets != nil {
+		conditions = append(conditions, fmt.Sprintf("unique_markets >= $%d", argNum))
+		args = append(args, *filter.MinMarkets)
+		argNum++
+	}
+	if filter.MaxMarkets != nil {
+		conditions = append(conditions, fmt.Sprintf("unique_markets <= $%d", argNum))
+		args = append(args, *filter.MaxMarkets)
+		argNum++
+	}
+	if filter.MinAvgInvestment != nil {
+		conditions = append(conditions, fmt.Sprintf("avg_investment_per_market >= $%d", argNum))
+		args = append(args, *filter.MinAvgInvestment)
+		argNum++
+	}
+	if filter.MaxAvgInvestment != nil {
+		conditions = append(conditions, fmt.Sprintf("avg_investment_per_market <= $%d", argNum))
+		args = append(args, *filter.MaxAvgInvestment)
+		argNum++
+	}
+	if filter.MinTradesPerDay != nil {
+		conditions = append(conditions, fmt.Sprintf("trades_per_day_avg >= $%d", argNum))
+		args = append(args, *filter.MinTradesPerDay)
+		argNum++
+	}
+	if filter.MaxTradesPerDay != nil {
+		conditions = append(conditions, fmt.Sprintf("trades_per_day_avg <= $%d", argNum))
+		args = append(args, *filter.MaxTradesPerDay)
+		argNum++
+	}
+	if filter.LastActiveDays != nil {
+		conditions = append(conditions, fmt.Sprintf("last_trade_at >= NOW() - INTERVAL '%d days'", *filter.LastActiveDays))
 	}
 	if filter.HideBots {
 		conditions = append(conditions, "is_bot = false")

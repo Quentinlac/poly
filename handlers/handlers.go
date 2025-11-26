@@ -525,13 +525,24 @@ func (h *Handler) GetAnalyticsList(c *gin.Context) {
 		}
 	}
 
-	// Parse filters
+	// Parse filters - Performance
 	filter.MinPnL = parseFloatPointer(c.Query("min_pnl"))
 	filter.MaxPnL = parseFloatPointer(c.Query("max_pnl"))
-	filter.MinBets = parseIntPointer(c.Query("min_bets"))
-	filter.MaxBets = parseIntPointer(c.Query("max_bets"))
 	filter.MinPnLPercent = parseFloatPointer(c.Query("min_pnl_percent"))
 	filter.MaxPnLPercent = parseFloatPointer(c.Query("max_pnl_percent"))
+	filter.MinVolume = parseFloatPointer(c.Query("min_volume"))
+	filter.MaxVolume = parseFloatPointer(c.Query("max_volume"))
+	filter.MinBets = parseIntPointer(c.Query("min_bets"))
+	filter.MaxBets = parseIntPointer(c.Query("max_bets"))
+
+	// Parse filters - Activity
+	filter.MinMarkets = parseIntPointer(c.Query("min_markets"))
+	filter.MaxMarkets = parseIntPointer(c.Query("max_markets"))
+	filter.MinAvgInvestment = parseFloatPointer(c.Query("min_avg_investment"))
+	filter.MaxAvgInvestment = parseFloatPointer(c.Query("max_avg_investment"))
+	filter.MinTradesPerDay = parseFloatPointer(c.Query("min_trades_per_day"))
+	filter.MaxTradesPerDay = parseFloatPointer(c.Query("max_trades_per_day"))
+	filter.LastActiveDays = parseIntPointer(c.Query("last_active_days"))
 
 	// Boolean filters
 	hideBots := strings.ToLower(strings.TrimSpace(c.Query("hide_bots")))
