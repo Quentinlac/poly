@@ -864,21 +864,30 @@ func (s *Service) buildUserFromTrades(userID string, trades []models.TradeDetail
 		user.Username = shortAddress(userID)
 	}
 
-	// Aggregate trades by subject
+	// Aggregate trades by subject and calculate P&L from trades
 	subjectAgg := make(map[models.Subject]*struct {
-		trades int
-		volume float64
+		trades    int
+		buyVolume  float64
+		sellVolume float64
 	})
 
 	for _, trade := range trades {
 		if _, ok := subjectAgg[trade.Subject]; !ok {
 			subjectAgg[trade.Subject] = &struct {
-				trades int
-				volume float64
+				trades    int
+				buyVolume  float64
+				sellVolume float64
 			}{}
 		}
 		subjectAgg[trade.Subject].trades++
-		subjectAgg[trade.Subject].volume += trade.Size * trade.Price
+
+		// Track buy/sell volumes for P&L calculation
+		tradeValue := trade.Size * trade.Price
+		if trade.Side == "BUY" {
+			subjectAgg[trade.Subject].buyVolume += tradeValue
+		} else {
+			subjectAgg[trade.Subject].sellVolume += tradeValue
+		}
 
 		if trade.Timestamp.After(user.LastActive) {
 			user.LastActive = trade.Timestamp
@@ -922,13 +931,15 @@ func (s *Service) buildUserFromTrades(userID string, trades []models.TradeDetail
 	var totalTrades int
 	var totalPNL float64
 	var totalWins, totalLosses int
+	var totalBuyVolume, totalSellVolume float64
 
 	for subject, agg := range subjectAgg {
 		score := models.SubjectScore{
 			Trades: agg.trades,
 		}
 
-		if pos, ok := positionsBySubject[subject]; ok {
+		// Use positions P&L if available, otherwise estimate from trade volumes
+		if pos, ok := positionsBySubject[subject]; ok && (pos.wins+pos.losses > 0) {
 			score.PNL = pos.pnl
 			if pos.wins+pos.losses > 0 {
 				score.WinRate = float64(pos.wins) / float64(pos.wins+pos.losses)
@@ -936,10 +947,23 @@ func (s *Service) buildUserFromTrades(userID string, trades []models.TradeDetail
 			totalWins += pos.wins
 			totalLosses += pos.losses
 			totalPNL += pos.pnl
+		} else {
+			// Fallback: estimate P&L from trade volumes (sell - buy)
+			score.PNL = agg.sellVolume - agg.buyVolume
+			totalPNL += score.PNL
 		}
 
+		totalBuyVolume += agg.buyVolume
+		totalSellVolume += agg.sellVolume
 		user.SubjectScores[subject] = score
 		totalTrades += agg.trades
+	}
+
+	// If no positions data, calculate P&L from total trade volumes
+	if totalWins+totalLosses == 0 && len(positions) == 0 {
+		totalPNL = totalSellVolume - totalBuyVolume
+		log.Printf("[Import] User %s: No positions data, estimated P&L from trades: $%.2f (sell: $%.2f, buy: $%.2f)",
+			userID[:10], totalPNL, totalSellVolume, totalBuyVolume)
 	}
 
 	user.TotalTrades = totalTrades

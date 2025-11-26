@@ -71,8 +71,8 @@ func (w *IncrementalWorker) Start() {
 			case <-w.stop:
 				return
 			case <-ticker.C:
-				// Use 10 second timeout - queries can be slow under load
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				// Use 30 second timeout - Goldsky subgraph can be slow from cloud environments
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				if err := w.tick(ctx); err != nil {
 					log.Printf("[incremental] tick error: %v", err)
 				}

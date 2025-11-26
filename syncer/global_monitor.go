@@ -61,7 +61,7 @@ func (m *GlobalTradeMonitor) Start() {
 			case <-m.stop:
 				return
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), tradeInterval-500*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				if err := m.tickTrades(ctx); err != nil {
 					log.Printf("[global-monitor] trades tick error: %v", err)
 				}
