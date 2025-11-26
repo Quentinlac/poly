@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"polymarket-analyzer/api"
@@ -39,7 +40,7 @@ func main() {
 	}
 
 	// Configure for Magic/Email wallet if funder address is set
-	funderAddress := os.Getenv("POLYMARKET_FUNDER_ADDRESS")
+	funderAddress := strings.TrimSpace(os.Getenv("POLYMARKET_FUNDER_ADDRESS"))
 	if funderAddress != "" {
 		clobClient.SetFunder(funderAddress)
 		clobClient.SetSignatureType(1) // 1 = POLY_PROXY (Magic/Email wallet)

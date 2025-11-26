@@ -481,24 +481,33 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	sideInt := 0     // 0 = BUY, 1 = SELL (for EIP-712)
 	sideStr := "BUY" // String for JSON payload
 
-	// Token amounts in 6 decimals (same as USDC)
-	sizeUnits := new(big.Float).Mul(big.NewFloat(size), big.NewFloat(1e6))
-	sizeInt := new(big.Int)
-	sizeUnits.Int(sizeInt)
+	// Polymarket precision requirements:
+	// - Token amounts: max 2 decimal places (0.01 precision)
+	// - USDC amounts: max 4 decimal places (0.0001 precision)
+	// In 6-decimal representation: 2 decimals = divisible by 10000, 4 decimals = divisible by 100
 
-	// USDC amount in 6 decimals
-	usdcAmount := new(big.Float).Mul(big.NewFloat(size*price), big.NewFloat(1e6))
-	usdcInt := new(big.Int)
-	usdcAmount.Int(usdcInt)
+	// First, round size to 2 decimal places (required precision for tokens)
+	size = float64(int(size*100+0.5)) / 100
+
+	// Calculate USDC based on rounded size
+	usdcValue := size * price
+	// Round USDC to 4 decimal places
+	usdcValue = float64(int(usdcValue*10000+0.5)) / 10000
+
+	// Convert to 6-decimal integers
+	sizeInt := big.NewInt(int64(size * 1e6))
+	usdcInt := big.NewInt(int64(usdcValue * 1e6))
 
 	if side == SideBuy {
-		makerAmount = usdcInt    // We give USDC (6 decimals)
-		takerAmount = sizeInt    // We get tokens (6 decimals)
+		// BUY: makerAmount=USDC, takerAmount=tokens
+		makerAmount = usdcInt
+		takerAmount = sizeInt
 		sideInt = 0
 		sideStr = "BUY"
 	} else {
-		makerAmount = sizeInt    // We give tokens (6 decimals)
-		takerAmount = usdcInt    // We get USDC (6 decimals)
+		// SELL: makerAmount=tokens, takerAmount=USDC
+		makerAmount = sizeInt
+		takerAmount = usdcInt
 		sideInt = 1
 		sideStr = "SELL"
 	}
@@ -516,6 +525,8 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// For EOA wallets: maker = signer = wallet address
 	makerAddress := c.funder.Hex()
 	signerAddress := c.auth.GetAddress().Hex()
+
+	log.Printf("[CLOB] DEBUG Order: maker=%s, signer=%s, signatureType=%d", makerAddress, signerAddress, c.signatureType)
 
 	// Build order struct
 	order := &Order{

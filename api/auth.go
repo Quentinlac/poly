@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -23,7 +24,7 @@ type Auth struct {
 
 // NewAuth creates a new auth instance from private key
 func NewAuth() (*Auth, error) {
-	privateKeyStr := os.Getenv("POLYMARKET_PRIVATE_KEY")
+	privateKeyStr := strings.TrimSpace(os.Getenv("POLYMARKET_PRIVATE_KEY"))
 	if privateKeyStr == "" {
 		return nil, fmt.Errorf("POLYMARKET_PRIVATE_KEY environment variable not set")
 	}
@@ -32,6 +33,8 @@ func NewAuth() (*Auth, error) {
 	if len(privateKeyStr) > 2 && privateKeyStr[:2] == "0x" {
 		privateKeyStr = privateKeyStr[2:]
 	}
+	// Trim again after removing prefix (in case of "0x " with space)
+	privateKeyStr = strings.TrimSpace(privateKeyStr)
 
 	privateKeyBytes, err := hex.DecodeString(privateKeyStr)
 	if err != nil {
