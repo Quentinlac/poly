@@ -109,9 +109,12 @@ func (h *Handler) UserProfilePage(c *gin.Context) {
 		return
 	}
 
-	// Always use live fetch to get Type field and REDEEM activities
-	// Use high limit to capture all trades (maker + taker) and all redemptions
-	trades, _ := h.service.GetUserTradesLive(c.Request.Context(), userID, 100000)
+	// First try to get trades from DB (synced by incremental worker)
+	trades, err := h.service.GetUserTrades(c.Request.Context(), userID, 100000)
+	if err != nil || len(trades) == 0 {
+		// Fall back to live fetch if DB has no trades
+		trades, _ = h.service.GetUserTradesLive(c.Request.Context(), userID, 100000)
+	}
 
 	c.HTML(http.StatusOK, "profile.html", gin.H{
 		"user":   user,

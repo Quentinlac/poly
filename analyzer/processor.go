@@ -52,10 +52,44 @@ func (p *Processor) BuildUserFromTrades(address string, tradeDetails []models.Tr
 	user.TotalTrades = len(tradeDetails)
 	user.LastActive = lastActive
 
+	// Calculate P&L by aggregating positions (buy/sell per market+outcome)
+	positions := p.aggregatePositions(tradeDetails)
+	var totalPNL float64
+	var wins, losses int
+	for _, pos := range positions {
+		totalPNL += pos.GainLoss
+		if pos.GainLoss > 0 {
+			wins++
+		} else if pos.GainLoss < 0 {
+			losses++
+		}
+	}
+	user.TotalPNL = totalPNL
+	if wins+losses > 0 {
+		user.WinRate = float64(wins) / float64(wins+losses)
+	}
+
 	// Calculate subject-specific scores from TradeDetails
 	for subject, subjectTrades := range subjectTradeDetails {
+		subjectPositions := p.aggregatePositions(subjectTrades)
+		var subjectPNL float64
+		var subjectWins, subjectLosses int
+		for _, pos := range subjectPositions {
+			subjectPNL += pos.GainLoss
+			if pos.GainLoss > 0 {
+				subjectWins++
+			} else if pos.GainLoss < 0 {
+				subjectLosses++
+			}
+		}
+		var subjectWinRate float64
+		if subjectWins+subjectLosses > 0 {
+			subjectWinRate = float64(subjectWins) / float64(subjectWins+subjectLosses)
+		}
 		score := models.SubjectScore{
-			Trades: len(subjectTrades),
+			Trades:  len(subjectTrades),
+			PNL:     subjectPNL,
+			WinRate: subjectWinRate,
 		}
 		user.SubjectScores[subject] = score
 	}
@@ -64,6 +98,70 @@ func (p *Processor) BuildUserFromTrades(address string, tradeDetails []models.Tr
 	user.Consistency = p.calculateConsistency(user.SubjectScores)
 
 	return user
+}
+
+// aggregatePositions groups trades by market+outcome and calculates P&L per position
+func (p *Processor) aggregatePositions(trades []models.TradeDetail) []models.AggregatedPosition {
+	if len(trades) == 0 {
+		return nil
+	}
+
+	// Build title->outcome map from BUY trades (for REDEEMs that lack outcome)
+	titleToOutcome := make(map[string]string)
+	for _, t := range trades {
+		if t.Side == "BUY" && t.Outcome != "" {
+			titleToOutcome[t.Title] = t.Outcome
+		}
+	}
+
+	type posBuilder struct {
+		title       string
+		outcome     string
+		totalBought float64
+		totalSold   float64
+	}
+
+	positions := make(map[string]*posBuilder)
+
+	for _, t := range trades {
+		outcome := t.Outcome
+		if outcome == "" && t.Type == "REDEEM" {
+			if o, ok := titleToOutcome[t.Title]; ok {
+				outcome = o
+			}
+		}
+
+		key := t.Title + "|" + outcome
+		pb, exists := positions[key]
+		if !exists {
+			pb = &posBuilder{title: t.Title, outcome: outcome}
+			positions[key] = pb
+		}
+
+		if t.Type == "REDEEM" {
+			redeemValue := t.UsdcSize
+			if redeemValue == 0 {
+				redeemValue = t.Size
+			}
+			pb.totalSold += redeemValue
+		} else if t.Side == "BUY" {
+			pb.totalBought += t.Size * t.Price
+		} else if t.Side == "SELL" {
+			pb.totalSold += t.Size * t.Price
+		}
+	}
+
+	result := make([]models.AggregatedPosition, 0, len(positions))
+	for _, pb := range positions {
+		result = append(result, models.AggregatedPosition{
+			Title:       pb.title,
+			Outcome:     pb.outcome,
+			TotalBought: pb.totalBought,
+			TotalSold:   pb.totalSold,
+			GainLoss:    pb.totalSold - pb.totalBought,
+		})
+	}
+	return result
 }
 
 // ProcessUserTrades calculates user metrics from trades
