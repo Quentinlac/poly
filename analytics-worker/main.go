@@ -386,9 +386,9 @@ func processNewTrades(ctx context.Context, pool *pgxpool.Pool) {
 			insertPendingSpike(ctx, pool, t.ID, t.Asset, t.UserAddress, t.Price, t.Timestamp, title, outcome)
 		}
 
-		// 3. Reverse spike validation - this trade's price may validate past BUYs
+		// 3. Reverse spike validation - this trade's price may validate past BUYs (excluding same user)
 		if t.Price > 0 {
-			validatePendingSpikes(ctx, pool, t.Asset, t.Price, t.Timestamp)
+			validatePendingSpikes(ctx, pool, t.Asset, t.Price, t.Timestamp, t.UserAddress)
 		}
 	}
 
@@ -457,9 +457,10 @@ func insertPendingSpike(ctx context.Context, pool *pgxpool.Pool, tradeID, asset,
 	}
 }
 
-func validatePendingSpikes(ctx context.Context, pool *pgxpool.Pool, asset string, currentPrice float64, currentTime time.Time) {
+func validatePendingSpikes(ctx context.Context, pool *pgxpool.Pool, asset string, currentPrice float64, currentTime time.Time, tradeUserAddress string) {
 	// Single UPDATE that checks all 15 conditions at once
 	// For each window/threshold: if buy_time is within window AND buy_price qualifies for spike, set flag TRUE
+	// IMPORTANT: Exclude the same user's trades - a user's own subsequent trades shouldn't validate their own spikes
 	_, err := pool.Exec(ctx, `
 		UPDATE pending_spike_checks SET
 			spike_5m_30  = spike_5m_30  OR (buy_time > ($3::timestamptz - INTERVAL '5 minutes')   AND buy_price <= $2 / 1.30),
@@ -480,7 +481,8 @@ func validatePendingSpikes(ctx context.Context, pool *pgxpool.Pool, asset string
 		WHERE asset = $1
 		  AND buy_time > ($3::timestamptz - INTERVAL '6 hours')
 		  AND buy_time < $3::timestamptz
-	`, asset, currentPrice, currentTime)
+		  AND user_address != $4
+	`, asset, currentPrice, currentTime, tradeUserAddress)
 
 	if err != nil {
 		log.Printf("[Spike] Error validating: %v", err)
@@ -845,25 +847,26 @@ func migrateHistoricalSpikes(ctx context.Context, pool *pgxpool.Pool) error {
 			}
 
 			// Check spikes with a single query per buy
+			// IMPORTANT: Exclude the same user's trades - their own subsequent trades shouldn't validate their spikes
 			var flags [15]bool
 			pool.QueryRow(ctx, `
 				SELECT
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.30 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.50 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.80 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.30 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.50 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.80 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.30 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.50 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.80 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.30 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.50 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.80 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.30 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.50 LIMIT 1),
-					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.80 LIMIT 1)
-			`, buy.Asset, buy.Timestamp, buy.Price).Scan(
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.30 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.50 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '5 min' AND price >= $3 * 1.80 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.30 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.50 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '10 min' AND price >= $3 * 1.80 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.30 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.50 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '30 min' AND price >= $3 * 1.80 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.30 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.50 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '2 hours' AND price >= $3 * 1.80 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.30 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.50 AND user_address != $4 LIMIT 1),
+					EXISTS(SELECT 1 FROM global_trades WHERE asset = $1 AND timestamp > $2 AND timestamp <= $2 + INTERVAL '6 hours' AND price >= $3 * 1.80 AND user_address != $4 LIMIT 1)
+			`, buy.Asset, buy.Timestamp, buy.Price, buy.UserAddress).Scan(
 				&flags[0], &flags[1], &flags[2], &flags[3], &flags[4], &flags[5],
 				&flags[6], &flags[7], &flags[8], &flags[9], &flags[10], &flags[11],
 				&flags[12], &flags[13], &flags[14],
