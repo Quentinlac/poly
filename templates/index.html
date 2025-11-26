@@ -1429,10 +1429,11 @@
                 const response = await fetch('/api/import-top-users', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_ids: [address] })
+                    body: JSON.stringify({ addresses: [address] })
                 });
 
-                if (!response.ok) throw new Error('Failed to add user');
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to add user');
 
                 status.style.color = 'var(--green)';
                 status.textContent = 'User added successfully!';
