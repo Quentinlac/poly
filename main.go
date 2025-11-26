@@ -140,6 +140,7 @@ func main() {
 		api.POST("/import-top-users", h.ImportTopUsers)
 		api.GET("/import-status/:id", h.GetImportStatus)
 		api.GET("/privileged", h.GetPrivilegedKnowledgeAPI)
+		api.GET("/analytics", h.GetAnalyticsList)
 	}
 
 	// Privileged knowledge analysis page
