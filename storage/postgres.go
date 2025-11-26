@@ -116,11 +116,19 @@ func (s *PostgresStore) SaveUserSnapshot(ctx context.Context, user models.User) 
 		return err
 	}
 
-	// Invalidate Redis cache
-	s.redis.Del(ctx, fmt.Sprintf("user:%s", user.ID))
-	s.redis.Del(ctx, "rankings:*")
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
 
-	return tx.Commit(ctx)
+	// Invalidate Redis cache for this user
+	s.redis.Del(ctx, fmt.Sprintf("user:%s", user.ID))
+
+	// Invalidate all user list caches (users:* pattern)
+	if keys, err := s.redis.Keys(ctx, "users:*").Result(); err == nil && len(keys) > 0 {
+		s.redis.Del(ctx, keys...)
+	}
+
+	return nil
 }
 
 // ReplaceAllUsers overwrites all leaderboard entries
