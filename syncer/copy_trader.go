@@ -261,7 +261,17 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 	// First, look up the token info from cache to see what outcome this token actually is
 	tokenInfo, err := ct.store.GetTokenInfo(ctx, trade.MarketID)
 	if err == nil && tokenInfo != nil {
-		// Found the token - check if the outcome matches
+		// Found the token - need to get negRisk from CLOB API using conditionID
+		negRisk := false
+		if tokenInfo.ConditionID != "" {
+			market, mErr := ct.clobClient.GetMarket(ctx, tokenInfo.ConditionID)
+			if mErr == nil && market != nil {
+				negRisk = market.NegRisk
+				log.Printf("[CopyTrader] DEBUG getTokenID: Got negRisk=%v from market for conditionID=%s", negRisk, tokenInfo.ConditionID)
+			}
+		}
+
+		// Check if the outcome matches
 		if tokenInfo.Outcome != trade.Outcome {
 			log.Printf("[CopyTrader] DEBUG getTokenID: OUTCOME MISMATCH! Token is %s but trade says %s",
 				tokenInfo.Outcome, trade.Outcome)
@@ -271,16 +281,16 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 			if err == nil && siblingToken != nil {
 				log.Printf("[CopyTrader] DEBUG getTokenID: Found correct token %s for outcome %s",
 					siblingToken.TokenID, trade.Outcome)
-				return siblingToken.TokenID, trade.Outcome, false, nil
+				return siblingToken.TokenID, trade.Outcome, negRisk, nil
 			}
 			// Couldn't find sibling, use the token we have but return its actual outcome
 			log.Printf("[CopyTrader] DEBUG getTokenID: Using original token %s with corrected outcome %s",
 				trade.MarketID, tokenInfo.Outcome)
-			return trade.MarketID, tokenInfo.Outcome, false, nil
+			return trade.MarketID, tokenInfo.Outcome, negRisk, nil
 		}
 		// Outcome matches, use as-is
-		log.Printf("[CopyTrader] DEBUG getTokenID: Token verified - outcome=%s matches", tokenInfo.Outcome)
-		return trade.MarketID, trade.Outcome, false, nil
+		log.Printf("[CopyTrader] DEBUG getTokenID: Token verified - outcome=%s matches, negRisk=%v", tokenInfo.Outcome, negRisk)
+		return trade.MarketID, trade.Outcome, negRisk, nil
 	}
 
 	// Token not in cache - try CLOB API
@@ -293,7 +303,7 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 	}
 
 	// Find matching token by outcome
-	log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket SUCCESS, market has %d tokens", len(market.Tokens))
+	log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket SUCCESS, market has %d tokens, negRisk=%v", len(market.Tokens), market.NegRisk)
 	for _, token := range market.Tokens {
 		log.Printf("[CopyTrader] DEBUG getTokenID: checking token outcome=%s vs trade.Outcome=%s, tokenID=%s",
 			token.Outcome, trade.Outcome, token.TokenID)

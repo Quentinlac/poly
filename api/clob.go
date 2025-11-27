@@ -689,10 +689,16 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 }
 
 func (c *ClobClient) signOrder(order *Order, negRisk bool) (string, error) {
-	// Always use NegRiskCTFExchange on Polygon mainnet
-	// The CTFExchange is for older contracts and gives "invalid signature" errors
-	verifyingContract := "0xC5d563A36AE78145C45a50134d48A1215220f80a" // NegRiskCTFExchange
-	_ = negRisk // Ignore negRisk parameter - always use NegRiskCTFExchange
+	// Choose the correct contract based on market type
+	// - NegRiskCTFExchange: 0xC5d563A36AE78145C45a50134d48A1215220f80a (for neg_risk markets)
+	// - CTFExchange: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E (for regular markets)
+	var verifyingContract string
+	if negRisk {
+		verifyingContract = "0xC5d563A36AE78145C45a50134d48A1215220f80a" // NegRiskCTFExchange
+	} else {
+		verifyingContract = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // CTFExchange
+	}
+	log.Printf("[CLOB] DEBUG signOrder: negRisk=%v, contract=%s", negRisk, verifyingContract)
 
 	chainID := math.NewHexOrDecimal256(c.chainID)
 	domain := apitypes.TypedDataDomain{
