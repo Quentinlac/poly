@@ -1344,9 +1344,24 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 				}
 			}
 
+			// Fetch profile info (name/pseudonym) from REST API
+			var profileName, profilePseudonym string
+			if s.apiClient != nil {
+				profileTrades, err := s.apiClient.GetActivity(ctx, api.TradeQuery{
+					User:  normalized,
+					Limit: 1,
+				})
+				if err == nil && len(profileTrades) > 0 {
+					profileName = profileTrades[0].Name
+					profilePseudonym = profileTrades[0].Pseudonym
+				}
+			}
+
 			// Convert events to TradeDetail
 			for _, event := range events {
 				trade := event.ConvertToDataTradeWithInfo(tokenMap, normalized)
+				trade.Name = profileName
+				trade.Pseudonym = profilePseudonym
 				detail := s.toTradeDetail(trade)
 				allTrades = append(allTrades, detail)
 			}
