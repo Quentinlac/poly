@@ -163,8 +163,14 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 	}
 
 	if len(trades) == 0 {
-		// No new trades, just update last_synced_at
-		user.LastSyncedAt = now
+		// No new trades - but be conservative: only advance by 1 hour max
+		// This prevents skipping trades if subgraph was slow/lagging
+		maxAdvance := sinceTime.Add(1 * time.Hour)
+		if now.Before(maxAdvance) {
+			user.LastSyncedAt = now
+		} else {
+			user.LastSyncedAt = maxAdvance
+		}
 		if err := w.store.SaveUserSnapshot(ctx, user); err != nil {
 			return fmt.Errorf("update sync time: %w", err)
 		}
