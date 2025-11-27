@@ -234,12 +234,31 @@ func (s *PostgresStore) SaveTrades(ctx context.Context, trades []models.TradeDet
 	return nil
 }
 
-// SaveGlobalTrades saves trades to global_trades table
+// SaveGlobalTrades saves trades to global_trades table in smaller batches to avoid timeouts
 func (s *PostgresStore) SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error {
 	if len(trades) == 0 {
 		return nil
 	}
 
+	// Process in batches of 200 to avoid database timeouts
+	const batchSize = 200
+	for start := 0; start < len(trades); start += batchSize {
+		end := start + batchSize
+		if end > len(trades) {
+			end = len(trades)
+		}
+
+		chunk := trades[start:end]
+		if err := s.saveGlobalTradesBatch(ctx, chunk); err != nil {
+			return fmt.Errorf("batch %d-%d: %w", start, end, err)
+		}
+	}
+
+	return nil
+}
+
+// saveGlobalTradesBatch saves a small batch of trades
+func (s *PostgresStore) saveGlobalTradesBatch(ctx context.Context, trades []models.TradeDetail) error {
 	batch := &pgx.Batch{}
 
 	for _, trade := range trades {
@@ -261,7 +280,7 @@ func (s *PostgresStore) SaveGlobalTrades(ctx context.Context, trades []models.Tr
 
 	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("batch exec %d: %w", i, err)
+			return fmt.Errorf("exec %d: %w", i, err)
 		}
 	}
 
