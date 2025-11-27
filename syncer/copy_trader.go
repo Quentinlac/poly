@@ -123,7 +123,7 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		config.MaxPriceSlippage = 0.20 // 20% max slippage above trader's price
 	}
 	if config.CheckIntervalSec == 0 {
-		config.CheckIntervalSec = 2 // 2 seconds
+		config.CheckIntervalSec = 1 // 1 second for faster copy execution
 	}
 
 	// Determine our wallet address for position lookups
@@ -155,6 +155,9 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	}
 	log.Printf("[CopyTrader] API credentials initialized successfully")
 
+	// Start order book caching for faster execution
+	ct.clobClient.StartOrderBookCaching()
+
 	ct.running = true
 	go ct.run(ctx)
 
@@ -168,6 +171,7 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 func (ct *CopyTrader) Stop() {
 	if ct.running {
 		close(ct.stopCh)
+		ct.clobClient.StopOrderBookCaching()
 		ct.running = false
 		log.Printf("[CopyTrader] Stopped")
 	}
@@ -339,6 +343,9 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	log.Printf("[CopyTrader] DEBUG executeBuy: trade.Price=%.4f, maxSlippage=%.0f%%, maxAllowedPrice=%.4f",
 		trade.Price, maxSlippage*100, maxAllowedPrice)
 
+	// Add token to cache for faster order book lookups
+	ct.clobClient.AddTokenToCache(tokenID)
+
 	// Retry loop: check every second for up to 3 minutes for affordable liquidity
 	const maxRetryDuration = 3 * time.Minute
 	const retryInterval = 1 * time.Second
@@ -352,8 +359,14 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	for remainingUSDC >= minUSDC && time.Since(startTime) < maxRetryDuration {
 		attempt++
 
-		// Get fresh order book
-		book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+		// Get order book - use cached for first attempt (speed), fresh for retries (accuracy)
+		var book *api.OrderBook
+		var err error
+		if attempt == 1 {
+			book, err = ct.clobClient.GetCachedOrderBook(ctx, tokenID)
+		} else {
+			book, err = ct.clobClient.GetOrderBook(ctx, tokenID)
+		}
 		if err != nil {
 			log.Printf("[CopyTrader] BUY attempt %d: failed to get order book: %v", attempt, err)
 			time.Sleep(retryInterval)
@@ -536,9 +549,12 @@ func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail,
 		log.Printf("[CopyTrader] SELL: Using local position: %.4f tokens", sellSize)
 	}
 
+	// Add token to cache for faster order book lookups
+	ct.clobClient.AddTokenToCache(tokenID)
+
 	// Calculate USDC value for market sell (sell everything at market)
-	// We need to estimate the USDC we'll get - use order book
-	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+	// We need to estimate the USDC we'll get - use cached order book for speed
+	book, err := ct.clobClient.GetCachedOrderBook(ctx, tokenID)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get order book: %v", err)
 		log.Printf("[CopyTrader] SELL failed: %s", errMsg)

@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -35,6 +36,20 @@ type ClobClient struct {
 	chainID       int64
 	funder        common.Address
 	signatureType int // 0=EOA, 1=Magic/Email, 2=Browser proxy
+
+	// Order book cache for faster copy trading
+	orderBookCache     map[string]*CachedOrderBook
+	orderBookCacheMu   sync.RWMutex
+	cacheRefreshStop   chan struct{}
+	cacheRefreshTokens []string
+	cacheRefreshMu     sync.RWMutex
+}
+
+// CachedOrderBook holds a cached order book with timestamp
+type CachedOrderBook struct {
+	Book      *OrderBook
+	CachedAt  time.Time
+	ExpiresAt time.Time
 }
 
 // APICreds holds API credentials for CLOB
@@ -150,10 +165,12 @@ func NewClobClient(baseURL string, auth *Auth) (*ClobClient, error) {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		auth:          auth,
-		chainID:       137, // Polygon mainnet
-		funder:        auth.GetAddress(),
-		signatureType: 0, // Default to EOA
+		auth:             auth,
+		chainID:          137, // Polygon mainnet
+		funder:           auth.GetAddress(),
+		signatureType:    0, // Default to EOA
+		orderBookCache:   make(map[string]*CachedOrderBook),
+		cacheRefreshStop: make(chan struct{}),
 	}
 
 	return client, nil
@@ -340,6 +357,122 @@ func (c *ClobClient) GetOrderBook(ctx context.Context, tokenID string) (*OrderBo
 	})
 
 	return &book, nil
+}
+
+// GetCachedOrderBook returns an order book from cache if available and fresh,
+// otherwise fetches a new one and caches it
+func (c *ClobClient) GetCachedOrderBook(ctx context.Context, tokenID string) (*OrderBook, error) {
+	// Try to get from cache first
+	c.orderBookCacheMu.RLock()
+	cached, exists := c.orderBookCache[tokenID]
+	c.orderBookCacheMu.RUnlock()
+
+	if exists && time.Now().Before(cached.ExpiresAt) {
+		return cached.Book, nil
+	}
+
+	// Cache miss or expired - fetch fresh
+	book, err := c.GetOrderBook(ctx, tokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache it with 1-second TTL
+	c.orderBookCacheMu.Lock()
+	c.orderBookCache[tokenID] = &CachedOrderBook{
+		Book:      book,
+		CachedAt:  time.Now(),
+		ExpiresAt: time.Now().Add(1 * time.Second),
+	}
+	c.orderBookCacheMu.Unlock()
+
+	return book, nil
+}
+
+// AddTokenToCache adds a token ID to the list of tokens to cache
+func (c *ClobClient) AddTokenToCache(tokenID string) {
+	c.cacheRefreshMu.Lock()
+	defer c.cacheRefreshMu.Unlock()
+
+	// Check if already exists
+	for _, t := range c.cacheRefreshTokens {
+		if t == tokenID {
+			return
+		}
+	}
+	c.cacheRefreshTokens = append(c.cacheRefreshTokens, tokenID)
+	log.Printf("[ClobClient] Added token %s to order book cache (total: %d)", tokenID[:16], len(c.cacheRefreshTokens))
+}
+
+// RemoveTokenFromCache removes a token ID from the cache list
+func (c *ClobClient) RemoveTokenFromCache(tokenID string) {
+	c.cacheRefreshMu.Lock()
+	defer c.cacheRefreshMu.Unlock()
+
+	for i, t := range c.cacheRefreshTokens {
+		if t == tokenID {
+			c.cacheRefreshTokens = append(c.cacheRefreshTokens[:i], c.cacheRefreshTokens[i+1:]...)
+			break
+		}
+	}
+}
+
+// StartOrderBookCaching starts background goroutine to refresh order books
+func (c *ClobClient) StartOrderBookCaching() {
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond) // Refresh every 500ms for freshness
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-c.cacheRefreshStop:
+				return
+			case <-ticker.C:
+				c.refreshOrderBookCache()
+			}
+		}
+	}()
+	log.Printf("[ClobClient] Started order book caching (500ms refresh)")
+}
+
+// StopOrderBookCaching stops the background caching goroutine
+func (c *ClobClient) StopOrderBookCaching() {
+	select {
+	case <-c.cacheRefreshStop:
+		// Already closed
+	default:
+		close(c.cacheRefreshStop)
+	}
+}
+
+// refreshOrderBookCache refreshes all tracked order books
+func (c *ClobClient) refreshOrderBookCache() {
+	c.cacheRefreshMu.RLock()
+	tokens := make([]string, len(c.cacheRefreshTokens))
+	copy(tokens, c.cacheRefreshTokens)
+	c.cacheRefreshMu.RUnlock()
+
+	if len(tokens) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, tokenID := range tokens {
+		book, err := c.GetOrderBook(ctx, tokenID)
+		if err != nil {
+			continue // Skip on error, will retry next tick
+		}
+
+		c.orderBookCacheMu.Lock()
+		c.orderBookCache[tokenID] = &CachedOrderBook{
+			Book:      book,
+			CachedAt:  time.Now(),
+			ExpiresAt: time.Now().Add(1 * time.Second),
+		}
+		c.orderBookCacheMu.Unlock()
+	}
 }
 
 // GetMarket fetches market information

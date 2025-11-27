@@ -134,7 +134,7 @@ func Default() Config {
 			MarketRefreshMins: 60,
 			UserRefreshMins:   30,
 			BatchSizeMarkets:  200,
-			BatchSizeUsers:    100,
+			BatchSizeUsers:    50, // 50 users per 2s tick for faster trade detection
 			RequestDelayMS:    250,
 		},
 		Data: DataConfig{

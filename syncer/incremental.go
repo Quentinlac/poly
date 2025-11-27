@@ -102,10 +102,10 @@ func (w *IncrementalWorker) tick(ctx context.Context) error {
 		return nil
 	}
 
-	// Stagger: Only sync a batch of users per tick (e.g., 20 users)
+	// Stagger: Only sync a batch of users per tick (e.g., 50 users for faster detection)
 	batchSize := w.cfg.Sync.BatchSizeUsers
-	if batchSize <= 0 || batchSize > 50 {
-		batchSize = 20 // Default to 20 users per 5-second tick = 4 users/second
+	if batchSize <= 0 || batchSize > 100 {
+		batchSize = 50 // Default to 50 users per 2-second tick for faster trade detection
 	}
 
 	if batchSize > len(users) {

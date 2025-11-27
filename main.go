@@ -79,7 +79,7 @@ func main() {
 		Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
 		MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
 		MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
-		CheckIntervalSec: 2,
+		CheckIntervalSec: 1,                                             // 1 second for faster copy execution
 	}
 
 	log.Printf("[main] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",
