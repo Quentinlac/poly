@@ -126,11 +126,14 @@ func (m *GlobalTradeMonitor) tickTrades(ctx context.Context) error {
 	// Enrich trades with token metadata (title, outcome, slug)
 	tradeDetails = m.enrichTradesWithTokenInfo(ctx, tradeDetails)
 
-	if err := m.store.SaveGlobalTrades(ctx, tradeDetails); err != nil {
-		log.Printf("[global-monitor] warning: failed to save trades: %v", err)
-	} else {
-		log.Printf("[global-monitor] saved %d trades", len(tradeDetails))
-	}
+	// DISABLED: Global trade saving is disabled due to database performance issues
+	// The copy trader uses user_trades table which is unaffected
+	// if err := m.store.SaveGlobalTrades(ctx, tradeDetails); err != nil {
+	// 	log.Printf("[global-monitor] warning: failed to save trades: %v", err)
+	// } else {
+	// 	log.Printf("[global-monitor] saved %d trades", len(tradeDetails))
+	// }
+	log.Printf("[global-monitor] processed %d trades (saving disabled)", len(tradeDetails))
 
 	// Update timestamp to latest trade
 	for _, t := range trades {
@@ -163,11 +166,13 @@ func (m *GlobalTradeMonitor) tickRedemptions(ctx context.Context) error {
 	// Enrich redemptions with market metadata (title, slug) from conditionId
 	redemptionDetails = m.enrichRedemptionsWithMarketInfo(ctx, redemptionDetails)
 
-	if err := m.store.SaveGlobalTrades(ctx, redemptionDetails); err != nil {
-		log.Printf("[global-monitor] warning: failed to save redemptions: %v", err)
-	} else {
-		log.Printf("[global-monitor] saved %d redemptions from The Graph", len(redemptionDetails))
-	}
+	// DISABLED: Redemption saving is disabled due to database performance issues
+	// if err := m.store.SaveGlobalTrades(ctx, redemptionDetails); err != nil {
+	// 	log.Printf("[global-monitor] warning: failed to save redemptions: %v", err)
+	// } else {
+	// 	log.Printf("[global-monitor] saved %d redemptions from The Graph", len(redemptionDetails))
+	// }
+	log.Printf("[global-monitor] processed %d redemptions (saving disabled)", len(redemptionDetails))
 
 	// Update timestamp to latest redemption
 	for _, r := range redemptions {
