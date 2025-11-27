@@ -48,6 +48,11 @@ func NewPostgres() (*PostgresStore, error) {
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.HealthCheckPeriod = 30 * time.Second
 
+	// Add query timeout to prevent slow queries from hanging
+	config.ConnConfig.RuntimeParams["statement_timeout"] = "30000"      // 30 seconds max per query
+	config.ConnConfig.RuntimeParams["lock_timeout"] = "10000"           // 10 seconds max for locks
+	config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "60000" // 60 seconds
+
 	// Create pool
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
