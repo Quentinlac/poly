@@ -240,8 +240,8 @@ func (s *PostgresStore) SaveGlobalTrades(ctx context.Context, trades []models.Tr
 		return nil
 	}
 
-	// Process in batches of 200 to avoid database timeouts
-	const batchSize = 200
+	// Process in batches of 100 to avoid database timeouts
+	const batchSize = 100
 	for start := 0; start < len(trades); start += batchSize {
 		end := start + batchSize
 		if end > len(trades) {
