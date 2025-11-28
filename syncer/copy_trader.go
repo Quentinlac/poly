@@ -366,6 +366,7 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	// Get per-user settings or use defaults
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
+	var maxUSD *float64
 
 	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
 	if err == nil && userSettings != nil {
@@ -375,8 +376,9 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 		}
 		multiplier = userSettings.Multiplier
 		minUSDC = userSettings.MinUSDC
-		log.Printf("[CopyTrader] Using custom settings for %s: multiplier=%.4f, minUSDC=$%.2f",
-			trade.UserID, multiplier, minUSDC)
+		maxUSD = userSettings.MaxUSD
+		log.Printf("[CopyTrader] Using custom settings for %s: multiplier=%.4f, minUSDC=$%.2f, maxUSD=%v",
+			trade.UserID, multiplier, minUSDC, maxUSD)
 	}
 
 	// Calculate amount to buy
@@ -386,6 +388,12 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	if intendedUSDC < minUSDC {
 		intendedUSDC = minUSDC
 		log.Printf("[CopyTrader] BUY amount below minimum, using $%.2f", intendedUSDC)
+	}
+
+	// Apply max cap if set
+	if maxUSD != nil && intendedUSDC > *maxUSD {
+		log.Printf("[CopyTrader] BUY amount $%.2f exceeds max cap $%.2f, capping", intendedUSDC, *maxUSD)
+		intendedUSDC = *maxUSD
 	}
 
 	// Calculate max allowed price based on tiered slippage
@@ -673,9 +681,11 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	// Get settings
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
+	var maxUSD *float64
 	if userSettings != nil {
 		multiplier = userSettings.Multiplier
 		minUSDC = userSettings.MinUSDC
+		maxUSD = userSettings.MaxUSD
 	}
 
 	// Calculate target amount based on copied trade's USDC value
@@ -683,6 +693,12 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	if targetUSDC < minUSDC {
 		targetUSDC = minUSDC
 		log.Printf("[CopyTrader-Bot] BUY amount below minimum, using $%.2f", targetUSDC)
+	}
+
+	// Apply max cap if set
+	if maxUSD != nil && targetUSDC > *maxUSD {
+		log.Printf("[CopyTrader-Bot] BUY amount $%.2f exceeds max cap $%.2f, capping", targetUSDC, *maxUSD)
+		targetUSDC = *maxUSD
 	}
 
 	// Copied user's price is our target price
