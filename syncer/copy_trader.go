@@ -700,14 +700,14 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	if err != nil {
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
 			log.Printf("[CopyTrader-Bot] BUY: market closed/resolved, skipping")
-			return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "market closed/resolved", "")
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "market closed/resolved", "", storage.StrategyBot)
 		}
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "", storage.StrategyBot)
 	}
 
 	if len(book.Asks) == 0 {
 		log.Printf("[CopyTrader-Bot] BUY: no asks in order book")
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "no asks in order book", "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "no asks in order book", "", storage.StrategyBot)
 	}
 
 	// Find all asks within our price range, sorted by price (cheapest first)
@@ -738,8 +738,8 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		fmt.Sscanf(book.Asks[0].Price, "%f", &bestAsk)
 		log.Printf("[CopyTrader-Bot] BUY: no asks within 10%% of copied price (best ask %.4f > max %.4f)",
 			bestAsk, maxPrice)
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped",
-			fmt.Sprintf("no liquidity within 10%% (best=%.4f, max=%.4f)", bestAsk, maxPrice), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped",
+			fmt.Sprintf("no liquidity within 10%% (best=%.4f, max=%.4f)", bestAsk, maxPrice), "", storage.StrategyBot)
 	}
 
 	// Calculate how much we can buy from affordable asks
@@ -770,7 +770,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	if totalSize < 0.01 || totalCost < minUSDC {
 		log.Printf("[CopyTrader-Bot] BUY: insufficient affordable liquidity (size=%.4f, cost=$%.4f)",
 			totalSize, totalCost)
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "insufficient affordable liquidity", "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "insufficient affordable liquidity", "", storage.StrategyBot)
 	}
 
 	avgPrice := totalCost / totalSize
@@ -781,12 +781,12 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideBuy, totalCost, negRisk)
 	if err != nil {
 		log.Printf("[CopyTrader-Bot] BUY failed: %v", err)
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot)
 	}
 
 	if !resp.Success {
 		log.Printf("[CopyTrader-Bot] BUY rejected: %s", resp.ErrorMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "", storage.StrategyBot)
 	}
 
 	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
@@ -805,7 +805,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		log.Printf("[CopyTrader-Bot] Warning: failed to update position: %v", err)
 	}
 
-	return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID, storage.StrategyBot)
 }
 
 // executeBotSell implements the bot following strategy for sells.
@@ -870,14 +870,14 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	if err != nil {
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
 			log.Printf("[CopyTrader-Bot] SELL: market closed/resolved, skipping")
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "")
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "", storage.StrategyBot)
 		}
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "", storage.StrategyBot)
 	}
 
 	if len(book.Bids) == 0 {
 		log.Printf("[CopyTrader-Bot] SELL: no bids in order book")
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "no bids in order book", "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "no bids in order book", "", storage.StrategyBot)
 	}
 
 	// Find all bids within our price range, sorted by price (highest first)
@@ -935,12 +935,12 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 		resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, totalUSDC, negRisk)
 		if err != nil {
 			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "")
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot)
 		}
 
 		if !resp.Success {
 			log.Printf("[CopyTrader-Bot] SELL rejected: %s", resp.ErrorMsg)
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "")
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "", storage.StrategyBot)
 		}
 
 		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
@@ -951,7 +951,7 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 			ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
 		}
 
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, totalUSDC, avgPrice, totalSold, "executed", "", resp.OrderID)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalUSDC, avgPrice, totalSold, "executed", "", resp.OrderID, storage.StrategyBot)
 	}
 
 	// No acceptable bids found within 10% - need to create limit orders
@@ -996,15 +996,20 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	if totalFilled > 0 {
 		avgPrice := totalValue / totalFilled
 		ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","))
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","), storage.StrategyBot)
 	}
 
 	// Failed to sell
 	log.Printf("[CopyTrader-Bot] SELL: failed to fill any orders")
-	return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "")
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "", storage.StrategyBot)
 }
 
 func (ct *CopyTrader) logCopyTrade(ctx context.Context, trade models.TradeDetail, tokenID string, intended, actual, price, size float64, status, errReason, orderID string) error {
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, intended, actual, price, size, status, errReason, orderID, storage.StrategyHuman)
+}
+
+func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models.TradeDetail, tokenID string, intended, actual, price, size float64, status, errReason, orderID string, strategyType int) error {
+	// Save to old copy_trades table for backwards compatibility
 	copyTrade := CopyTrade{
 		OriginalTradeID: trade.ID,
 		OriginalTrader:  trade.UserID,
@@ -1022,7 +1027,54 @@ func (ct *CopyTrader) logCopyTrade(ctx context.Context, trade models.TradeDetail
 		OrderID:         orderID,
 	}
 
-	return ct.store.SaveCopyTrade(ctx, copyTrade)
+	if err := ct.store.SaveCopyTrade(ctx, copyTrade); err != nil {
+		log.Printf("[CopyTrader] Warning: failed to save copy trade: %v", err)
+	}
+
+	// Save to new detailed log table
+	// Shares: negative for buy, positive for sell
+	followingShares := trade.Size
+	if trade.Side == "BUY" {
+		followingShares = -followingShares
+	}
+
+	var followerTime *time.Time
+	var followerShares, followerPrice *float64
+
+	if status == "executed" || status == "success" {
+		now := time.Now()
+		followerTime = &now
+
+		shares := size
+		if trade.Side == "BUY" {
+			shares = -shares
+		}
+		followerShares = &shares
+		followerPrice = &price
+	}
+
+	logEntry := storage.CopyTradeLogEntry{
+		FollowingAddress: trade.UserID,
+		FollowingTradeID: trade.ID,
+		FollowingTime:    trade.Timestamp,
+		FollowingShares:  followingShares,
+		FollowingPrice:   trade.Price,
+		FollowerTime:     followerTime,
+		FollowerShares:   followerShares,
+		FollowerPrice:    followerPrice,
+		MarketTitle:      trade.Title,
+		Outcome:          trade.Outcome,
+		TokenID:          tokenID,
+		Status:           status,
+		FailedReason:     errReason,
+		StrategyType:     strategyType,
+	}
+
+	if err := ct.store.SaveCopyTradeLog(ctx, logEntry); err != nil {
+		log.Printf("[CopyTrader] Warning: failed to save copy trade log: %v", err)
+	}
+
+	return nil
 }
 
 // GetStats returns copy trading statistics

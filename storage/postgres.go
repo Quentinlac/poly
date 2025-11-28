@@ -1976,3 +1976,93 @@ func (s *PostgresStore) ComputeAndSavePrivilegedAnalysis(ctx context.Context, ti
 	log.Printf("[Privileged] Computed %dmin/+%d%%: %d users in %.1fs", timeWindowMinutes, priceThresholdPct, len(results), duration)
 	return nil
 }
+
+// ============================================================================
+// COPY TRADE LOGGING
+// ============================================================================
+
+// CopyTradeLogEntry represents a detailed log of a copy trade attempt
+type CopyTradeLogEntry struct {
+	// Following user info
+	FollowingAddress string
+	FollowingTradeID string
+	FollowingTime    time.Time
+	FollowingShares  float64 // negative = buy, positive = sell
+	FollowingPrice   float64
+	// Follower (us) info
+	FollowerTime   *time.Time
+	FollowerShares *float64 // negative = buy, positive = sell
+	FollowerPrice  *float64
+	// Trade info
+	MarketTitle  string
+	Outcome      string
+	TokenID      string
+	// Status
+	Status       string // 'success', 'failed', 'skipped'
+	FailedReason string
+	StrategyType int
+}
+
+// SaveCopyTradeLog saves a detailed copy trade log entry
+func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLogEntry) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO copy_trade_log (
+			following_address, following_trade_id, following_time, following_shares, following_price,
+			follower_time, follower_shares, follower_price,
+			market_title, outcome, token_id,
+			status, failed_reason, strategy_type
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	`,
+		entry.FollowingAddress, entry.FollowingTradeID, entry.FollowingTime, entry.FollowingShares, entry.FollowingPrice,
+		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice,
+		entry.MarketTitle, entry.Outcome, entry.TokenID,
+		entry.Status, entry.FailedReason, entry.StrategyType,
+	)
+	return err
+}
+
+// GetCopyTradeLogs retrieves recent copy trade logs
+func (s *PostgresStore) GetCopyTradeLogs(ctx context.Context, limit int) ([]CopyTradeLogEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT following_address, following_trade_id, following_time, following_shares, following_price,
+			   follower_time, follower_shares, follower_price,
+			   market_title, outcome, token_id,
+			   status, failed_reason, strategy_type
+		FROM copy_trade_log
+		ORDER BY following_time DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []CopyTradeLogEntry
+	for rows.Next() {
+		var entry CopyTradeLogEntry
+		var followerTime *time.Time
+		var followerShares, followerPrice *float64
+
+		err := rows.Scan(
+			&entry.FollowingAddress, &entry.FollowingTradeID, &entry.FollowingTime, &entry.FollowingShares, &entry.FollowingPrice,
+			&followerTime, &followerShares, &followerPrice,
+			&entry.MarketTitle, &entry.Outcome, &entry.TokenID,
+			&entry.Status, &entry.FailedReason, &entry.StrategyType,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		entry.FollowerTime = followerTime
+		entry.FollowerShares = followerShares
+		entry.FollowerPrice = followerPrice
+
+		logs = append(logs, entry)
+	}
+
+	return logs, rows.Err()
+}
