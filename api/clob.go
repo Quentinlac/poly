@@ -501,6 +501,93 @@ func (c *ClobClient) GetMarket(ctx context.Context, conditionID string) (*Market
 	return &market, nil
 }
 
+// GammaTokenInfo holds the parsed token info from Gamma API
+type GammaTokenInfo struct {
+	TokenID     string
+	ConditionID string
+	Outcome     string
+	Title       string
+	Slug        string
+	NegRisk     bool
+}
+
+// GetTokenInfoByID fetches token information from Gamma API by token ID
+// This is used as a fallback when the token is not in our local cache
+func (c *ClobClient) GetTokenInfoByID(ctx context.Context, tokenID string) (*GammaTokenInfo, error) {
+	url := "https://gamma-api.polymarket.com/markets?clob_token_ids=" + tokenID
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gamma API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var markets []GammaMarket
+	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	if len(markets) == 0 {
+		return nil, fmt.Errorf("no market found for token %s", tokenID)
+	}
+
+	market := markets[0]
+
+	// Parse outcomes from JSON string (e.g., "[\"Yes\",\"No\"]")
+	var outcomes []string
+	if err := json.Unmarshal([]byte(market.Outcomes), &outcomes); err != nil {
+		outcomes = []string{"Yes", "No"} // Default to binary market
+	}
+
+	// Parse token IDs from JSON array string or comma-separated
+	var marketTokens []string
+	if err := json.Unmarshal([]byte(market.ClobTokenIds), &marketTokens); err != nil {
+		// Fallback to comma-separated
+		marketTokens = strings.Split(market.ClobTokenIds, ",")
+	}
+
+	// Find the outcome for this token
+	outcome := ""
+	for idx, mtid := range marketTokens {
+		mtid = strings.TrimSpace(mtid)
+		if mtid == tokenID && idx < len(outcomes) {
+			outcome = outcomes[idx]
+			break
+		}
+	}
+
+	// Check if neg_risk by looking up the CLOB market API
+	negRisk := false
+	if market.ConditionID != "" {
+		marketInfo, err := c.GetMarket(ctx, market.ConditionID)
+		if err == nil && marketInfo != nil {
+			negRisk = marketInfo.NegRisk
+		}
+	}
+
+	log.Printf("[CLOB] GetTokenInfoByID: tokenID=%s, conditionID=%s, outcome=%s, title=%s, negRisk=%v",
+		tokenID, market.ConditionID, outcome, market.Question, negRisk)
+
+	return &GammaTokenInfo{
+		TokenID:     tokenID,
+		ConditionID: market.ConditionID,
+		Outcome:     outcome,
+		Title:       market.Question,
+		Slug:        market.Slug,
+		NegRisk:     negRisk,
+	}, nil
+}
+
 // PlaceMarketOrder places a market order (FOK - Fill-Or-Kill)
 func (c *ClobClient) PlaceMarketOrder(ctx context.Context, tokenID string, side Side, amountUSDC float64, negRisk bool) (*OrderResponse, error) {
 	if c.apiCreds == nil {

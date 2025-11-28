@@ -977,6 +977,21 @@ func (s *PostgresStore) GetTokenByConditionAndOutcome(ctx context.Context, condi
 	return &info, nil
 }
 
+// SaveTokenInfo saves a single token's information to the cache
+func (s *PostgresStore) SaveTokenInfo(ctx context.Context, tokenID, conditionID, outcome, title, slug string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO token_map_cache (token_id, condition_id, outcome, title, slug, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (token_id) DO UPDATE SET
+			condition_id = EXCLUDED.condition_id,
+			outcome = EXCLUDED.outcome,
+			title = EXCLUDED.title,
+			slug = EXCLUDED.slug,
+			updated_at = EXCLUDED.updated_at
+	`, tokenID, conditionID, outcome, title, slug)
+	return err
+}
+
 // ReplaceTrades overwrites all trades (used for full refresh)
 func (s *PostgresStore) ReplaceTrades(ctx context.Context, trades map[string][]models.TradeDetail) error {
 	tx, err := s.pool.Begin(ctx)

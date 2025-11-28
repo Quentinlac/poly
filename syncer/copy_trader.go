@@ -293,17 +293,42 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 		return trade.MarketID, trade.Outcome, negRisk, nil
 	}
 
-	// Token not in cache - try CLOB API
+	// Token not in cache - try Gamma API to fetch by token ID
+	// (trade.MarketID is typically a token ID from the subgraph, not a condition ID)
+	log.Printf("[CopyTrader] DEBUG getTokenID: Token not in cache, fetching from Gamma API...")
+	gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, trade.MarketID)
+	if err == nil && gammaInfo != nil {
+		log.Printf("[CopyTrader] DEBUG getTokenID: Gamma API success - conditionID=%s, outcome=%s, negRisk=%v",
+			gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.NegRisk)
+
+		// Cache it for next time
+		ct.store.SaveTokenInfo(ctx, trade.MarketID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
+
+		// Check if outcome matches
+		if gammaInfo.Outcome != trade.Outcome && gammaInfo.Outcome != "" {
+			log.Printf("[CopyTrader] DEBUG getTokenID: Gamma outcome %s differs from trade outcome %s", gammaInfo.Outcome, trade.Outcome)
+			// Try to find the sibling token with the correct outcome
+			siblingToken, err := ct.store.GetTokenByConditionAndOutcome(ctx, gammaInfo.ConditionID, trade.Outcome)
+			if err == nil && siblingToken != nil {
+				log.Printf("[CopyTrader] DEBUG getTokenID: Found sibling token %s for outcome %s", siblingToken.TokenID, trade.Outcome)
+				return siblingToken.TokenID, trade.Outcome, gammaInfo.NegRisk, nil
+			}
+		}
+
+		return trade.MarketID, gammaInfo.Outcome, gammaInfo.NegRisk, nil
+	}
+
+	// Gamma API also failed - try CLOB API as last resort (unlikely to work)
+	log.Printf("[CopyTrader] DEBUG getTokenID: Gamma API failed (%v), trying CLOB API...", err)
 	market, err := ct.clobClient.GetMarket(ctx, trade.MarketID)
 	if err != nil {
-		// GetMarket failed (trade.MarketID is likely a token ID, not condition ID)
-		log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket failed (%v), using trade.MarketID directly", err)
-		// We don't know the actual outcome, so return empty to use trade.Outcome
-		return trade.MarketID, "", false, nil
+		// Both APIs failed - use trade.MarketID directly with unknown outcome
+		log.Printf("[CopyTrader] DEBUG getTokenID: CLOB API also failed (%v), using trade.MarketID directly", err)
+		return trade.MarketID, trade.Outcome, false, nil
 	}
 
 	// Find matching token by outcome
-	log.Printf("[CopyTrader] DEBUG getTokenID: GetMarket SUCCESS, market has %d tokens, negRisk=%v", len(market.Tokens), market.NegRisk)
+	log.Printf("[CopyTrader] DEBUG getTokenID: CLOB API SUCCESS, market has %d tokens, negRisk=%v", len(market.Tokens), market.NegRisk)
 	for _, token := range market.Tokens {
 		log.Printf("[CopyTrader] DEBUG getTokenID: checking token outcome=%s vs trade.Outcome=%s, tokenID=%s",
 			token.Outcome, trade.Outcome, token.TokenID)
@@ -316,7 +341,7 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 
 	// Fallback: use MarketID as token ID
 	log.Printf("[CopyTrader] DEBUG getTokenID: NO MATCH in tokens, falling back to trade.MarketID")
-	return trade.MarketID, "", false, nil
+	return trade.MarketID, trade.Outcome, false, nil
 }
 
 func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
