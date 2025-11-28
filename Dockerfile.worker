@@ -1,3 +1,7 @@
+# DEPRECATED: Use analytics-worker/Dockerfile instead
+# This file is kept for backwards compatibility but may not work correctly
+# The analytics-worker has its own go.mod and should be built from its directory
+#
 # Build stage
 FROM golang:1.23-alpine AS builder
 
@@ -6,15 +10,15 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Copy go mod files
-COPY go.mod go.sum ./
+# Copy go mod files from analytics-worker module
+COPY analytics-worker/go.mod analytics-worker/go.sum ./
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy all source code from analytics-worker
+COPY analytics-worker/ .
 
 # Build the analytics worker binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./analytics-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker .
 
 # Runtime stage
 FROM alpine:3.19
