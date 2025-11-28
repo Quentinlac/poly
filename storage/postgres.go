@@ -1704,22 +1704,34 @@ type CopyTradeLogEntry struct {
 	Status       string // 'success', 'failed', 'skipped'
 	FailedReason string
 	StrategyType int
+	// Debug log - JSON with order book, calculations, API calls
+	DebugLog map[string]interface{}
 }
 
 // SaveCopyTradeLog saves a detailed copy trade log entry
 func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLogEntry) error {
-	_, err := s.pool.Exec(ctx, `
+	// Convert debug log to JSON
+	var debugLogJSON []byte
+	var err error
+	if entry.DebugLog != nil {
+		debugLogJSON, err = json.Marshal(entry.DebugLog)
+		if err != nil {
+			debugLogJSON = []byte("{}")
+		}
+	}
+
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO copy_trade_log (
 			following_address, following_trade_id, following_time, following_shares, following_price,
 			follower_time, follower_shares, follower_price,
 			market_title, outcome, token_id,
-			status, failed_reason, strategy_type
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			status, failed_reason, strategy_type, debug_log
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`,
 		entry.FollowingAddress, entry.FollowingTradeID, entry.FollowingTime, entry.FollowingShares, entry.FollowingPrice,
 		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice,
 		entry.MarketTitle, entry.Outcome, entry.TokenID,
-		entry.Status, entry.FailedReason, entry.StrategyType,
+		entry.Status, entry.FailedReason, entry.StrategyType, debugLogJSON,
 	)
 	return err
 }
