@@ -48,12 +48,12 @@ services:
       start_period: 10s
       retries: 3
 
-  # Analytics worker - computes user metrics (NO copy trading here!)
-  analytics-worker:
+  # Sync worker - incremental sync for tracked users (copy trading disabled)
+  sync-worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    container_name: polymarket-analytics-worker
+    container_name: polymarket-sync-worker
     environment:
       # Database connection (same credentials)
       - DATABASE_URL=postgres://${POSTGRES_USER:-polymarket}:${POSTGRES_PASSWORD:-polymarket123}@postgres:5432/${POSTGRES_DB:-polymarket}?sslmode=disable
@@ -72,8 +72,6 @@ services:
       - POLYMARKET_DATA_API_URL=${POLYMARKET_DATA_API_URL:-https://data-api.polymarket.com}
       # IMPORTANT: Disable copy trader in worker to avoid duplicate orders!
       - COPY_TRADER_ENABLED=false
-      # Analytics interval (default 5 minutes)
-      - ANALYTICS_INTERVAL=${ANALYTICS_INTERVAL:-5m}
     depends_on:
       postgres:
         condition: service_healthy
