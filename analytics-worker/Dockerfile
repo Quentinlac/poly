@@ -1,5 +1,5 @@
 # Build stage
-# NOTE: Qovery uses repo root as build context, so paths are relative to repo root
+# Build context is analytics-worker/ directory
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
@@ -11,11 +11,19 @@ RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy all source code (mirrored from parent)
+COPY api/ ./api/
+COPY config/ ./config/
+COPY models/ ./models/
+COPY service/ ./service/
+COPY storage/ ./storage/
+COPY syncer/ ./syncer/
+COPY analyzer/ ./analyzer/
+COPY utils/ ./utils/
+COPY main.go ./analytics-worker/
 
 # Build the analytics worker binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./analytics-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o worker ./analytics-worker
 
 # Runtime stage
 FROM alpine:3.19
@@ -29,10 +37,10 @@ RUN apk add --no-cache ca-certificates tzdata
 RUN adduser -D -g '' appuser
 
 # Copy binary from builder
-COPY --from=builder /app/analytics-worker .
+COPY --from=builder /app/worker .
 
-# Copy config
-COPY --from=builder /app/config ./config
+# Copy config files
+COPY config/ ./config/
 
 # Create data directory
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
@@ -40,5 +48,5 @@ RUN mkdir -p /app/data && chown -R appuser:appuser /app
 # Switch to non-root user
 USER appuser
 
-# Run the analytics worker
-CMD ["./analytics-worker"]
+# Run the worker
+CMD ["./worker"]

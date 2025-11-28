@@ -1,0 +1,49 @@
+server:
+  port: 8081
+  read_timeout_ms: 10000
+  write_timeout_ms: 10000
+  shutdown_timeout_ms: 5000
+
+scoring:
+  min_trades: 100
+  min_win_rate: 0.55
+  trade_weight: 0.25
+  pnl_weight: 0.30
+  win_rate_weight: 0.25
+  consistency_weight: 0.20
+  pnl_scale: 1000
+  max_rank_results: 10000
+
+risk:
+  max_position_pct: 0.10
+  loss_cap_monthly: 300
+  warning_recent_loss_pct: 0.25
+
+cache:
+  ranking_ttl_minutes: 10
+  profile_ttl_minutes: 5
+
+sync:
+  market_refresh_minutes: 60
+  user_refresh_minutes: 30
+  batch_size_markets: 200
+  batch_size_users: 100
+  request_delay_ms: 250
+
+data:
+  db_path: data/polymarket.db
+
+ingestion:
+  subjects:
+    - politics
+    - sports
+    - finance
+    - geopolitics
+    - tech
+    - culture
+    - economy
+  max_markets_per_subject: 8
+  max_trades_per_market: 100
+  trade_request_limit: 25
+  max_users: 300
+  max_closed_positions_per_user: 25
