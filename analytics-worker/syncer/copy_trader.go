@@ -1,9 +1,13 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -30,6 +34,10 @@ type CopyTrader struct {
 	// Metrics for latency tracking
 	metrics   *CopyTraderMetrics
 	metricsMu sync.RWMutex
+
+	// HTTP client for calling main app (critical path execution)
+	mainAppURL string
+	httpClient *http.Client
 }
 
 // CopyTraderMetrics tracks performance metrics
@@ -154,6 +162,13 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		myAddress = auth.GetAddress().Hex()
 	}
 
+	// Get main app URL for trade execution (critical path)
+	mainAppURL := strings.TrimSpace(os.Getenv("MAIN_APP_URL"))
+	if mainAppURL == "" {
+		mainAppURL = "http://localhost:8081" // Default for local dev
+	}
+	mainAppURL = strings.TrimRight(mainAppURL, "/")
+
 	ct := &CopyTrader{
 		store:      store,
 		client:     client,
@@ -162,9 +177,89 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		stopCh:     make(chan struct{}),
 		myAddress:  myAddress,
 		metrics:    &CopyTraderMetrics{},
+		mainAppURL: mainAppURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 
+	log.Printf("[CopyTrader] Will send trade execution to main app at: %s", mainAppURL)
+
 	return ct, nil
+}
+
+// CopyTradeRequest is sent to main app for trade execution
+type CopyTradeRequest struct {
+	FollowingAddress string  `json:"following_address"`
+	FollowingTradeID string  `json:"following_trade_id"`
+	FollowingTime    int64   `json:"following_time"`
+	TokenID          string  `json:"token_id"`
+	Side             string  `json:"side"`
+	FollowingPrice   float64 `json:"following_price"`
+	FollowingShares  float64 `json:"following_shares"`
+	MarketTitle      string  `json:"market_title"`
+	Outcome          string  `json:"outcome"`
+	Multiplier       float64 `json:"multiplier"`
+	MinOrderUSDC     float64 `json:"min_order_usdc"`
+}
+
+// CopyTradeResponse is received from main app after trade execution
+type CopyTradeResponse struct {
+	Success        bool    `json:"success"`
+	Status         string  `json:"status"`
+	FailedReason   string  `json:"failed_reason,omitempty"`
+	OrderID        string  `json:"order_id,omitempty"`
+	FollowerPrice  float64 `json:"follower_price,omitempty"`
+	FollowerShares float64 `json:"follower_shares,omitempty"`
+	ExecutionMs    int64   `json:"execution_ms"`
+	DebugLog       string  `json:"debug_log,omitempty"`
+}
+
+// executeViaMainApp sends trade to main app for execution (critical path)
+func (ct *CopyTrader) executeViaMainApp(ctx context.Context, trade models.TradeDetail, tokenID string, side string) (*CopyTradeResponse, error) {
+	req := CopyTradeRequest{
+		FollowingAddress: trade.UserID,
+		FollowingTradeID: trade.ID,
+		FollowingTime:    trade.Timestamp.Unix(),
+		TokenID:          tokenID,
+		Side:             side,
+		FollowingPrice:   trade.Price,
+		FollowingShares:  trade.Size,
+		MarketTitle:      trade.Title,
+		Outcome:          trade.Outcome,
+		Multiplier:       ct.config.Multiplier,
+		MinOrderUSDC:     ct.config.MinOrderUSDC,
+	}
+
+	jsonBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := ct.mainAppURL + "/api/internal/execute-copy-trade"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := ct.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result CopyTradeResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	return &result, nil
 }
 
 // Start begins monitoring for trades to copy
@@ -1296,7 +1391,7 @@ func (ct *CopyTrader) logCopyTrade(ctx context.Context, trade models.TradeDetail
 }
 
 func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models.TradeDetail, tokenID string, intended, actual, price, size float64, status, errReason, orderID string, strategyType int, debugLog, timingBreakdown map[string]interface{}, timestamps *CopyTradeTimestamps) error {
-	// Save to old copy_trades table for backwards compatibility
+	// Make a copy of data for async DB writes
 	copyTrade := CopyTrade{
 		OriginalTradeID: trade.ID,
 		OriginalTrader:  trade.UserID,
@@ -1314,9 +1409,13 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		OrderID:         orderID,
 	}
 
-	if err := ct.store.SaveCopyTrade(ctx, copyTrade); err != nil {
-		log.Printf("[CopyTrader] Warning: failed to save copy trade: %v", err)
-	}
+	// Async DB write - don't block the critical path
+	go func() {
+		bgCtx := context.Background()
+		if err := ct.store.SaveCopyTrade(bgCtx, copyTrade); err != nil {
+			log.Printf("[CopyTrader] Warning: async save copy trade failed: %v", err)
+		}
+	}()
 
 	// Save to new detailed log table
 	// Shares: negative for buy, positive for sell
@@ -1370,9 +1469,13 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		logEntry.DetectedAt = &trade.DetectedAt
 	}
 
-	if err := ct.store.SaveCopyTradeLog(ctx, logEntry); err != nil {
-		log.Printf("[CopyTrader] Warning: failed to save copy trade log: %v", err)
-	}
+	// Async DB write - don't block the critical path
+	go func() {
+		bgCtx := context.Background()
+		if err := ct.store.SaveCopyTradeLog(bgCtx, logEntry); err != nil {
+			log.Printf("[CopyTrader] Warning: async save copy trade log failed: %v", err)
+		}
+	}()
 
 	return nil
 }

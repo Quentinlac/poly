@@ -46,18 +46,18 @@ func main() {
 	apiClient := api.NewClient(baseURL)
 	svc := service.NewService(store, cfg, apiClient)
 
-	// Start incremental worker for tracked users (2-second polling)
-	incrementalWorker := syncer.NewIncrementalWorker(apiClient, store, cfg, svc)
-	incrementalWorker.Start()
-	defer incrementalWorker.Stop()
+	// Incremental sync is handled by analytics-worker only
+	// Main app focuses on: API serving + trade execution (critical path)
+	log.Println("[main] Incremental sync disabled (handled by analytics-worker)")
 
-	log.Println("[main] Incremental worker started (2-second polling for tracked users)")
-
-	// Copy trader is DISABLED in the main API app
-	// All copy trading runs in the worker (analytics-worker) which has:
-	// - EnableBlockchainWS: true for ~1s detection via Polygon WebSocket
-	// - No impact on API latency
-	log.Println("[main] Copy trader is DISABLED in API app (runs in analytics-worker only)")
+	// Initialize trade executor for copy trading (critical path)
+	tradeExecutor, err := syncer.NewTradeExecutor(store, apiClient)
+	if err != nil {
+		log.Printf("[main] Warning: Trade executor not available: %v", err)
+		log.Println("[main] Copy trade execution will be disabled")
+	} else {
+		log.Println("[main] Trade executor initialized (critical path for copy trading)")
+	}
 
 	// Set up router
 	r := gin.Default()
@@ -93,14 +93,26 @@ func main() {
 	r.GET("/api/subjects", h.GetSubjects)
 
 	// API routes
-	api := r.Group("/api")
+	apiGroup := r.Group("/api")
 	{
-		api.GET("/top-users", h.GetTopUsers)
-		api.GET("/users/imported", h.GetAllImportedUsers)
-		api.POST("/import-top-users", h.ImportTopUsers)
-		api.GET("/import-status/:id", h.GetImportStatus)
-		api.GET("/analytics", h.GetAnalyticsList)
-		api.GET("/copy-trade-metrics", h.GetCopyTradeMetrics) // Real-time copy trading performance metrics
+		apiGroup.GET("/top-users", h.GetTopUsers)
+		apiGroup.GET("/users/imported", h.GetAllImportedUsers)
+		apiGroup.POST("/import-top-users", h.ImportTopUsers)
+		apiGroup.GET("/import-status/:id", h.GetImportStatus)
+		apiGroup.GET("/analytics", h.GetAnalyticsList)
+		apiGroup.GET("/copy-trade-metrics", h.GetCopyTradeMetrics)
+	}
+
+	// Internal API for worker communication (critical path - trade execution)
+	internalAPI := r.Group("/api/internal")
+	{
+		internalAPI.POST("/execute-copy-trade", func(c *gin.Context) {
+			if tradeExecutor == nil {
+				c.JSON(500, gin.H{"error": "trade executor not available"})
+				return
+			}
+			tradeExecutor.HandleExecuteRequest(c)
+		})
 	}
 
 	// User-specific routes with ID validation
