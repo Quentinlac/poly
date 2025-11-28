@@ -378,6 +378,11 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 			book, err = ct.clobClient.GetOrderBook(ctx, tokenID)
 		}
 		if err != nil {
+			// If market doesn't exist (404), skip immediately - it's likely closed/resolved
+			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
+				log.Printf("[CopyTrader] BUY: market closed/resolved, skipping: %v", err)
+				return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "skipped", "market closed/resolved", "")
+			}
 			log.Printf("[CopyTrader] BUY attempt %d: failed to get order book: %v", attempt, err)
 			time.Sleep(retryInterval)
 			continue
@@ -566,6 +571,11 @@ func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail,
 	// We need to estimate the USDC we'll get - use cached order book for speed
 	book, err := ct.clobClient.GetCachedOrderBook(ctx, tokenID)
 	if err != nil {
+		// If market doesn't exist (404), skip - it's likely closed/resolved
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
+			log.Printf("[CopyTrader] SELL: market closed/resolved, skipping: %v", err)
+			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "")
+		}
 		errMsg := fmt.Sprintf("failed to get order book: %v", err)
 		log.Printf("[CopyTrader] SELL failed: %s", errMsg)
 		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", errMsg, "")
