@@ -20,10 +20,10 @@ COPY storage/ ./storage/
 COPY syncer/ ./syncer/
 COPY analyzer/ ./analyzer/
 COPY utils/ ./utils/
-COPY main.go ./analytics-worker/
+COPY main.go ./
 
 # Build the analytics worker binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o worker ./analytics-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o worker .
 
 # Runtime stage
 FROM alpine:3.19
