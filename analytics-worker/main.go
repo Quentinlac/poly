@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	log.Println("[Worker] Starting incremental sync + copy trader worker...")
+	log.Println("[Worker] Starting incremental sync + copy trader worker v2...")
 
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
