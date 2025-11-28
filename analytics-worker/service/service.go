@@ -1467,26 +1467,7 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 		}
 	}
 
-	// Fetch REDEEM activities from REST API
-	if s.apiClient != nil {
-		redemptions, err := s.apiClient.GetActivity(ctx, api.TradeQuery{
-			User:  normalized,
-			Limit: 500,
-			Types: []string{"REDEEM"},
-			After: sinceTimestamp,
-		})
-		if err != nil {
-			log.Printf("[Service] Warning: failed to fetch redemptions: %v", err)
-		} else {
-			for _, redeem := range redemptions {
-				detail := s.toTradeDetail(redeem)
-				allTrades = append(allTrades, detail)
-			}
-			if len(redemptions) > 0 {
-				log.Printf("[Service] Fetched %d redemptions since %d", len(redemptions), sinceTimestamp)
-			}
-		}
-	}
+	// Skip redemptions - not needed for copy trading (they're automatic payouts)
 
 	return allTrades, nil
 }
