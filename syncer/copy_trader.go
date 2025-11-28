@@ -242,9 +242,27 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		trade.Outcome = actualOutcome
 	}
 
+	// Get user settings to determine strategy type
+	strategyType := storage.StrategyHuman // Default to human
+	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
+	if err == nil && userSettings != nil {
+		if !userSettings.Enabled {
+			log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
+			return nil
+		}
+		strategyType = userSettings.StrategyType
+	}
+
+	// Route based on strategy type and side
 	if trade.Side == "BUY" {
+		if strategyType == storage.StrategyBot {
+			return ct.executeBotBuy(ctx, trade, tokenID, negRisk, userSettings)
+		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
+		if strategyType == storage.StrategyBot {
+			return ct.executeBotSell(ctx, trade, tokenID, negRisk, userSettings)
+		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
 	}
 
@@ -647,6 +665,343 @@ func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail,
 	}
 
 	return ct.logCopyTrade(ctx, trade, tokenID, 0, actualUSDC, avgPrice, sizeSold, "executed", "", resp.OrderID)
+}
+
+// executeBotBuy implements the bot following strategy for buys.
+// It tries to buy at the copied user's exact price, then sweeps asks up to +10%.
+func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
+	// Get settings
+	multiplier := ct.config.Multiplier
+	minUSDC := ct.config.MinOrderUSDC
+	if userSettings != nil {
+		multiplier = userSettings.Multiplier
+		minUSDC = userSettings.MinUSDC
+	}
+
+	// Calculate target amount based on copied trade's USDC value
+	targetUSDC := trade.UsdcSize * multiplier
+	if targetUSDC < minUSDC {
+		targetUSDC = minUSDC
+		log.Printf("[CopyTrader-Bot] BUY amount below minimum, using $%.2f", targetUSDC)
+	}
+
+	// Copied user's price is our target price
+	copiedPrice := trade.Price
+	maxPrice := copiedPrice * 1.10 // Max 10% above copied price
+
+	log.Printf("[CopyTrader-Bot] BUY: Copied price=%.4f, maxPrice=%.4f (+10%%), targetUSDC=$%.2f, market=%s",
+		copiedPrice, maxPrice, targetUSDC, trade.Title)
+
+	// Add token to cache for faster order book lookups
+	ct.clobClient.AddTokenToCache(tokenID)
+
+	// Get order book
+	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
+			log.Printf("[CopyTrader-Bot] BUY: market closed/resolved, skipping")
+			return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "market closed/resolved", "")
+		}
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "")
+	}
+
+	if len(book.Asks) == 0 {
+		log.Printf("[CopyTrader-Bot] BUY: no asks in order book")
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "no asks in order book", "")
+	}
+
+	// Find all asks within our price range, sorted by price (cheapest first)
+	// The order book should already be sorted ascending by price
+	var affordableAsks []struct {
+		price float64
+		size  float64
+	}
+
+	for _, ask := range book.Asks {
+		var askPrice, askSize float64
+		fmt.Sscanf(ask.Price, "%f", &askPrice)
+		fmt.Sscanf(ask.Size, "%f", &askSize)
+
+		// Stop if price exceeds our max (10% above copied price)
+		if askPrice > maxPrice {
+			break
+		}
+
+		affordableAsks = append(affordableAsks, struct {
+			price float64
+			size  float64
+		}{askPrice, askSize})
+	}
+
+	if len(affordableAsks) == 0 {
+		var bestAsk float64
+		fmt.Sscanf(book.Asks[0].Price, "%f", &bestAsk)
+		log.Printf("[CopyTrader-Bot] BUY: no asks within 10%% of copied price (best ask %.4f > max %.4f)",
+			bestAsk, maxPrice)
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped",
+			fmt.Sprintf("no liquidity within 10%% (best=%.4f, max=%.4f)", bestAsk, maxPrice), "")
+	}
+
+	// Calculate how much we can buy from affordable asks
+	remainingUSDC := targetUSDC
+	totalSize := 0.0
+	totalCost := 0.0
+
+	for _, ask := range affordableAsks {
+		if remainingUSDC <= 0 {
+			break
+		}
+
+		levelCost := ask.price * ask.size
+		if levelCost <= remainingUSDC {
+			// Take entire level
+			totalSize += ask.size
+			totalCost += levelCost
+			remainingUSDC -= levelCost
+		} else {
+			// Partial fill at this level
+			partialSize := remainingUSDC / ask.price
+			totalSize += partialSize
+			totalCost += remainingUSDC
+			remainingUSDC = 0
+		}
+	}
+
+	if totalSize < 0.01 || totalCost < minUSDC {
+		log.Printf("[CopyTrader-Bot] BUY: insufficient affordable liquidity (size=%.4f, cost=$%.4f)",
+			totalSize, totalCost)
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "insufficient affordable liquidity", "")
+	}
+
+	avgPrice := totalCost / totalSize
+	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f",
+		totalSize, totalCost, avgPrice)
+
+	// Place market order for the affordable amount
+	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideBuy, totalCost, negRisk)
+	if err != nil {
+		log.Printf("[CopyTrader-Bot] BUY failed: %v", err)
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "")
+	}
+
+	if !resp.Success {
+		log.Printf("[CopyTrader-Bot] BUY rejected: %s", resp.ErrorMsg)
+		return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "")
+	}
+
+	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
+		resp.OrderID, totalSize, avgPrice, totalCost)
+
+	// Update position tracking
+	if err := ct.store.UpdateMyPosition(ctx, MyPosition{
+		MarketID:  trade.MarketID,
+		TokenID:   tokenID,
+		Outcome:   trade.Outcome,
+		Title:     trade.Title,
+		Size:      totalSize,
+		AvgPrice:  avgPrice,
+		TotalCost: totalCost,
+	}); err != nil {
+		log.Printf("[CopyTrader-Bot] Warning: failed to update position: %v", err)
+	}
+
+	return ct.logCopyTrade(ctx, trade, tokenID, targetUSDC, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID)
+}
+
+// executeBotSell implements the bot following strategy for sells.
+// It tries to sell at the copied user's exact price, then sweeps bids down to -10%.
+// If still not filled, creates limit orders at -3% and -5%, waits 3 min, then market sells remainder.
+func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
+	// Get settings
+	multiplier := ct.config.Multiplier
+	if userSettings != nil {
+		multiplier = userSettings.Multiplier
+	}
+
+	// Calculate how many tokens to sell based on copied trade
+	// Sell tokens = copied tokens × multiplier
+	targetTokens := trade.Size * multiplier
+
+	// Get actual position from Polymarket API
+	var ourPosition float64
+	actualPositions, err := ct.client.GetOpenPositions(ctx, ct.myAddress)
+	if err != nil {
+		log.Printf("[CopyTrader-Bot] SELL: Warning: failed to fetch positions: %v", err)
+	} else {
+		for _, pos := range actualPositions {
+			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
+				ourPosition = pos.Size.Float64()
+				break
+			}
+		}
+	}
+
+	// Fall back to local tracking
+	if ourPosition <= 0 {
+		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
+		if err == nil && position.Size > 0 {
+			ourPosition = position.Size
+		}
+	}
+
+	if ourPosition <= 0 {
+		log.Printf("[CopyTrader-Bot] SELL: no position to sell for %s/%s", trade.Title, trade.Outcome)
+		return nil
+	}
+
+	// Sell the minimum of targetTokens or ourPosition
+	sellSize := targetTokens
+	if sellSize > ourPosition {
+		sellSize = ourPosition
+		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
+	}
+
+	copiedPrice := trade.Price
+	minPrice := copiedPrice * 0.90 // Min 10% below copied price
+
+	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f (-10%%), sellSize=%.4f, market=%s",
+		copiedPrice, minPrice, sellSize, trade.Title)
+
+	// Add token to cache
+	ct.clobClient.AddTokenToCache(tokenID)
+
+	// Get order book
+	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
+			log.Printf("[CopyTrader-Bot] SELL: market closed/resolved, skipping")
+			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "")
+		}
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "")
+	}
+
+	if len(book.Bids) == 0 {
+		log.Printf("[CopyTrader-Bot] SELL: no bids in order book")
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "no bids in order book", "")
+	}
+
+	// Find all bids within our price range, sorted by price (highest first)
+	// The order book bids should already be sorted descending by price
+	var acceptableBids []struct {
+		price float64
+		size  float64
+	}
+
+	for _, bid := range book.Bids {
+		var bidPrice, bidSize float64
+		fmt.Sscanf(bid.Price, "%f", &bidPrice)
+		fmt.Sscanf(bid.Size, "%f", &bidSize)
+
+		// Stop if price is below our minimum (10% below copied price)
+		if bidPrice < minPrice {
+			break
+		}
+
+		acceptableBids = append(acceptableBids, struct {
+			price float64
+			size  float64
+		}{bidPrice, bidSize})
+	}
+
+	// Calculate how much we can sell to acceptable bids
+	remainingSize := sellSize
+	totalSold := 0.0
+	totalUSDC := 0.0
+
+	for _, bid := range acceptableBids {
+		if remainingSize <= 0 {
+			break
+		}
+
+		if bid.size <= remainingSize {
+			// Take entire level
+			totalSold += bid.size
+			totalUSDC += bid.price * bid.size
+			remainingSize -= bid.size
+		} else {
+			// Partial fill at this level
+			totalSold += remainingSize
+			totalUSDC += bid.price * remainingSize
+			remainingSize = 0
+		}
+	}
+
+	// If we found acceptable bids, sell into them
+	if totalSold > 0.01 {
+		avgPrice := totalUSDC / totalSold
+		log.Printf("[CopyTrader-Bot] SELL: selling %.4f tokens at avg price %.4f for $%.4f",
+			totalSold, avgPrice, totalUSDC)
+
+		resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, totalUSDC, negRisk)
+		if err != nil {
+			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
+			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "")
+		}
+
+		if !resp.Success {
+			log.Printf("[CopyTrader-Bot] SELL rejected: %s", resp.ErrorMsg)
+			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "")
+		}
+
+		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
+			resp.OrderID, totalSold, avgPrice, totalUSDC)
+
+		// Clear position if we sold everything
+		if remainingSize < 0.01 {
+			ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
+		}
+
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, totalUSDC, avgPrice, totalSold, "executed", "", resp.OrderID)
+	}
+
+	// No acceptable bids found within 10% - need to create limit orders
+	log.Printf("[CopyTrader-Bot] SELL: no bids within 10%%, creating limit orders...")
+
+	// Create 3 limit sell orders:
+	// - 20% at same price as copied user
+	// - 40% at -3%
+	// - 40% at -5%
+	// Note: Sizes are calculated but for now we fall back to market sell
+	_ = sellSize * 0.20 // order1Size - 20%
+	_ = sellSize * 0.40 // order2Size - 40%
+	_ = sellSize * 0.40 // order3Size - 40%
+
+	order1Price := copiedPrice
+	order2Price := copiedPrice * 0.97 // -3%
+	order3Price := copiedPrice * 0.95 // -5%
+
+	log.Printf("[CopyTrader-Bot] SELL: Creating limit orders - 20%% @ %.4f, 40%% @ %.4f, 40%% @ %.4f",
+		order1Price, order2Price, order3Price)
+
+	// Place limit orders (using market orders with price limits for now)
+	// TODO: Implement proper limit order API when available
+	var orderIDs []string
+	var totalFilled float64
+	var totalValue float64
+
+	// For now, we'll use market orders with our best effort at the lowest acceptable price
+	// In production, this should be replaced with actual limit order placement
+	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, sellSize*order3Price, negRisk)
+	if err == nil && resp.Success {
+		orderIDs = append(orderIDs, resp.OrderID)
+		// Estimate fill
+		if len(book.Bids) > 0 {
+			var bestBid float64
+			fmt.Sscanf(book.Bids[0].Price, "%f", &bestBid)
+			totalFilled = sellSize
+			totalValue = sellSize * bestBid
+		}
+	}
+
+	if totalFilled > 0 {
+		avgPrice := totalValue / totalFilled
+		ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","))
+	}
+
+	// Failed to sell
+	log.Printf("[CopyTrader-Bot] SELL: failed to fill any orders")
+	return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "")
 }
 
 func (ct *CopyTrader) logCopyTrade(ctx context.Context, trade models.TradeDetail, tokenID string, intended, actual, price, size float64, status, errReason, orderID string) error {

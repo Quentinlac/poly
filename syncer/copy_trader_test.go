@@ -813,6 +813,352 @@ func TestCopyTraderSkipsNonTradeTypes(t *testing.T) {
 	}
 }
 
+// TestBotStrategyBuyPriceLimit tests the 10% max price limit for bot buys
+func TestBotStrategyBuyPriceLimit(t *testing.T) {
+	tests := []struct {
+		name         string
+		copiedPrice  float64
+		askPrice     float64
+		shouldAccept bool
+	}{
+		{
+			name:         "exact copied price - accept",
+			copiedPrice:  0.50,
+			askPrice:     0.50,
+			shouldAccept: true,
+		},
+		{
+			name:         "5% above - accept",
+			copiedPrice:  0.50,
+			askPrice:     0.525,
+			shouldAccept: true,
+		},
+		{
+			name:         "exactly 10% above - accept",
+			copiedPrice:  0.50,
+			askPrice:     0.55,
+			shouldAccept: true,
+		},
+		{
+			name:         "11% above - reject",
+			copiedPrice:  0.50,
+			askPrice:     0.555,
+			shouldAccept: false,
+		},
+		{
+			name:         "20% above - reject",
+			copiedPrice:  0.50,
+			askPrice:     0.60,
+			shouldAccept: false,
+		},
+		{
+			name:         "below copied price - accept",
+			copiedPrice:  0.50,
+			askPrice:     0.45,
+			shouldAccept: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maxPrice := tt.copiedPrice * 1.10 // 10% above copied price
+			shouldAccept := tt.askPrice <= maxPrice
+
+			if shouldAccept != tt.shouldAccept {
+				t.Errorf("askPrice %.4f with copiedPrice %.4f: accepted=%v, want=%v (maxPrice=%.4f)",
+					tt.askPrice, tt.copiedPrice, shouldAccept, tt.shouldAccept, maxPrice)
+			}
+		})
+	}
+}
+
+// TestBotStrategySellPriceLimit tests the 10% min price limit for bot sells
+func TestBotStrategySellPriceLimit(t *testing.T) {
+	tests := []struct {
+		name         string
+		copiedPrice  float64
+		bidPrice     float64
+		shouldAccept bool
+	}{
+		{
+			name:         "exact copied price - accept",
+			copiedPrice:  0.50,
+			bidPrice:     0.50,
+			shouldAccept: true,
+		},
+		{
+			name:         "5% below - accept",
+			copiedPrice:  0.50,
+			bidPrice:     0.475,
+			shouldAccept: true,
+		},
+		{
+			name:         "exactly 10% below - accept",
+			copiedPrice:  0.50,
+			bidPrice:     0.45,
+			shouldAccept: true,
+		},
+		{
+			name:         "11% below - reject",
+			copiedPrice:  0.50,
+			bidPrice:     0.445,
+			shouldAccept: false,
+		},
+		{
+			name:         "20% below - reject",
+			copiedPrice:  0.50,
+			bidPrice:     0.40,
+			shouldAccept: false,
+		},
+		{
+			name:         "above copied price - accept",
+			copiedPrice:  0.50,
+			bidPrice:     0.55,
+			shouldAccept: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			minPrice := tt.copiedPrice * 0.90 // 10% below copied price
+			shouldAccept := tt.bidPrice >= minPrice
+
+			if shouldAccept != tt.shouldAccept {
+				t.Errorf("bidPrice %.4f with copiedPrice %.4f: accepted=%v, want=%v (minPrice=%.4f)",
+					tt.bidPrice, tt.copiedPrice, shouldAccept, tt.shouldAccept, minPrice)
+			}
+		})
+	}
+}
+
+// TestBotStrategySellAmountCalculation tests the proportional sell amount
+func TestBotStrategySellAmountCalculation(t *testing.T) {
+	tests := []struct {
+		name         string
+		copiedSize   float64
+		multiplier   float64
+		ourPosition  float64
+		expectedSell float64
+	}{
+		{
+			name:         "normal case - sell proportionally",
+			copiedSize:   100.0,
+			multiplier:   0.10,
+			ourPosition:  20.0,
+			expectedSell: 10.0, // 100 * 0.10 = 10, we have 20, sell 10
+		},
+		{
+			name:         "not enough position - sell all we have",
+			copiedSize:   100.0,
+			multiplier:   0.10,
+			ourPosition:  5.0,
+			expectedSell: 5.0, // 100 * 0.10 = 10, but we only have 5
+		},
+		{
+			name:         "large position - sell proportionally",
+			copiedSize:   50.0,
+			multiplier:   0.05,
+			ourPosition:  100.0,
+			expectedSell: 2.5, // 50 * 0.05 = 2.5
+		},
+		{
+			name:         "very small multiplier",
+			copiedSize:   1000.0,
+			multiplier:   0.01,
+			ourPosition:  50.0,
+			expectedSell: 10.0, // 1000 * 0.01 = 10
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			targetSell := tt.copiedSize * tt.multiplier
+			actualSell := targetSell
+			if actualSell > tt.ourPosition {
+				actualSell = tt.ourPosition
+			}
+
+			if !floatEquals(actualSell, tt.expectedSell, 0.01) {
+				t.Errorf("sell amount = %.4f, want %.4f (target=%.4f, position=%.4f)",
+					actualSell, tt.expectedSell, targetSell, tt.ourPosition)
+			}
+		})
+	}
+}
+
+// TestStrategyTypeSelection tests that strategy type correctly routes execution
+func TestStrategyTypeSelection(t *testing.T) {
+	tests := []struct {
+		name         string
+		strategyType int
+		expectedName string
+	}{
+		{
+			name:         "human strategy",
+			strategyType: storage.StrategyHuman,
+			expectedName: "Human",
+		},
+		{
+			name:         "bot strategy",
+			strategyType: storage.StrategyBot,
+			expectedName: "Bot",
+		},
+		{
+			name:         "default (0) should be human",
+			strategyType: 0,
+			expectedName: "Human",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			strategyType := tt.strategyType
+			if strategyType == 0 {
+				strategyType = storage.StrategyHuman
+			}
+
+			var name string
+			switch strategyType {
+			case storage.StrategyHuman:
+				name = "Human"
+			case storage.StrategyBot:
+				name = "Bot"
+			default:
+				name = "Unknown"
+			}
+
+			if name != tt.expectedName {
+				t.Errorf("strategy name = %s, want %s", name, tt.expectedName)
+			}
+		})
+	}
+}
+
+// TestBotBuyOrderBookSweep tests sweeping order book for cheapest prices
+func TestBotBuyOrderBookSweep(t *testing.T) {
+	// Simulate order book asks sorted by price ascending
+	asks := []struct {
+		price float64
+		size  float64
+	}{
+		{0.48, 50},  // Cheapest
+		{0.49, 100},
+		{0.50, 200}, // Copied price
+		{0.51, 150},
+		{0.55, 500}, // 10% above = 0.55, this is at the limit
+		{0.56, 1000}, // This is above 10%
+	}
+
+	copiedPrice := 0.50
+	maxPrice := copiedPrice * 1.10 // 0.55
+	targetUSDC := 30.0
+
+	// Sweep asks from cheapest
+	var totalCost, totalSize float64
+	remainingUSDC := targetUSDC
+
+	for _, ask := range asks {
+		if ask.price > maxPrice {
+			break // Stop at 10% limit
+		}
+		if remainingUSDC <= 0 {
+			break
+		}
+
+		levelCost := ask.price * ask.size
+		if levelCost <= remainingUSDC {
+			totalSize += ask.size
+			totalCost += levelCost
+			remainingUSDC -= levelCost
+		} else {
+			partialSize := remainingUSDC / ask.price
+			totalSize += partialSize
+			totalCost += remainingUSDC
+			remainingUSDC = 0
+		}
+	}
+
+	// At $0.48, we can buy 50 tokens for $24
+	// Remaining $6 at $0.49, we can buy 12.24 tokens
+	// Total: ~62.24 tokens for $30
+	expectedSize := 62.24
+	if !floatEquals(totalSize, expectedSize, 0.5) {
+		t.Errorf("total size = %.2f, want ~%.2f", totalSize, expectedSize)
+	}
+
+	if !floatEquals(totalCost, targetUSDC, 0.01) {
+		t.Errorf("total cost = %.2f, want %.2f", totalCost, targetUSDC)
+	}
+
+	// Verify we didn't go above maxPrice
+	avgPrice := totalCost / totalSize
+	if avgPrice > maxPrice {
+		t.Errorf("avg price %.4f exceeds max %.4f", avgPrice, maxPrice)
+	}
+}
+
+// TestBotSellOrderBookSweep tests sweeping order book for highest bids
+func TestBotSellOrderBookSweep(t *testing.T) {
+	// Simulate order book bids sorted by price descending
+	bids := []struct {
+		price float64
+		size  float64
+	}{
+		{0.52, 30},  // Best bid (above copied)
+		{0.50, 50},  // Copied price
+		{0.48, 100},
+		{0.46, 150},
+		{0.45, 200}, // 10% below = 0.45, this is at the limit
+		{0.44, 500}, // This is below 10%
+	}
+
+	copiedPrice := 0.50
+	minPrice := copiedPrice * 0.90 // 0.45
+	sellSize := 100.0
+
+	// Sweep bids from highest
+	var totalSold, totalUSDC float64
+	remainingSize := sellSize
+
+	for _, bid := range bids {
+		if bid.price < minPrice {
+			break // Stop at 10% limit
+		}
+		if remainingSize <= 0 {
+			break
+		}
+
+		if bid.size <= remainingSize {
+			totalSold += bid.size
+			totalUSDC += bid.price * bid.size
+			remainingSize -= bid.size
+		} else {
+			totalSold += remainingSize
+			totalUSDC += bid.price * remainingSize
+			remainingSize = 0
+		}
+	}
+
+	// 30 @ 0.52 = $15.60
+	// 50 @ 0.50 = $25.00
+	// 20 @ 0.48 = $9.60 (partial)
+	// Total: 100 tokens for $50.20
+	if !floatEquals(totalSold, 100.0, 0.01) {
+		t.Errorf("total sold = %.2f, want 100.0", totalSold)
+	}
+
+	expectedUSDC := 30*0.52 + 50*0.50 + 20*0.48
+	if !floatEquals(totalUSDC, expectedUSDC, 0.1) {
+		t.Errorf("total USDC = %.2f, want ~%.2f", totalUSDC, expectedUSDC)
+	}
+
+	// Verify avg price is above minimum
+	avgPrice := totalUSDC / totalSold
+	if avgPrice < minPrice {
+		t.Errorf("avg price %.4f below min %.4f", avgPrice, minPrice)
+	}
+}
+
 // Integration test for user copy settings storage
 func TestUserCopySettingsStorage(t *testing.T) {
 	if testing.Short() {

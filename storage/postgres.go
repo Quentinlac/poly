@@ -1411,23 +1411,30 @@ func (s *PostgresStore) GetAllMyPositions(ctx context.Context) ([]CopyTradePosit
 	return positions, rows.Err()
 }
 
+// Strategy types for copy trading
+const (
+	StrategyHuman = 1 // Human following - market orders with slippage
+	StrategyBot   = 2 // Bot following - limit orders matching exact prices
+)
+
 // UserCopySettings represents per-user copy trading settings
 type UserCopySettings struct {
-	UserAddress string
-	Multiplier  float64
-	Enabled     bool
-	MinUSDC     float64
+	UserAddress  string
+	Multiplier   float64
+	Enabled      bool
+	MinUSDC      float64
+	StrategyType int // 1=human, 2=bot
 }
 
 // GetUserCopySettings gets the copy trading settings for a specific user
 func (s *PostgresStore) GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error) {
 	var settings UserCopySettings
 	err := s.pool.QueryRow(ctx, `
-		SELECT user_address, multiplier, enabled, min_usdc
+		SELECT user_address, multiplier, enabled, min_usdc, COALESCE(strategy_type, 1)
 		FROM user_copy_settings
 		WHERE user_address = $1
 	`, strings.ToLower(userAddress)).Scan(
-		&settings.UserAddress, &settings.Multiplier, &settings.Enabled, &settings.MinUSDC,
+		&settings.UserAddress, &settings.Multiplier, &settings.Enabled, &settings.MinUSDC, &settings.StrategyType,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1440,22 +1447,28 @@ func (s *PostgresStore) GetUserCopySettings(ctx context.Context, userAddress str
 
 // SetUserCopySettings sets or updates the copy trading settings for a user
 func (s *PostgresStore) SetUserCopySettings(ctx context.Context, settings UserCopySettings) error {
+	// Default strategy type to human if not set
+	strategyType := settings.StrategyType
+	if strategyType == 0 {
+		strategyType = StrategyHuman
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO user_copy_settings (user_address, multiplier, enabled, min_usdc, updated_at)
-		VALUES ($1, $2, $3, $4, NOW())
+		INSERT INTO user_copy_settings (user_address, multiplier, enabled, min_usdc, strategy_type, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (user_address) DO UPDATE SET
 			multiplier = EXCLUDED.multiplier,
 			enabled = EXCLUDED.enabled,
 			min_usdc = EXCLUDED.min_usdc,
+			strategy_type = EXCLUDED.strategy_type,
 			updated_at = NOW()
-	`, strings.ToLower(settings.UserAddress), settings.Multiplier, settings.Enabled, settings.MinUSDC)
+	`, strings.ToLower(settings.UserAddress), settings.Multiplier, settings.Enabled, settings.MinUSDC, strategyType)
 	return err
 }
 
 // GetAllUserCopySettings returns all user copy trading settings
 func (s *PostgresStore) GetAllUserCopySettings(ctx context.Context) ([]UserCopySettings, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT user_address, multiplier, enabled, min_usdc
+		SELECT user_address, multiplier, enabled, min_usdc, COALESCE(strategy_type, 1)
 		FROM user_copy_settings
 		ORDER BY user_address
 	`)
@@ -1467,7 +1480,7 @@ func (s *PostgresStore) GetAllUserCopySettings(ctx context.Context) ([]UserCopyS
 	var settings []UserCopySettings
 	for rows.Next() {
 		var s UserCopySettings
-		err := rows.Scan(&s.UserAddress, &s.Multiplier, &s.Enabled, &s.MinUSDC)
+		err := rows.Scan(&s.UserAddress, &s.Multiplier, &s.Enabled, &s.MinUSDC, &s.StrategyType)
 		if err != nil {
 			return nil, err
 		}
