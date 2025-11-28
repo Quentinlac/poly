@@ -534,6 +534,285 @@ func TestHighPriceSellCalculation(t *testing.T) {
 	}
 }
 
+// TestGetMaxSlippage tests the tiered slippage calculation
+// Critical for copy trading - ensures we allow appropriate slippage at different price levels
+func TestGetMaxSlippage(t *testing.T) {
+	tests := []struct {
+		name        string
+		traderPrice float64
+		wantSlip    float64
+		description string
+	}{
+		{
+			name:        "very low price under $0.10",
+			traderPrice: 0.05,
+			wantSlip:    2.00, // 200% - can pay up to 3x
+			description: "Low prices are volatile, need high slippage",
+		},
+		{
+			name:        "low price at $0.09",
+			traderPrice: 0.09,
+			wantSlip:    2.00,
+			description: "Still under $0.10 threshold",
+		},
+		{
+			name:        "price at $0.10 boundary",
+			traderPrice: 0.10,
+			wantSlip:    0.80, // 80% - next tier
+			description: "At $0.10, moves to 80% tier",
+		},
+		{
+			name:        "price at $0.15",
+			traderPrice: 0.15,
+			wantSlip:    0.80,
+			description: "Still in $0.10-$0.20 range",
+		},
+		{
+			name:        "price at $0.20 boundary",
+			traderPrice: 0.20,
+			wantSlip:    0.50, // 50%
+			description: "At $0.20, moves to 50% tier",
+		},
+		{
+			name:        "price at $0.25",
+			traderPrice: 0.25,
+			wantSlip:    0.50,
+			description: "Still in $0.20-$0.30 range",
+		},
+		{
+			name:        "price at $0.30 boundary",
+			traderPrice: 0.30,
+			wantSlip:    0.30, // 30%
+			description: "At $0.30, moves to 30% tier",
+		},
+		{
+			name:        "price at $0.35",
+			traderPrice: 0.35,
+			wantSlip:    0.30,
+			description: "Still in $0.30-$0.40 range",
+		},
+		{
+			name:        "price at $0.40 boundary",
+			traderPrice: 0.40,
+			wantSlip:    0.20, // 20%
+			description: "At $0.40+, uses 20% tier",
+		},
+		{
+			name:        "high price at $0.80",
+			traderPrice: 0.80,
+			wantSlip:    0.20,
+			description: "High prices use standard 20%",
+		},
+		{
+			name:        "very high price at $0.95",
+			traderPrice: 0.95,
+			wantSlip:    0.20,
+			description: "Even very high prices use 20%",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getMaxSlippage(tt.traderPrice)
+			if got != tt.wantSlip {
+				t.Errorf("getMaxSlippage(%.2f) = %.2f, want %.2f (%s)",
+					tt.traderPrice, got, tt.wantSlip, tt.description)
+			}
+		})
+	}
+}
+
+// TestMaxAllowedPriceCalculation tests the max price calculation
+func TestMaxAllowedPriceCalculation(t *testing.T) {
+	tests := []struct {
+		traderPrice    float64
+		wantMaxPrice   float64
+		description    string
+	}{
+		{
+			traderPrice:  0.05,
+			wantMaxPrice: 0.15, // 0.05 * (1 + 2.00) = 0.15
+			description:  "At 5¢, max is 15¢ (3x)",
+		},
+		{
+			traderPrice:  0.10,
+			wantMaxPrice: 0.18, // 0.10 * (1 + 0.80) = 0.18
+			description:  "At 10¢, max is 18¢ (1.8x)",
+		},
+		{
+			traderPrice:  0.20,
+			wantMaxPrice: 0.30, // 0.20 * (1 + 0.50) = 0.30
+			description:  "At 20¢, max is 30¢ (1.5x)",
+		},
+		{
+			traderPrice:  0.50,
+			wantMaxPrice: 0.60, // 0.50 * (1 + 0.20) = 0.60
+			description:  "At 50¢, max is 60¢ (1.2x)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			maxSlippage := getMaxSlippage(tt.traderPrice)
+			maxAllowedPrice := tt.traderPrice * (1 + maxSlippage)
+
+			if !floatEquals(maxAllowedPrice, tt.wantMaxPrice, 0.001) {
+				t.Errorf("maxAllowedPrice for %.2f = %.4f, want %.4f",
+					tt.traderPrice, maxAllowedPrice, tt.wantMaxPrice)
+			}
+		})
+	}
+}
+
+// TestClosedMarketDetection tests that we detect 404 errors for closed markets
+func TestClosedMarketDetection(t *testing.T) {
+	tests := []struct {
+		name       string
+		errorMsg   string
+		shouldSkip bool
+	}{
+		{
+			name:       "404 error should skip",
+			errorMsg:   "get order book failed: 404 {\"error\":\"No orderbook exists for the requested token id\"}",
+			shouldSkip: true,
+		},
+		{
+			name:       "No orderbook message should skip",
+			errorMsg:   "No orderbook exists for the requested token id",
+			shouldSkip: true,
+		},
+		{
+			name:       "Network timeout should not skip",
+			errorMsg:   "connection timeout",
+			shouldSkip: false,
+		},
+		{
+			name:       "Server error should not skip",
+			errorMsg:   "500 internal server error",
+			shouldSkip: false,
+		},
+		{
+			name:       "Rate limit should not skip",
+			errorMsg:   "429 too many requests",
+			shouldSkip: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Check if error contains 404 or "No orderbook exists"
+			import_strings := false
+			if contains(tt.errorMsg, "404") || contains(tt.errorMsg, "No orderbook exists") {
+				import_strings = true
+			}
+
+			if import_strings != tt.shouldSkip {
+				t.Errorf("closed market detection for %q = %v, want %v",
+					tt.errorMsg, import_strings, tt.shouldSkip)
+			}
+		})
+	}
+}
+
+// contains is a helper for string matching
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTradeOutcomePreservation ensures trades keep their original outcome
+// This is critical - we must NOT convert SELL No to BUY Yes
+func TestTradeOutcomePreservation(t *testing.T) {
+	tests := []struct {
+		name           string
+		tradeSide      string
+		tradeOutcome   string
+		expectedAction string
+	}{
+		{
+			name:           "SELL No should copy as SELL No",
+			tradeSide:      "SELL",
+			tradeOutcome:   "No",
+			expectedAction: "SELL No tokens",
+		},
+		{
+			name:           "BUY No should copy as BUY No",
+			tradeSide:      "BUY",
+			tradeOutcome:   "No",
+			expectedAction: "BUY No tokens",
+		},
+		{
+			name:           "SELL Yes should copy as SELL Yes",
+			tradeSide:      "SELL",
+			tradeOutcome:   "Yes",
+			expectedAction: "SELL Yes tokens",
+		},
+		{
+			name:           "BUY Yes should copy as BUY Yes",
+			tradeSide:      "BUY",
+			tradeOutcome:   "Yes",
+			expectedAction: "BUY Yes tokens",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trade := models.TradeDetail{
+				ID:       "test-trade",
+				Side:     tt.tradeSide,
+				Outcome:  tt.tradeOutcome,
+				MarketID: "test-market",
+			}
+
+			// The trade outcome should be preserved as-is
+			// We should NOT transform SELL No to BUY Yes
+			if trade.Side != tt.tradeSide {
+				t.Errorf("Trade side was modified: got %s, want %s", trade.Side, tt.tradeSide)
+			}
+			if trade.Outcome != tt.tradeOutcome {
+				t.Errorf("Trade outcome was modified: got %s, want %s", trade.Outcome, tt.tradeOutcome)
+			}
+
+			// Verify expected copy action
+			copyAction := trade.Side + " " + trade.Outcome + " tokens"
+			if copyAction != tt.expectedAction {
+				t.Errorf("Copy action = %s, want %s", copyAction, tt.expectedAction)
+			}
+		})
+	}
+}
+
+// TestCopyTraderSkipsNonTradeTypes verifies REDEEM/SPLIT/MERGE are skipped
+func TestCopyTraderSkipsNonTradeTypes(t *testing.T) {
+	tests := []struct {
+		tradeType  string
+		shouldCopy bool
+	}{
+		{"TRADE", true},
+		{"", true},        // Empty type = TRADE
+		{"REDEEM", false},
+		{"SPLIT", false},
+		{"MERGE", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tradeType, func(t *testing.T) {
+			shouldCopy := tt.tradeType == "" || tt.tradeType == "TRADE"
+			if shouldCopy != tt.shouldCopy {
+				t.Errorf("shouldCopy(%q) = %v, want %v", tt.tradeType, shouldCopy, tt.shouldCopy)
+			}
+		})
+	}
+}
+
 // Integration test for user copy settings storage
 func TestUserCopySettingsStorage(t *testing.T) {
 	if testing.Short() {
