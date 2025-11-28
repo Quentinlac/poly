@@ -1855,7 +1855,7 @@ func (s *PostgresStore) SaveTradesBatch(ctx context.Context, trades []models.Tra
 			INSERT INTO user_trades (id, user_id, market_id, subject, type, side, is_maker,
 				size, usdc_size, price, outcome, timestamp, title, slug, transaction_hash, name, pseudonym)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			ON CONFLICT (id) DO NOTHING
+			ON CONFLICT (id, timestamp) DO NOTHING
 		`, trade.ID, trade.UserID, trade.MarketID, string(trade.Subject), trade.Type, trade.Side, isMaker,
 			trade.Size, trade.UsdcSize, trade.Price, trade.Outcome, trade.Timestamp, trade.Title,
 			trade.Slug, trade.TransactionHash, trade.Name, trade.Pseudonym)
