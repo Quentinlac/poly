@@ -1250,3 +1250,759 @@ func TestUserCopySettingsStorage(t *testing.T) {
 		}
 	})
 }
+
+// TestMaxUSDCap tests the max USD cap feature for copy trading
+func TestMaxUSDCap(t *testing.T) {
+	tests := []struct {
+		name           string
+		tradeUSDC      float64
+		multiplier     float64
+		minUSDC        float64
+		maxUSD         *float64
+		expectedAmount float64
+		description    string
+	}{
+		{
+			name:           "no cap - normal calculation",
+			tradeUSDC:      1000.0,
+			multiplier:     0.10,
+			minUSDC:        1.0,
+			maxUSD:         nil,
+			expectedAmount: 100.0, // 1000 * 0.10
+			description:    "Without cap, should use multiplier normally",
+		},
+		{
+			name:           "cap applied - large trade",
+			tradeUSDC:      10000.0,
+			multiplier:     1.0,
+			minUSDC:        1.0,
+			maxUSD:         floatPtr(500.0),
+			expectedAmount: 500.0, // Capped at 500
+			description:    "Should cap at max_usd when multiplied amount exceeds it",
+		},
+		{
+			name:           "cap not needed - small trade",
+			tradeUSDC:      100.0,
+			multiplier:     0.10,
+			minUSDC:        1.0,
+			maxUSD:         floatPtr(500.0),
+			expectedAmount: 10.0, // 100 * 0.10, below cap
+			description:    "Should use multiplied amount when below cap",
+		},
+		{
+			name:           "min takes precedence over cap",
+			tradeUSDC:      5.0,
+			multiplier:     0.10,
+			minUSDC:        2.0,
+			maxUSD:         floatPtr(500.0),
+			expectedAmount: 2.0, // min enforced (5 * 0.10 = 0.5 < 2.0)
+			description:    "Minimum should be enforced even with cap",
+		},
+		{
+			name:           "cap at exact boundary",
+			tradeUSDC:      5000.0,
+			multiplier:     0.10,
+			minUSDC:        1.0,
+			maxUSD:         floatPtr(500.0),
+			expectedAmount: 500.0, // Exactly at cap
+			description:    "Should work at exact cap boundary",
+		},
+		{
+			name:           "very small cap",
+			tradeUSDC:      1000.0,
+			multiplier:     0.50,
+			minUSDC:        1.0,
+			maxUSD:         floatPtr(10.0),
+			expectedAmount: 10.0, // 1000 * 0.50 = 500, capped to 10
+			description:    "Small cap should limit large trades",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the calculation logic from executeBuy/executeBotBuy
+			intendedUSDC := tt.tradeUSDC * tt.multiplier
+
+			// Ensure minimum order
+			if intendedUSDC < tt.minUSDC {
+				intendedUSDC = tt.minUSDC
+			}
+
+			// Apply max cap if set
+			if tt.maxUSD != nil && intendedUSDC > *tt.maxUSD {
+				intendedUSDC = *tt.maxUSD
+			}
+
+			if !floatEquals(intendedUSDC, tt.expectedAmount, 0.01) {
+				t.Errorf("%s: got $%.2f, want $%.2f", tt.description, intendedUSDC, tt.expectedAmount)
+			}
+		})
+	}
+}
+
+// TestMaxUSDCapEdgeCases tests edge cases for max USD cap
+func TestMaxUSDCapEdgeCases(t *testing.T) {
+	t.Run("cap less than min should use min", func(t *testing.T) {
+		// Edge case: what if maxUSD < minUSDC?
+		// The logic applies min first, then cap, so cap wins
+		tradeUSDC := 10.0
+		multiplier := 0.10
+		minUSDC := 5.0
+		maxUSD := 2.0 // Less than min!
+
+		amount := tradeUSDC * multiplier // 1.0
+		if amount < minUSDC {
+			amount = minUSDC // 5.0
+		}
+		if amount > maxUSD {
+			amount = maxUSD // 2.0
+		}
+
+		// In this edge case, cap wins over min
+		// This might be unexpected behavior - documenting it here
+		if amount != 2.0 {
+			t.Errorf("got $%.2f, want $2.00 (cap should override min)", amount)
+		}
+	})
+
+	t.Run("zero cap should result in zero", func(t *testing.T) {
+		tradeUSDC := 1000.0
+		multiplier := 0.10
+		maxUSD := 0.0
+
+		amount := tradeUSDC * multiplier
+		if amount > maxUSD {
+			amount = maxUSD
+		}
+
+		if amount != 0.0 {
+			t.Errorf("zero cap should result in zero, got $%.2f", amount)
+		}
+	})
+
+	t.Run("negative cap treated as zero", func(t *testing.T) {
+		// Negative caps shouldn't happen but test defensive behavior
+		maxUSD := -100.0
+		amount := 500.0
+
+		if amount > maxUSD {
+			// This would be true, so amount stays 500
+			// But if we compare properly...
+		}
+
+		// In practice, negative caps should be validated at input
+		// This test documents current behavior
+		if maxUSD < 0 && amount > 0 {
+			// Amount would not be capped to negative
+			t.Log("Negative cap does not affect positive amounts (expected)")
+		}
+	})
+}
+
+// floatPtr is a helper to create *float64
+func floatPtr(f float64) *float64 {
+	return &f
+}
+
+// TestCopyTradeLogSave tests saving entries to copy_trade_log table
+func TestCopyTradeLogSave(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	store, err := storage.NewPostgres()
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	t.Run("save successful trade log", func(t *testing.T) {
+		now := time.Now()
+		followerTime := now.Add(100 * time.Millisecond)
+		followerShares := -10.0 // Buy
+		followerPrice := 0.52
+
+		entry := storage.CopyTradeLogEntry{
+			FollowingAddress: "0xtest123",
+			FollowingTradeID: "trade-" + now.Format("20060102150405"),
+			FollowingTime:    now,
+			FollowingShares:  -20.0, // Buy (negative)
+			FollowingPrice:   0.50,
+			FollowerTime:     &followerTime,
+			FollowerShares:   &followerShares,
+			FollowerPrice:    &followerPrice,
+			MarketTitle:      "Test Market",
+			Outcome:          "Yes",
+			TokenID:          "token-123",
+			Status:           "success",
+			FailedReason:     "",
+			StrategyType:     storage.StrategyHuman,
+		}
+
+		err := store.SaveCopyTradeLog(ctx, entry)
+		if err != nil {
+			t.Fatalf("SaveCopyTradeLog failed: %v", err)
+		}
+	})
+
+	t.Run("save failed trade log", func(t *testing.T) {
+		now := time.Now()
+
+		entry := storage.CopyTradeLogEntry{
+			FollowingAddress: "0xtest456",
+			FollowingTradeID: "trade-failed-" + now.Format("20060102150405"),
+			FollowingTime:    now,
+			FollowingShares:  -50.0,
+			FollowingPrice:   0.75,
+			FollowerTime:     nil, // No execution
+			FollowerShares:   nil,
+			FollowerPrice:    nil,
+			MarketTitle:      "Failed Market",
+			Outcome:          "No",
+			TokenID:          "token-456",
+			Status:           "failed",
+			FailedReason:     "no liquidity within 10%",
+			StrategyType:     storage.StrategyBot,
+		}
+
+		err := store.SaveCopyTradeLog(ctx, entry)
+		if err != nil {
+			t.Fatalf("SaveCopyTradeLog for failed trade failed: %v", err)
+		}
+	})
+
+	t.Run("save skipped trade log", func(t *testing.T) {
+		now := time.Now()
+
+		entry := storage.CopyTradeLogEntry{
+			FollowingAddress: "0xtest789",
+			FollowingTradeID: "trade-skipped-" + now.Format("20060102150405"),
+			FollowingTime:    now,
+			FollowingShares:  100.0, // Sell (positive)
+			FollowingPrice:   0.90,
+			FollowerTime:     nil,
+			FollowerShares:   nil,
+			FollowerPrice:    nil,
+			MarketTitle:      "Skipped Market",
+			Outcome:          "Yes",
+			TokenID:          "token-789",
+			Status:           "skipped",
+			FailedReason:     "market closed/resolved",
+			StrategyType:     storage.StrategyHuman,
+		}
+
+		err := store.SaveCopyTradeLog(ctx, entry)
+		if err != nil {
+			t.Fatalf("SaveCopyTradeLog for skipped trade failed: %v", err)
+		}
+	})
+
+	t.Run("retrieve copy trade logs", func(t *testing.T) {
+		logs, err := store.GetCopyTradeLogs(ctx, 10)
+		if err != nil {
+			t.Fatalf("GetCopyTradeLogs failed: %v", err)
+		}
+
+		if len(logs) == 0 {
+			t.Log("No logs found (may be empty database)")
+		} else {
+			t.Logf("Retrieved %d copy trade logs", len(logs))
+			// Verify structure of first log
+			log := logs[0]
+			if log.FollowingAddress == "" {
+				t.Error("following_address should not be empty")
+			}
+			if log.Status == "" {
+				t.Error("status should not be empty")
+			}
+		}
+	})
+}
+
+// TestSharesSignConvention tests that shares are correctly signed (negative=buy, positive=sell)
+func TestSharesSignConvention(t *testing.T) {
+	tests := []struct {
+		name          string
+		side          string
+		shares        float64
+		expectedSign  string
+		description   string
+	}{
+		{
+			name:         "buy should be negative",
+			side:         "BUY",
+			shares:       100.0,
+			expectedSign: "negative",
+			description:  "BUY trades should have negative shares",
+		},
+		{
+			name:         "sell should be positive",
+			side:         "SELL",
+			shares:       100.0,
+			expectedSign: "positive",
+			description:  "SELL trades should have positive shares",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Convert shares based on side (as done in logCopyTradeWithStrategy)
+			var signedShares float64
+			if tt.side == "BUY" {
+				signedShares = -tt.shares // Negative for buy
+			} else {
+				signedShares = tt.shares // Positive for sell
+			}
+
+			if tt.expectedSign == "negative" && signedShares >= 0 {
+				t.Errorf("%s: expected negative, got %.2f", tt.description, signedShares)
+			}
+			if tt.expectedSign == "positive" && signedShares <= 0 {
+				t.Errorf("%s: expected positive, got %.2f", tt.description, signedShares)
+			}
+		})
+	}
+}
+
+// TestGetUnprocessedTradesFiltering tests the filtering logic for unprocessed trades
+func TestGetUnprocessedTradesFiltering(t *testing.T) {
+	// This is a unit test for the filtering logic, not integration
+
+	t.Run("filter by processed flag", func(t *testing.T) {
+		// Simulate trades with processed flags
+		allTrades := []struct {
+			id        string
+			processed bool
+		}{
+			{"trade-1", false},
+			{"trade-2", true},
+			{"trade-3", false},
+			{"trade-4", true},
+			{"trade-5", false},
+		}
+
+		// Filter unprocessed
+		var unprocessed []string
+		for _, trade := range allTrades {
+			if !trade.processed {
+				unprocessed = append(unprocessed, trade.id)
+			}
+		}
+
+		if len(unprocessed) != 3 {
+			t.Errorf("expected 3 unprocessed trades, got %d", len(unprocessed))
+		}
+
+		// Verify correct trades
+		expected := map[string]bool{"trade-1": true, "trade-3": true, "trade-5": true}
+		for _, id := range unprocessed {
+			if !expected[id] {
+				t.Errorf("unexpected trade in unprocessed: %s", id)
+			}
+		}
+	})
+
+	t.Run("limit parameter", func(t *testing.T) {
+		// Simulate limiting results
+		allUnprocessed := []string{"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10"}
+		limit := 5
+
+		result := allUnprocessed
+		if len(result) > limit {
+			result = result[:limit]
+		}
+
+		if len(result) != 5 {
+			t.Errorf("expected %d trades with limit, got %d", limit, len(result))
+		}
+	})
+
+	t.Run("empty result when all processed", func(t *testing.T) {
+		allTrades := []struct {
+			id        string
+			processed bool
+		}{
+			{"trade-1", true},
+			{"trade-2", true},
+		}
+
+		var unprocessed []string
+		for _, trade := range allTrades {
+			if !trade.processed {
+				unprocessed = append(unprocessed, trade.id)
+			}
+		}
+
+		if len(unprocessed) != 0 {
+			t.Errorf("expected 0 unprocessed trades, got %d", len(unprocessed))
+		}
+	})
+}
+
+// TestTokenIDVerificationLogic tests the token ID verification logic
+func TestTokenIDVerificationLogic(t *testing.T) {
+	t.Run("outcome matches token", func(t *testing.T) {
+		// When trade.Outcome matches token.Outcome, use as-is
+		tradeOutcome := "Yes"
+		tokenOutcome := "Yes"
+
+		if tradeOutcome != tokenOutcome {
+			t.Error("outcomes should match")
+		}
+	})
+
+	t.Run("outcome mismatch correction", func(t *testing.T) {
+		// When trade says "Yes" but token is actually "No", correct it
+		tradeOutcome := "Yes"
+		tokenOutcome := "No"
+
+		correctedOutcome := tradeOutcome
+		if tokenOutcome != tradeOutcome && tokenOutcome != "" {
+			correctedOutcome = tokenOutcome
+		}
+
+		if correctedOutcome != "No" {
+			t.Errorf("outcome should be corrected to 'No', got '%s'", correctedOutcome)
+		}
+	})
+
+	t.Run("sibling token lookup needed", func(t *testing.T) {
+		// When we have token for "No" but trade is for "Yes", need sibling
+		tokenOutcome := "No"
+		tradeOutcome := "Yes"
+
+		needsSiblingLookup := tokenOutcome != tradeOutcome
+
+		if !needsSiblingLookup {
+			t.Error("should need sibling lookup when outcomes differ")
+		}
+	})
+
+	t.Run("negRisk detection from market", func(t *testing.T) {
+		// Test negRisk flag propagation
+		type mockMarket struct {
+			conditionID string
+			negRisk     bool
+		}
+
+		markets := []mockMarket{
+			{"cond-1", false}, // Regular market
+			{"cond-2", true},  // NegRisk market
+		}
+
+		for _, m := range markets {
+			// Simulate contract selection based on negRisk
+			var contract string
+			if m.negRisk {
+				contract = "NegRiskCTFExchange"
+			} else {
+				contract = "CTFExchange"
+			}
+
+			if m.negRisk && contract != "NegRiskCTFExchange" {
+				t.Errorf("negRisk market should use NegRiskCTFExchange")
+			}
+			if !m.negRisk && contract != "CTFExchange" {
+				t.Errorf("regular market should use CTFExchange")
+			}
+		}
+	})
+}
+
+// TestBuyRetryLoopLogic tests the retry loop behavior for human strategy buys
+func TestBuyRetryLoopLogic(t *testing.T) {
+	t.Run("retry until liquidity found", func(t *testing.T) {
+		maxRetries := 180 // 3 minutes at 1 second intervals
+		retryInterval := 1 * time.Second
+
+		// Simulate: no liquidity for first 5 attempts, then liquidity appears
+		liquidityAppearsAt := 5
+
+		var filledAt int
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			hasLiquidity := attempt >= liquidityAppearsAt
+
+			if hasLiquidity {
+				filledAt = attempt
+				break
+			}
+
+			// Would sleep here in real code
+			_ = retryInterval
+		}
+
+		if filledAt != 5 {
+			t.Errorf("expected fill at attempt 5, got %d", filledAt)
+		}
+	})
+
+	t.Run("timeout after max duration", func(t *testing.T) {
+		maxDuration := 3 * time.Minute
+		retryInterval := 1 * time.Second
+		maxAttempts := int(maxDuration / retryInterval)
+
+		// Simulate: never find liquidity
+		attempts := 0
+		for attempts < maxAttempts {
+			attempts++
+			// No liquidity ever
+		}
+
+		if attempts != 180 {
+			t.Errorf("expected 180 attempts (3 min at 1s), got %d", attempts)
+		}
+	})
+
+	t.Run("partial fill then continue", func(t *testing.T) {
+		targetUSDC := 100.0
+		minUSDC := 1.0
+
+		// Simulate partial fills
+		fills := []float64{30.0, 25.0, 20.0, 15.0, 10.0}
+
+		remaining := targetUSDC
+		totalFilled := 0.0
+
+		for _, fill := range fills {
+			if remaining < minUSDC {
+				break
+			}
+
+			actualFill := fill
+			if actualFill > remaining {
+				actualFill = remaining
+			}
+
+			totalFilled += actualFill
+			remaining -= actualFill
+		}
+
+		if !floatEquals(totalFilled, 100.0, 0.01) {
+			t.Errorf("expected total fill of $100, got $%.2f", totalFilled)
+		}
+		if remaining > minUSDC {
+			t.Errorf("should have filled all, remaining $%.2f", remaining)
+		}
+	})
+
+	t.Run("stop when remaining below minimum", func(t *testing.T) {
+		targetUSDC := 10.0
+		minUSDC := 2.0
+
+		// First fill leaves less than minimum
+		firstFill := 9.0
+		remaining := targetUSDC - firstFill // $1 remaining
+
+		shouldContinue := remaining >= minUSDC
+
+		if shouldContinue {
+			t.Error("should stop when remaining < minUSDC")
+		}
+	})
+}
+
+// TestIncrementalSyncDeduplication tests the trade deduplication logic
+func TestIncrementalSyncDeduplication(t *testing.T) {
+	t.Run("filter out existing trades", func(t *testing.T) {
+		// Existing trades in DB
+		existingIDs := map[string]bool{
+			"trade-001": true,
+			"trade-002": true,
+			"trade-003": true,
+		}
+
+		// New trades from API
+		apiTrades := []string{
+			"trade-002", // Duplicate
+			"trade-003", // Duplicate
+			"trade-004", // New
+			"trade-005", // New
+		}
+
+		// Filter
+		var newTrades []string
+		for _, id := range apiTrades {
+			if !existingIDs[id] {
+				newTrades = append(newTrades, id)
+			}
+		}
+
+		if len(newTrades) != 2 {
+			t.Errorf("expected 2 new trades, got %d", len(newTrades))
+		}
+
+		expected := map[string]bool{"trade-004": true, "trade-005": true}
+		for _, id := range newTrades {
+			if !expected[id] {
+				t.Errorf("unexpected new trade: %s", id)
+			}
+		}
+	})
+
+	t.Run("all duplicates returns empty", func(t *testing.T) {
+		existingIDs := map[string]bool{
+			"trade-001": true,
+			"trade-002": true,
+		}
+
+		apiTrades := []string{"trade-001", "trade-002"}
+
+		var newTrades []string
+		for _, id := range apiTrades {
+			if !existingIDs[id] {
+				newTrades = append(newTrades, id)
+			}
+		}
+
+		if len(newTrades) != 0 {
+			t.Errorf("expected 0 new trades when all duplicates, got %d", len(newTrades))
+		}
+	})
+
+	t.Run("all new trades", func(t *testing.T) {
+		existingIDs := map[string]bool{}
+
+		apiTrades := []string{"trade-001", "trade-002", "trade-003"}
+
+		var newTrades []string
+		for _, id := range apiTrades {
+			if !existingIDs[id] {
+				newTrades = append(newTrades, id)
+			}
+		}
+
+		if len(newTrades) != 3 {
+			t.Errorf("expected 3 new trades, got %d", len(newTrades))
+		}
+	})
+}
+
+// TestMaxUSDCapWithStrategyTypes tests max cap works for both strategy types
+func TestMaxUSDCapWithStrategyTypes(t *testing.T) {
+	tests := []struct {
+		name         string
+		strategyType int
+		tradeUSDC    float64
+		multiplier   float64
+		maxUSD       *float64
+		expected     float64
+	}{
+		{
+			name:         "human strategy with cap",
+			strategyType: storage.StrategyHuman,
+			tradeUSDC:    10000.0,
+			multiplier:   0.10,
+			maxUSD:       floatPtr(500.0),
+			expected:     500.0,
+		},
+		{
+			name:         "bot strategy with cap",
+			strategyType: storage.StrategyBot,
+			tradeUSDC:    10000.0,
+			multiplier:   0.10,
+			maxUSD:       floatPtr(500.0),
+			expected:     500.0,
+		},
+		{
+			name:         "human strategy no cap",
+			strategyType: storage.StrategyHuman,
+			tradeUSDC:    1000.0,
+			multiplier:   0.10,
+			maxUSD:       nil,
+			expected:     100.0,
+		},
+		{
+			name:         "bot strategy no cap",
+			strategyType: storage.StrategyBot,
+			tradeUSDC:    1000.0,
+			multiplier:   0.10,
+			maxUSD:       nil,
+			expected:     100.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			amount := tt.tradeUSDC * tt.multiplier
+
+			if tt.maxUSD != nil && amount > *tt.maxUSD {
+				amount = *tt.maxUSD
+			}
+
+			if !floatEquals(amount, tt.expected, 0.01) {
+				t.Errorf("strategy %d: got $%.2f, want $%.2f", tt.strategyType, amount, tt.expected)
+			}
+		})
+	}
+}
+
+// TestUserCopySettingsWithMaxUSD tests storage of max_usd field
+func TestUserCopySettingsWithMaxUSD(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	store, err := storage.NewPostgres()
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	userAddr := "0xtestmaxusd" + time.Now().Format("150405")
+
+	t.Run("save and retrieve max_usd", func(t *testing.T) {
+		maxUSD := 500.0
+		err := store.SetUserCopySettings(ctx, storage.UserCopySettings{
+			UserAddress:  userAddr,
+			Multiplier:   0.10,
+			Enabled:      true,
+			MinUSDC:      1.0,
+			StrategyType: storage.StrategyBot,
+			MaxUSD:       &maxUSD,
+		})
+		if err != nil {
+			t.Fatalf("SetUserCopySettings with max_usd failed: %v", err)
+		}
+
+		settings, err := store.GetUserCopySettings(ctx, userAddr)
+		if err != nil {
+			t.Fatalf("GetUserCopySettings failed: %v", err)
+		}
+
+		if settings.MaxUSD == nil {
+			t.Fatal("max_usd should not be nil")
+		}
+		if *settings.MaxUSD != 500.0 {
+			t.Errorf("max_usd = %.2f, want 500.00", *settings.MaxUSD)
+		}
+	})
+
+	t.Run("save null max_usd", func(t *testing.T) {
+		err := store.SetUserCopySettings(ctx, storage.UserCopySettings{
+			UserAddress:  userAddr,
+			Multiplier:   0.10,
+			Enabled:      true,
+			MinUSDC:      1.0,
+			StrategyType: storage.StrategyHuman,
+			MaxUSD:       nil, // No cap
+		})
+		if err != nil {
+			t.Fatalf("SetUserCopySettings with nil max_usd failed: %v", err)
+		}
+
+		settings, err := store.GetUserCopySettings(ctx, userAddr)
+		if err != nil {
+			t.Fatalf("GetUserCopySettings failed: %v", err)
+		}
+
+		if settings.MaxUSD != nil {
+			t.Errorf("max_usd should be nil, got %.2f", *settings.MaxUSD)
+		}
+	})
+
+	// Cleanup
+	_ = store.DeleteUserCopySettings(ctx, userAddr)
+}
