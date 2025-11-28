@@ -32,7 +32,7 @@ func NewPostgres() (*PostgresStore, error) {
 	password := getEnv("POSTGRES_PASSWORD", "polymarket123")
 	dbname := getEnv("POSTGRES_DB", "polymarket")
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=50&pool_min_conns=10",
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=10&pool_min_conns=2",
 		user, password, host, port, dbname)
 
 	// Configure connection pool
@@ -41,9 +41,9 @@ func NewPostgres() (*PostgresStore, error) {
 		return nil, fmt.Errorf("postgres: parse config: %w", err)
 	}
 
-	// Pool settings for high-frequency trading
-	config.MaxConns = 50
-	config.MinConns = 10
+	// Pool settings - reduced for lower memory usage
+	config.MaxConns = 10
+	config.MinConns = 2
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.HealthCheckPeriod = 30 * time.Second
@@ -74,8 +74,8 @@ func NewPostgres() (*PostgresStore, error) {
 		Addr:         fmt.Sprintf("%s:%s", redisHost, redisPort),
 		Password:     redisPassword,
 		DB:           0,
-		PoolSize:     100,
-		MinIdleConns: 10,
+		PoolSize:     10,
+		MinIdleConns: 2,
 		MaxRetries:   3,
 	})
 
