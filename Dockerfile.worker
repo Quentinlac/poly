@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the analytics worker binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./cmd/analytics-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o analytics-worker ./analytics-worker
 
 # Runtime stage
 FROM alpine:3.19
