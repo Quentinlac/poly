@@ -573,20 +573,9 @@ func (e *OrderFilledEvent) ConvertToDataTradeWithInfo(tokenMap map[string]TokenI
 		trade.Title = info.Title
 		trade.Slug = info.Slug
 		trade.Outcome = info.Outcome
-
-		// Normalize to user's outcome perspective (match Polymarket UI)
-		// If user sold "No", show as BUY "Yes" (the position they're getting)
-		// This makes copy trading intuitive - users see the actual position taken
-		if trade.Side == "SELL" && isComplementOutcome(info.Outcome) {
-			trade.Side = "BUY"
-			trade.Outcome = getComplementOutcome(info.Outcome)
-			trade.Price = Numeric(1 - trade.Price.Float64()) // Complement price
-		} else if trade.Side == "BUY" && isComplementOutcome(info.Outcome) {
-			// User bought "No" - normalize to SELL "Yes"
-			trade.Side = "SELL"
-			trade.Outcome = getComplementOutcome(info.Outcome)
-			trade.Price = Numeric(1 - trade.Price.Float64())
-		}
+		// NOTE: Do NOT normalize outcomes (e.g., SELL No -> BUY Yes)
+		// Copy trading needs the ACTUAL trade data to copy correctly.
+		// A user selling No tokens is NOT the same as buying Yes tokens.
 	}
 
 	return trade
