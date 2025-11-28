@@ -47,11 +47,12 @@ type CopyTraderMetrics struct {
 
 // CopyTraderConfig holds configuration for copy trading
 type CopyTraderConfig struct {
-	Enabled          bool
-	Multiplier       float64 // 0.05 = 1/20th
-	MinOrderUSDC     float64 // Minimum order size
-	MaxPriceSlippage float64 // Max price above trader's price (0.20 = 20%)
-	CheckIntervalSec int     // Poll frequency
+	Enabled            bool
+	Multiplier         float64 // 0.05 = 1/20th
+	MinOrderUSDC       float64 // Minimum order size
+	MaxPriceSlippage   float64 // Max price above trader's price (0.20 = 20%)
+	CheckIntervalSec   int     // Poll frequency
+	EnableBlockchainWS bool    // Enable Polygon blockchain WebSocket for ~1s detection (heavy)
 }
 
 // CopyTrade represents a copy trade record
@@ -183,12 +184,17 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	ct.clobClient.StartOrderBookCaching()
 
 	// Start real-time detector for faster trade detection
-	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade)
+	// EnableBlockchainWS should only be true in the worker (heavy processing)
+	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade, ct.config.EnableBlockchainWS)
 	if err := ct.detector.Start(ctx); err != nil {
 		log.Printf("[CopyTrader] Warning: realtime detector failed to start: %v", err)
 		// Continue without it - we'll fall back to polling
 	} else {
-		log.Printf("[CopyTrader] Realtime detector started (200ms polling)")
+		if ct.config.EnableBlockchainWS {
+			log.Printf("[CopyTrader] Realtime detector started (blockchain WS + 200ms polling)")
+		} else {
+			log.Printf("[CopyTrader] Realtime detector started (200ms polling only)")
+		}
 	}
 
 	ct.running = true

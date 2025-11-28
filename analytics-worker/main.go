@@ -72,11 +72,12 @@ func main() {
 	if copyTraderEnabled == "true" || copyTraderEnabled == "1" {
 		// Configure copy trader
 		copyConfig := syncer.CopyTraderConfig{
-			Enabled:          true,
-			Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
-			MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
-			MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
-			CheckIntervalSec: 2,
+			Enabled:            true,
+			Multiplier:         getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
+			MinOrderUSDC:       getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+			MaxPriceSlippage:   getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
+			CheckIntervalSec:   2,
+			EnableBlockchainWS: true, // Worker uses blockchain WebSocket for ~1s detection
 		}
 
 		log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",

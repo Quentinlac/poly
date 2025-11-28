@@ -55,12 +55,15 @@ func main() {
 	log.Println("[main] Incremental worker started (2-second polling for tracked users)")
 
 	// Start copy trader (copies trades from tracked users to our account)
+	// Note: EnableBlockchainWS is false here to keep the API app fast
+	// The worker (analytics-worker) handles blockchain monitoring for ~1s detection
 	copyConfig := syncer.CopyTraderConfig{
-		Enabled:          true,
-		Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
-		MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
-		MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
-		CheckIntervalSec: 1,                                             // 1 second for faster copy execution
+		Enabled:            true,
+		Multiplier:         getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
+		MinOrderUSDC:       getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+		MaxPriceSlippage:   getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
+		CheckIntervalSec:   1,                                             // 1 second for faster copy execution
+		EnableBlockchainWS: false,                                         // API uses polling only (30-80s), worker does blockchain WS
 	}
 
 	log.Printf("[main] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",

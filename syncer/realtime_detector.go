@@ -62,7 +62,8 @@ type DetectorMetrics struct {
 }
 
 // NewRealtimeDetector creates a new real-time trade detector
-func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail)) *RealtimeDetector {
+// enableBlockchainWS: if true, uses Polygon WebSocket for ~1s detection (heavy, use in worker only)
+func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
 	d := &RealtimeDetector{
 		apiClient:     apiClient,
 		store:         store,
@@ -75,7 +76,13 @@ func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, on
 	}
 
 	// Create Polygon WebSocket client for real-time blockchain monitoring
-	d.polygonWS = api.NewPolygonWSClient(d.handleBlockchainTrade)
+	// Only enable in worker to avoid heavy processing in main API app
+	if enableBlockchainWS {
+		d.polygonWS = api.NewPolygonWSClient(d.handleBlockchainTrade)
+		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (~1s detection)")
+	} else {
+		log.Printf("[RealtimeDetector] Blockchain WebSocket DISABLED (using API polling only)")
+	}
 
 	return d
 }
