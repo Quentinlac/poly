@@ -49,6 +49,9 @@ type DataStore interface {
 
 	// Cache invalidation
 	InvalidateUserListCache(ctx context.Context) error
+
+	// Redis operations (for metrics and caching)
+	GetRedisValue(ctx context.Context, key string) (string, error)
 }
 
 // Ensure both implementations satisfy the interface

@@ -101,6 +101,15 @@ func main() {
 	} else {
 		defer store.Close()
 
+		// SPEED OPTIMIZATION: Pre-warm token cache at startup
+		log.Println("[Worker] Pre-warming token cache...")
+		tokenCount, err := store.PreWarmTokenCache(ctx)
+		if err != nil {
+			log.Printf("[Worker] Warning: Token cache pre-warm failed: %v", err)
+		} else {
+			log.Printf("[Worker] Token cache pre-warmed with %d tokens", tokenCount)
+		}
+
 		// Initialize API client
 		baseURL := os.Getenv("POLYMARKET_API_URL")
 		if baseURL == "" {
@@ -117,31 +126,38 @@ func main() {
 		defer incrementalWorker.Stop()
 		log.Println("[Worker] Incremental sync started (2-second polling for tracked users)")
 
-		// Configure copy trader
-		copyConfig := syncer.CopyTraderConfig{
-			Enabled:          true,
-			Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
-			MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
-			MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
-			CheckIntervalSec: 2,
-		}
-
-		log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",
-			copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.MaxPriceSlippage*100, copyConfig.CheckIntervalSec)
-
-		// Create copy trader
-		copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
-		if err != nil {
-			log.Printf("[Worker] Warning: Failed to create copy trader: %v", err)
-			log.Println("[Worker] Copy trader will be disabled")
-		} else {
-			// Start copy trader
-			if err := copyTrader.Start(ctx); err != nil {
-				log.Printf("[Worker] Warning: Failed to start copy trader: %v", err)
-			} else {
-				defer copyTrader.Stop()
-				log.Println("[Worker] Copy trader started successfully")
+		// Check if copy trader is enabled (disabled in worker by default to avoid duplicates)
+		copyTraderEnabled := os.Getenv("COPY_TRADER_ENABLED")
+		if copyTraderEnabled == "true" || copyTraderEnabled == "1" {
+			// Configure copy trader
+			copyConfig := syncer.CopyTraderConfig{
+				Enabled:          true,
+				Multiplier:       getEnvFloat("COPY_TRADER_MULTIPLIER", 0.05),
+				MinOrderUSDC:     getEnvFloat("COPY_TRADER_MIN_USDC", 1.0),
+				MaxPriceSlippage: getEnvFloat("COPY_TRADER_MAX_SLIPPAGE", 0.20), // 20% max above trader's price
+				CheckIntervalSec: 2,
 			}
+
+			log.Printf("[Worker] Copy trader config: multiplier=%.2f, minOrder=$%.2f, maxSlippage=%.0f%%, interval=%ds",
+				copyConfig.Multiplier, copyConfig.MinOrderUSDC, copyConfig.MaxPriceSlippage*100, copyConfig.CheckIntervalSec)
+
+			// Create copy trader
+			copyTrader, err := syncer.NewCopyTrader(store, apiClient, copyConfig)
+			if err != nil {
+				log.Printf("[Worker] Warning: Failed to create copy trader: %v", err)
+				log.Println("[Worker] Copy trader will be disabled")
+			} else {
+				// Start copy trader
+				if err := copyTrader.Start(ctx); err != nil {
+					log.Printf("[Worker] Warning: Failed to start copy trader: %v", err)
+				} else {
+					defer copyTrader.Stop()
+					log.Println("[Worker] Copy trader started successfully")
+				}
+			}
+		} else {
+			log.Println("[Worker] Copy trader DISABLED (COPY_TRADER_ENABLED != true)")
+			log.Println("[Worker] This is correct for analytics-worker to avoid duplicate orders")
 		}
 	}
 

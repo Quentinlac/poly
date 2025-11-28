@@ -51,8 +51,10 @@ func NewIncrementalWorker(apiClient *api.Client, store storage.DataStore, cfg *c
 
 // Start launches the incremental polling loop.
 func (w *IncrementalWorker) Start() {
-	interval := 2 * time.Second // 2-second interval for faster trade detection
-	log.Printf("[incremental] starting with %v interval", interval)
+	// SPEED OPTIMIZATION: Use 500ms interval for near real-time trade detection
+	// This means we check for new trades 2x per second
+	interval := 500 * time.Millisecond
+	log.Printf("[incremental] starting with %v interval (fast mode)", interval)
 
 	w.wg.Add(1)
 	go func() {
@@ -71,8 +73,8 @@ func (w *IncrementalWorker) Start() {
 			case <-w.stop:
 				return
 			case <-ticker.C:
-				// Use 30 second timeout - Goldsky subgraph can be slow from cloud environments
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				// Use 15 second timeout - we need fast responses
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				if err := w.tick(ctx); err != nil {
 					log.Printf("[incremental] tick error: %v", err)
 				}
@@ -207,9 +209,17 @@ func (w *IncrementalWorker) syncUser(ctx context.Context, user models.User) erro
 		return nil
 	}
 
-	// Save new trades - do NOT mark as processed so copy trader can pick them up
-	if err := w.store.SaveTrades(ctx, newTradeDetails, false); err != nil {
-		return fmt.Errorf("save trades: %w", err)
+	// Save new trades using batch operation for speed
+	// Do NOT mark as processed so copy trader can pick them up
+	if pgStore, ok := w.store.(*storage.PostgresStore); ok {
+		if err := pgStore.SaveTradesBatch(ctx, newTradeDetails, false); err != nil {
+			return fmt.Errorf("save trades batch: %w", err)
+		}
+	} else {
+		// Fallback to regular save
+		if err := w.store.SaveTrades(ctx, newTradeDetails, false); err != nil {
+			return fmt.Errorf("save trades: %w", err)
+		}
 	}
 
 	// Invalidate analysis cache since trades changed

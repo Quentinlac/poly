@@ -121,6 +121,7 @@ func main() {
 		api.POST("/import-top-users", h.ImportTopUsers)
 		api.GET("/import-status/:id", h.GetImportStatus)
 		api.GET("/analytics", h.GetAnalyticsList)
+		api.GET("/copy-trade-metrics", h.GetCopyTradeMetrics) // Real-time copy trading performance metrics
 	}
 
 	// User-specific routes with ID validation

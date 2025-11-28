@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"polymarket-analyzer/api"
@@ -22,6 +23,26 @@ type CopyTrader struct {
 	running    bool
 	stopCh     chan struct{}
 	myAddress  string // Our wallet address for position lookups
+
+	// Real-time detector for faster trade detection
+	detector *RealtimeDetector
+
+	// Metrics for latency tracking
+	metrics   *CopyTraderMetrics
+	metricsMu sync.RWMutex
+}
+
+// CopyTraderMetrics tracks performance metrics
+type CopyTraderMetrics struct {
+	TradesCopied        int64
+	TradesSkipped       int64
+	TradesFailed        int64
+	AvgCopyLatency      time.Duration // Time from original trade to our execution
+	FastestCopy         time.Duration
+	SlowestCopy         time.Duration
+	TotalUSDCSpent      float64
+	TotalUSDCReceived   float64
+	LastCopyTime        time.Time
 }
 
 // CopyTraderConfig holds configuration for copy trading
@@ -132,14 +153,17 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 		myAddress = auth.GetAddress().Hex()
 	}
 
-	return &CopyTrader{
+	ct := &CopyTrader{
 		store:      store,
 		client:     client,
 		clobClient: clobClient,
 		config:     config,
 		stopCh:     make(chan struct{}),
 		myAddress:  myAddress,
-	}, nil
+		metrics:    &CopyTraderMetrics{},
+	}
+
+	return ct, nil
 }
 
 // Start begins monitoring for trades to copy
@@ -158,6 +182,15 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	// Start order book caching for faster execution
 	ct.clobClient.StartOrderBookCaching()
 
+	// Start real-time detector for faster trade detection
+	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade)
+	if err := ct.detector.Start(ctx); err != nil {
+		log.Printf("[CopyTrader] Warning: realtime detector failed to start: %v", err)
+		// Continue without it - we'll fall back to polling
+	} else {
+		log.Printf("[CopyTrader] Realtime detector started (200ms polling)")
+	}
+
 	ct.running = true
 	go ct.run(ctx)
 
@@ -167,13 +200,73 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	return nil
 }
 
+// handleRealtimeTrade is called when the realtime detector finds a new trade
+func (ct *CopyTrader) handleRealtimeTrade(trade models.TradeDetail) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+
+	if err := ct.processTrade(ctx, trade); err != nil {
+		log.Printf("[CopyTrader] Realtime trade processing failed: %v", err)
+		ct.metricsMu.Lock()
+		ct.metrics.TradesFailed++
+		ct.metricsMu.Unlock()
+		return
+	}
+
+	// Mark as processed
+	ct.store.MarkTradeProcessed(ctx, trade.ID)
+
+	// Track latency
+	copyLatency := time.Since(startTime)
+	totalLatency := time.Since(trade.Timestamp)
+
+	ct.metricsMu.Lock()
+	ct.metrics.TradesCopied++
+	ct.metrics.LastCopyTime = time.Now()
+	if ct.metrics.FastestCopy == 0 || copyLatency < ct.metrics.FastestCopy {
+		ct.metrics.FastestCopy = copyLatency
+	}
+	if copyLatency > ct.metrics.SlowestCopy {
+		ct.metrics.SlowestCopy = copyLatency
+	}
+	if ct.metrics.AvgCopyLatency == 0 {
+		ct.metrics.AvgCopyLatency = copyLatency
+	} else {
+		ct.metrics.AvgCopyLatency = (ct.metrics.AvgCopyLatency + copyLatency) / 2
+	}
+	ct.metricsMu.Unlock()
+
+	log.Printf("[CopyTrader] Trade copied in %s (total latency from original: %s)",
+		copyLatency.Round(time.Millisecond), totalLatency.Round(time.Millisecond))
+}
+
+// GetMetrics returns current performance metrics
+func (ct *CopyTrader) GetMetrics() CopyTraderMetrics {
+	ct.metricsMu.RLock()
+	defer ct.metricsMu.RUnlock()
+	return *ct.metrics
+}
+
 // Stop halts the copy trader
 func (ct *CopyTrader) Stop() {
 	if ct.running {
 		close(ct.stopCh)
 		ct.clobClient.StopOrderBookCaching()
+
+		// Stop realtime detector
+		if ct.detector != nil {
+			ct.detector.Stop()
+		}
+
 		ct.running = false
-		log.Printf("[CopyTrader] Stopped")
+
+		// Log final metrics
+		metrics := ct.GetMetrics()
+		log.Printf("[CopyTrader] Stopped - Metrics: copied=%d, skipped=%d, failed=%d, avgLatency=%s",
+			metrics.TradesCopied, metrics.TradesSkipped, metrics.TradesFailed,
+			metrics.AvgCopyLatency.Round(time.Millisecond))
 	}
 }
 
@@ -196,8 +289,11 @@ func (ct *CopyTrader) run(ctx context.Context) {
 }
 
 func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
-	// Get unprocessed trades from user_trades
-	trades, err := ct.store.GetUnprocessedTrades(ctx, 100)
+	// Get followed user addresses for filtered query
+	followedUsers, _ := ct.store.GetFollowedUserAddresses(ctx)
+
+	// Get unprocessed trades - use batch query with user filter
+	trades, err := ct.store.GetUnprocessedTradesBatch(ctx, 100, followedUsers)
 	if err != nil {
 		return fmt.Errorf("failed to get unprocessed trades: %w", err)
 	}
@@ -206,16 +302,48 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[CopyTrader] Processing %d new trades", len(trades))
+	log.Printf("[CopyTrader] Processing %d new trades in parallel", len(trades))
 
+	// Process trades in parallel with worker pool
+	const maxWorkers = 5
+	tradeChan := make(chan models.TradeDetail, len(trades))
+	processedIDs := make(chan string, len(trades))
+	var wg sync.WaitGroup
+
+	// Start workers
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for trade := range tradeChan {
+				if err := ct.processTrade(ctx, trade); err != nil {
+					log.Printf("[CopyTrader] Error processing trade %s: %v", trade.ID, err)
+				}
+				processedIDs <- trade.ID
+			}
+		}()
+	}
+
+	// Send trades to workers
 	for _, trade := range trades {
-		if err := ct.processTrade(ctx, trade); err != nil {
-			log.Printf("[CopyTrader] Error processing trade %s: %v", trade.ID, err)
-		}
+		tradeChan <- trade
+	}
+	close(tradeChan)
 
-		// Mark as processed regardless of success/failure
-		if err := ct.store.MarkTradeProcessed(ctx, trade.ID); err != nil {
-			log.Printf("[CopyTrader] Error marking trade processed %s: %v", trade.ID, err)
+	// Wait for all workers to finish
+	wg.Wait()
+	close(processedIDs)
+
+	// Collect processed IDs and batch mark as processed
+	var ids []string
+	for id := range processedIDs {
+		ids = append(ids, id)
+	}
+
+	// Batch mark as processed (much faster than one at a time)
+	if len(ids) > 0 {
+		if err := ct.store.MarkTradesProcessedBatch(ctx, ids); err != nil {
+			log.Printf("[CopyTrader] Error batch marking trades processed: %v", err)
 		}
 	}
 

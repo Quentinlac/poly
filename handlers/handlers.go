@@ -505,6 +505,17 @@ func parsePercentPointer(val string) *float64 {
 	return ptr
 }
 
+// GetCopyTradeMetrics returns real-time copy trading performance metrics
+func (h *Handler) GetCopyTradeMetrics(c *gin.Context) {
+	metrics, err := h.service.GetCopyTradeMetrics(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get metrics: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, metrics)
+}
+
 // GetAnalyticsList returns filtered and sorted user analytics data
 func (h *Handler) GetAnalyticsList(c *gin.Context) {
 	filter := storage.UserAnalyticsFilter{

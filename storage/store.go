@@ -993,3 +993,8 @@ func (s *Store) InvalidateUserListCache(ctx context.Context) error {
 	// SQLite doesn't use Redis caching, so there's nothing to invalidate
 	return nil
 }
+
+// GetRedisValue returns empty for SQLite as it doesn't have Redis
+func (s *Store) GetRedisValue(ctx context.Context, key string) (string, error) {
+	return "", fmt.Errorf("redis not available in SQLite store")
+}

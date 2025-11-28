@@ -10,6 +10,7 @@ import (
 	"polymarket-analyzer/api"
 	"polymarket-analyzer/config"
 	"polymarket-analyzer/models"
+	"polymarket-analyzer/utils"
 )
 
 type marketMeta struct {
@@ -389,9 +390,7 @@ func detectRedFlags(user models.User) []string {
 	return flags
 }
 
+// shortAddress delegates to utils.ShortAddress
 func shortAddress(addr string) string {
-	if len(addr) <= 10 {
-		return addr
-	}
-	return addr[:6] + "…" + addr[len(addr)-4:]
+	return utils.ShortAddress(addr)
 }

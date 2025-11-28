@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"polymarket-analyzer/config"
 	"polymarket-analyzer/models"
 	"polymarket-analyzer/storage"
+	"polymarket-analyzer/utils"
 )
 
 // Service handles business logic and coordinates between API, storage, and analyzer.
@@ -742,6 +744,117 @@ func (s *Service) PrePopulateTokens(ctx context.Context) (int, error) {
 	return len(toCache), nil
 }
 
+// CopyTradeMetricsResponse represents the metrics response
+type CopyTradeMetricsResponse struct {
+	CopyTrader struct {
+		TradesCopied   int64   `json:"trades_copied"`
+		TradesSkipped  int64   `json:"trades_skipped"`
+		TradesFailed   int64   `json:"trades_failed"`
+		AvgLatencyMs   int64   `json:"avg_latency_ms"`
+		FastestCopyMs  int64   `json:"fastest_copy_ms"`
+		SlowestCopyMs  int64   `json:"slowest_copy_ms"`
+		TotalUSDCSpent float64 `json:"total_usdc_spent"`
+		LastCopyTime   string  `json:"last_copy_time"`
+	} `json:"copy_trader"`
+	Detector struct {
+		TradesDetected    int64  `json:"trades_detected"`
+		AvgDetectionMs    int64  `json:"avg_detection_ms"`
+		FastestDetectionMs int64 `json:"fastest_detection_ms"`
+		SlowestDetectionMs int64 `json:"slowest_detection_ms"`
+		APIPolls          int64  `json:"api_polls"`
+		WebSocketEvents   int64  `json:"websocket_events"`
+		LastDetectionTime string `json:"last_detection_time"`
+	} `json:"detector"`
+	System struct {
+		Status    string `json:"status"`
+		UpdatedAt string `json:"updated_at"`
+	} `json:"system"`
+}
+
+// GetCopyTradeMetrics retrieves copy trading performance metrics from Redis
+func (s *Service) GetCopyTradeMetrics(ctx context.Context) (*CopyTradeMetricsResponse, error) {
+	// Get metrics from Redis
+	var metricsData map[string]interface{}
+	result, err := s.store.GetRedisValue(ctx, "copytrader:metrics")
+	if err != nil {
+		// Return empty metrics if not found
+		return &CopyTradeMetricsResponse{
+			System: struct {
+				Status    string `json:"status"`
+				UpdatedAt string `json:"updated_at"`
+			}{
+				Status:    "no_data",
+				UpdatedAt: time.Now().Format(time.RFC3339),
+			},
+		}, nil
+	}
+
+	if err := json.Unmarshal([]byte(result), &metricsData); err != nil {
+		return nil, fmt.Errorf("parse metrics: %w", err)
+	}
+
+	response := &CopyTradeMetricsResponse{}
+	response.System.Status = "running"
+	if updatedAt, ok := metricsData["updated_at"].(string); ok {
+		response.System.UpdatedAt = updatedAt
+	}
+
+	// Parse copy trader metrics
+	if ct, ok := metricsData["copy_trader"].(map[string]interface{}); ok {
+		if v, ok := ct["TradesCopied"].(float64); ok {
+			response.CopyTrader.TradesCopied = int64(v)
+		}
+		if v, ok := ct["TradesSkipped"].(float64); ok {
+			response.CopyTrader.TradesSkipped = int64(v)
+		}
+		if v, ok := ct["TradesFailed"].(float64); ok {
+			response.CopyTrader.TradesFailed = int64(v)
+		}
+		if v, ok := ct["AvgCopyLatency"].(float64); ok {
+			response.CopyTrader.AvgLatencyMs = int64(v / 1e6) // ns to ms
+		}
+		if v, ok := ct["FastestCopy"].(float64); ok {
+			response.CopyTrader.FastestCopyMs = int64(v / 1e6)
+		}
+		if v, ok := ct["SlowestCopy"].(float64); ok {
+			response.CopyTrader.SlowestCopyMs = int64(v / 1e6)
+		}
+		if v, ok := ct["TotalUSDCSpent"].(float64); ok {
+			response.CopyTrader.TotalUSDCSpent = v
+		}
+		if v, ok := ct["LastCopyTime"].(string); ok {
+			response.CopyTrader.LastCopyTime = v
+		}
+	}
+
+	// Parse detector metrics
+	if dt, ok := metricsData["detector"].(map[string]interface{}); ok {
+		if v, ok := dt["TradesDetected"].(float64); ok {
+			response.Detector.TradesDetected = int64(v)
+		}
+		if v, ok := dt["AvgDetectionLatency"].(float64); ok {
+			response.Detector.AvgDetectionMs = int64(v / 1e6)
+		}
+		if v, ok := dt["FastestDetection"].(float64); ok {
+			response.Detector.FastestDetectionMs = int64(v / 1e6)
+		}
+		if v, ok := dt["SlowestDetection"].(float64); ok {
+			response.Detector.SlowestDetectionMs = int64(v / 1e6)
+		}
+		if v, ok := dt["APIPolls"].(float64); ok {
+			response.Detector.APIPolls = int64(v)
+		}
+		if v, ok := dt["WebSocketEvents"].(float64); ok {
+			response.Detector.WebSocketEvents = int64(v)
+		}
+		if v, ok := dt["LastDetectionTime"].(string); ok {
+			response.Detector.LastDetectionTime = v
+		}
+	}
+
+	return response, nil
+}
+
 // importSingleUser handles the import logic for a single user (extracted for parallel execution)
 func (s *Service) importSingleUser(ctx context.Context, addr string) ImportUserResult {
 	result := ImportUserResult{Address: addr}
@@ -1021,11 +1134,9 @@ func detectUserRedFlags(user models.User) []string {
 	return flags
 }
 
+// shortAddress is now provided by utils.ShortAddress
 func shortAddress(addr string) string {
-	if len(addr) <= 10 {
-		return addr
-	}
-	return addr[:6] + "…" + addr[len(addr)-4:]
+	return utils.ShortAddress(addr)
 }
 
 func (s *Service) cachedRankings(key string) ([]models.UserRanking, bool) {
@@ -1198,8 +1309,9 @@ func valOrEmpty[T any](ptr *T) interface{} {
 	return *ptr
 }
 
+// normalizeUserID is now provided by utils.NormalizeUserID
 func normalizeUserID(id string) string {
-	return strings.TrimSpace(strings.ToLower(id))
+	return utils.NormalizeUserID(id)
 }
 
 func (s *Service) toTradeDetail(tr api.DataTrade) models.TradeDetail {
