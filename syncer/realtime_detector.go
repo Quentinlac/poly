@@ -245,6 +245,11 @@ func (d *RealtimeDetector) checkUserTrades(ctx context.Context, userAddr string)
 		log.Printf("[RealtimeDetector] New trade detected: user=%s side=%s price=%.4f latency=%s",
 			utils.ShortAddress(userAddr), trade.Side, trade.Price.Float64(), latency.Round(time.Millisecond))
 
+		// Save to user_trades for historical record
+		if err := d.store.SaveTrades(ctx, []models.TradeDetail{detail}, false); err != nil {
+			log.Printf("[RealtimeDetector] Warning: failed to save trade to user_trades: %v", err)
+		}
+
 		// Mark as detected (to avoid duplicates)
 		d.store.CacheTokenID(ctx, detail.ID, "processed", "true", false)
 
