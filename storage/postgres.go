@@ -1708,6 +1708,11 @@ type CopyTradeLogEntry struct {
 	DebugLog map[string]interface{}
 	// Timing breakdown - duration of each step in milliseconds
 	TimingBreakdown map[string]interface{}
+	// Full timing timestamps for latency analysis
+	DetectedAt           *time.Time // When RealtimeDetector first saw the trade
+	ProcessingStartedAt  *time.Time // When executeBotBuy/Sell started
+	OrderPlacedAt        *time.Time // When we sent order to Polymarket
+	OrderConfirmedAt     *time.Time // When Polymarket confirmed (follower_time)
 }
 
 // SaveCopyTradeLog saves a detailed copy trade log entry
@@ -1736,13 +1741,15 @@ func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLog
 			following_address, following_trade_id, following_time, following_shares, following_price,
 			follower_time, follower_shares, follower_price,
 			market_title, outcome, token_id,
-			status, failed_reason, strategy_type, debug_log, timing_breakdown
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			status, failed_reason, strategy_type, debug_log, timing_breakdown,
+			detected_at, processing_started_at, order_placed_at, order_confirmed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`,
 		entry.FollowingAddress, entry.FollowingTradeID, entry.FollowingTime, entry.FollowingShares, entry.FollowingPrice,
 		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice,
 		entry.MarketTitle, entry.Outcome, entry.TokenID,
 		entry.Status, entry.FailedReason, entry.StrategyType, debugLogJSON, timingJSON,
+		entry.DetectedAt, entry.ProcessingStartedAt, entry.OrderPlacedAt, entry.OrderConfirmedAt,
 	)
 	return err
 }

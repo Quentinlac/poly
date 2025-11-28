@@ -71,6 +71,7 @@ type TradeDetail struct {
 	Pseudonym       string    `json:"pseudonym"`
 	Timestamp       time.Time `json:"timestamp"`
 	InsertedAt      time.Time `json:"inserted_at"`
+	DetectedAt      time.Time `json:"detected_at,omitempty"` // When our system first detected this trade
 }
 
 // Market represents a Polymarket market

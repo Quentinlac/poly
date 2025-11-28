@@ -212,8 +212,12 @@ func (d *RealtimeDetector) checkUserTrades(ctx context.Context, userAddr string)
 
 	// Process new trades
 	for _, trade := range trades {
+		// Capture detection time immediately
+		detectedAt := time.Now()
+
 		// Convert to TradeDetail
 		detail := d.convertToTradeDetail(trade, userAddr)
+		detail.DetectedAt = detectedAt // Set when we detected this trade
 
 		// Check if we've already processed this trade
 		exists, _, _ := d.store.GetTokenIDFromCache(ctx, detail.ID, "processed")
