@@ -54,25 +54,6 @@ func main() {
 
 	log.Println("[main] Incremental worker started (2-second polling for tracked users)")
 
-	// Start global trade monitor for platform-wide monitoring
-	subgraphClient := api.NewSubgraphClient()
-
-	// Create The Graph client for redemptions (optional, requires API key)
-	var theGraphClient *api.TheGraphClient
-	theGraphAPIKey := os.Getenv("THEGRAPH_API_KEY")
-	if theGraphAPIKey != "" {
-		theGraphClient = api.NewTheGraphClient(theGraphAPIKey)
-		log.Println("[main] The Graph client configured for redemptions (5-minute polling)")
-	} else {
-		log.Println("[main] THEGRAPH_API_KEY not set - redemptions disabled")
-	}
-
-	globalMonitor := syncer.NewGlobalTradeMonitor(subgraphClient, theGraphClient, store)
-	globalMonitor.Start()
-	defer globalMonitor.Stop()
-
-	log.Println("[main] Global trade monitor started (trades: 2s, redemptions: 5min)")
-
 	// Start copy trader (copies trades from tracked users to our account)
 	copyConfig := syncer.CopyTraderConfig{
 		Enabled:          true,
@@ -139,12 +120,8 @@ func main() {
 		api.GET("/users/imported", h.GetAllImportedUsers)
 		api.POST("/import-top-users", h.ImportTopUsers)
 		api.GET("/import-status/:id", h.GetImportStatus)
-		api.GET("/privileged", h.GetPrivilegedKnowledgeAPI)
 		api.GET("/analytics", h.GetAnalyticsList)
 	}
-
-	// Privileged knowledge analysis page
-	r.GET("/privileged", h.PrivilegedKnowledgePage)
 
 	// User-specific routes with ID validation
 	userRoutes := r.Group("/api/users/:id")

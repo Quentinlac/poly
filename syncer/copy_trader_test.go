@@ -1233,21 +1233,6 @@ func TestUserCopySettingsStorage(t *testing.T) {
 		if settings.Enabled != false {
 			t.Error("expected enabled = false")
 		}
-
-		// Delete settings
-		err = store.DeleteUserCopySettings(ctx, userAddr)
-		if err != nil {
-			t.Fatalf("DeleteUserCopySettings failed: %v", err)
-		}
-
-		// Verify deleted
-		settings, err = store.GetUserCopySettings(ctx, userAddr)
-		if err != nil {
-			t.Fatalf("GetUserCopySettings after delete failed: %v", err)
-		}
-		if settings != nil {
-			t.Error("Expected nil after delete")
-		}
 	})
 }
 
@@ -2002,7 +1987,4 @@ func TestUserCopySettingsWithMaxUSD(t *testing.T) {
 			t.Errorf("max_usd should be nil, got %.2f", *settings.MaxUSD)
 		}
 	})
-
-	// Cleanup
-	_ = store.DeleteUserCopySettings(ctx, userAddr)
 }

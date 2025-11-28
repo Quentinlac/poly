@@ -21,7 +21,6 @@ type DataStore interface {
 	// Trade operations
 	ReplaceTrades(ctx context.Context, trades map[string][]models.TradeDetail) error
 	SaveTrades(ctx context.Context, trades []models.TradeDetail, markProcessed bool) error
-	SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error
 	ListUserTrades(ctx context.Context, userID string, limit int) ([]models.TradeDetail, error)
 	ListUserTradeIDs(ctx context.Context, userID string, limit int) ([]string, error) // Lightweight - only IDs
 	GetUserTradeCount(ctx context.Context, userID string) (int, error)
@@ -44,8 +43,6 @@ type DataStore interface {
 	// Copy trading settings
 	GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error)
 	SetUserCopySettings(ctx context.Context, settings UserCopySettings) error
-	GetAllUserCopySettings(ctx context.Context) ([]UserCopySettings, error)
-	DeleteUserCopySettings(ctx context.Context, userAddress string) error
 
 	// Analytics
 	GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error)

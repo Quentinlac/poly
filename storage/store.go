@@ -223,56 +223,6 @@ func (s *Store) SaveTrades(ctx context.Context, trades []models.TradeDetail, mar
 	return tx.Commit()
 }
 
-// SaveGlobalTrades saves trades to the global_trades table for platform-wide monitoring.
-// Unlike SaveTrades, this doesn't require users to exist in the users table.
-func (s *Store) SaveGlobalTrades(ctx context.Context, trades []models.TradeDetail) error {
-	if len(trades) == 0 {
-		return nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO global_trades (
-            id, user_address, asset, type, side, size, usdc_size, price, outcome,
-            timestamp, title, slug, transaction_hash, inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO NOTHING
-    `)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, trade := range trades {
-		if _, err := stmt.ExecContext(
-			ctx,
-			trade.ID,
-			trade.UserID,
-			trade.MarketID,
-			trade.Type,
-			trade.Side,
-			trade.Size,
-			trade.UsdcSize,
-			trade.Price,
-			trade.Outcome,
-			timeString(trade.Timestamp),
-			trade.Title,
-			trade.Slug,
-			trade.TransactionHash,
-			timeString(time.Now()),
-		); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
 // ListUserTrades returns the most recent trades for a user.
 func (s *Store) ListUserTrades(ctx context.Context, userID string, limit int) ([]models.TradeDetail, error) {
 	if limit <= 0 {
@@ -1029,14 +979,6 @@ func (s *Store) GetUserCopySettings(ctx context.Context, userAddress string) (*U
 }
 
 func (s *Store) SetUserCopySettings(ctx context.Context, settings UserCopySettings) error {
-	return nil
-}
-
-func (s *Store) GetAllUserCopySettings(ctx context.Context) ([]UserCopySettings, error) {
-	return nil, nil
-}
-
-func (s *Store) DeleteUserCopySettings(ctx context.Context, userAddress string) error {
 	return nil
 }
 

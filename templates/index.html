@@ -791,7 +791,6 @@
         <nav class="nav">
             <button class="nav-item active" onclick="switchTab('analytics')">Analytics</button>
             <button class="nav-item" onclick="switchTab('myusers')">My Users</button>
-            <button class="nav-item highlight" onclick="switchTab('privileged')">Privileged</button>
         </nav>
 
         <!-- Main Content -->
@@ -1017,92 +1016,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- PRIVILEGED TAB -->
-            <div id="tab-privileged" class="tab-content">
-                <!-- Time/Threshold Selector -->
-                <div class="card">
-                    <div class="card-header">
-                        <span class="card-title">Detection Parameters</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="priv-tabs">
-                            <div class="priv-tab-group">
-                                <span class="filter-label">5 min</span>
-                                <div class="priv-tab-buttons">
-                                    <button class="priv-tab active" data-window="5" data-threshold="30" onclick="loadPrivileged(5, 30)">+30%</button>
-                                    <button class="priv-tab" data-window="5" data-threshold="50" onclick="loadPrivileged(5, 50)">+50%</button>
-                                    <button class="priv-tab" data-window="5" data-threshold="80" onclick="loadPrivileged(5, 80)">+80%</button>
-                                </div>
-                            </div>
-                            <div class="priv-tab-group">
-                                <span class="filter-label">10 min</span>
-                                <div class="priv-tab-buttons">
-                                    <button class="priv-tab" data-window="10" data-threshold="30" onclick="loadPrivileged(10, 30)">+30%</button>
-                                    <button class="priv-tab" data-window="10" data-threshold="50" onclick="loadPrivileged(10, 50)">+50%</button>
-                                    <button class="priv-tab" data-window="10" data-threshold="80" onclick="loadPrivileged(10, 80)">+80%</button>
-                                </div>
-                            </div>
-                            <div class="priv-tab-group">
-                                <span class="filter-label">30 min</span>
-                                <div class="priv-tab-buttons">
-                                    <button class="priv-tab" data-window="30" data-threshold="30" onclick="loadPrivileged(30, 30)">+30%</button>
-                                    <button class="priv-tab" data-window="30" data-threshold="50" onclick="loadPrivileged(30, 50)">+50%</button>
-                                    <button class="priv-tab" data-window="30" data-threshold="80" onclick="loadPrivileged(30, 80)">+80%</button>
-                                </div>
-                            </div>
-                            <div class="priv-tab-group">
-                                <span class="filter-label">2 hr</span>
-                                <div class="priv-tab-buttons">
-                                    <button class="priv-tab" data-window="120" data-threshold="30" onclick="loadPrivileged(120, 30)">+30%</button>
-                                    <button class="priv-tab" data-window="120" data-threshold="50" onclick="loadPrivileged(120, 50)">+50%</button>
-                                    <button class="priv-tab" data-window="120" data-threshold="80" onclick="loadPrivileged(120, 80)">+80%</button>
-                                </div>
-                            </div>
-                            <div class="priv-tab-group">
-                                <span class="filter-label">6 hr</span>
-                                <div class="priv-tab-buttons">
-                                    <button class="priv-tab" data-window="360" data-threshold="30" onclick="loadPrivileged(360, 30)">+30%</button>
-                                    <button class="priv-tab" data-window="360" data-threshold="50" onclick="loadPrivileged(360, 50)">+50%</button>
-                                    <button class="priv-tab" data-window="360" data-threshold="80" onclick="loadPrivileged(360, 80)">+80%</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Stats -->
-                <div id="priv-stats" class="stats-row" style="display:none;">
-                    <div class="stat-box">
-                        <div class="stat-label">Users Found</div>
-                        <div class="stat-value" style="color:var(--yellow);" id="priv-stat-users">0</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Time Window</div>
-                        <div class="stat-value" id="priv-stat-window">5 min</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Price Threshold</div>
-                        <div class="stat-value" id="priv-stat-threshold">+30%</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Last Computed</div>
-                        <div class="stat-value" style="font-size:13px;" id="priv-stat-computed">-</div>
-                    </div>
-                </div>
-
-                <!-- Loading -->
-                <div id="priv-loading" class="loading">
-                    <div class="spinner"></div>
-                    <span>Loading analysis...</span>
-                </div>
-
-                <!-- Error -->
-                <div id="priv-error" class="error"></div>
-
-                <!-- Results -->
-                <div id="priv-results"></div>
-            </div>
         </main>
     </div>
 
@@ -1142,11 +1055,6 @@
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
             document.getElementById('tab-' + tabId).classList.add('active');
             event.target.classList.add('active');
-
-            // Auto-load privileged data on first switch
-            if (tabId === 'privileged' && !privLoaded) {
-                loadPrivileged(5, 30);
-            }
         }
 
         // Analytics functions
@@ -1456,143 +1364,6 @@
             } catch (error) {
                 alert('Error: ' + error.message);
             }
-        }
-
-        // Privileged functions
-        let privLoaded = false;
-
-        function formatTimeWindow(minutes) {
-            if (minutes < 60) return `${minutes} min`;
-            return `${(minutes / 60).toFixed(0)} hr`;
-        }
-
-        function formatDateTime(dateStr) {
-            if (!dateStr) return '-';
-            const d = new Date(dateStr);
-            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        }
-
-        async function loadPrivileged(windowMin, thresholdPct) {
-            // Update active tab
-            document.querySelectorAll('.priv-tab').forEach(tab => {
-                tab.classList.remove('active');
-                if (parseInt(tab.dataset.window) === windowMin && parseInt(tab.dataset.threshold) === thresholdPct) {
-                    tab.classList.add('active');
-                }
-            });
-
-            document.getElementById('priv-loading').classList.add('active');
-            document.getElementById('priv-error').style.display = 'none';
-            document.getElementById('priv-stats').style.display = 'none';
-            document.getElementById('priv-results').innerHTML = '';
-
-            try {
-                const response = await fetch(`/api/privileged?window=${windowMin}&threshold=${thresholdPct}`);
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Failed to load analysis');
-                }
-
-                document.getElementById('priv-loading').classList.remove('active');
-                document.getElementById('priv-stats').style.display = 'grid';
-
-                document.getElementById('priv-stat-users').textContent = data.count || 0;
-                document.getElementById('priv-stat-window').textContent = formatTimeWindow(windowMin);
-                document.getElementById('priv-stat-threshold').textContent = `+${thresholdPct}%`;
-
-                if (data.last_computed_at) {
-                    const computed = new Date(data.last_computed_at);
-                    const ago = Math.round((Date.now() - computed.getTime()) / 60000);
-                    document.getElementById('priv-stat-computed').textContent = `${ago} min ago`;
-                } else {
-                    document.getElementById('priv-stat-computed').textContent = 'Not yet';
-                }
-
-                renderPrivilegedResults(data.users || []);
-                privLoaded = true;
-
-            } catch (error) {
-                document.getElementById('priv-loading').classList.remove('active');
-                document.getElementById('priv-error').style.display = 'block';
-                document.getElementById('priv-error').textContent = 'Error: ' + error.message;
-            }
-        }
-
-        function renderPrivilegedResults(users) {
-            const container = document.getElementById('priv-results');
-
-            if (!users || users.length === 0) {
-                container.innerHTML = '<div class="empty-state">No users found matching these criteria</div>';
-                return;
-            }
-
-            let html = '';
-            users.forEach((user, idx) => {
-                const hitsHtml = (user.hits || []).slice(0, 20).map(hit => `
-                    <tr>
-                        <td class="market-title">${hit.title || '-'}</td>
-                        <td>${hit.outcome || '-'}</td>
-                        <td style="font-family:'JetBrains Mono',monospace;">$${hit.buy_price?.toFixed(3) || '0'}</td>
-                        <td><span class="badge badge-gain">+${hit.price_gain?.toFixed(0) || '0'}%</span></td>
-                        <td><span class="badge badge-time">${hit.minutes_to?.toFixed(1) || '0'}m</span></td>
-                        <td style="color:var(--text-muted);font-size:10px;">${formatDateTime(hit.buy_time)}</td>
-                    </tr>
-                `).join('');
-
-                html += `
-                    <div class="priv-user-card" id="priv-card-${idx}">
-                        <div class="priv-user-header" onclick="togglePrivHits(${idx})">
-                            <div class="priv-user-left">
-                                <a href="https://polymarket.com/profile/${user.user_address}" target="_blank" class="priv-user-address" onclick="event.stopPropagation();">
-                                    ${user.user_address}
-                                </a>
-                                <span class="priv-expand-icon">&#9660;</span>
-                            </div>
-                            <div class="priv-user-metrics">
-                                <div class="priv-metric">
-                                    <div class="priv-metric-label">Hits</div>
-                                    <div class="priv-metric-value">${user.hit_count}</div>
-                                </div>
-                                <div class="priv-metric">
-                                    <div class="priv-metric-label">Total Buys</div>
-                                    <div class="priv-metric-value green">${user.total_buys}</div>
-                                </div>
-                                <div class="priv-metric">
-                                    <div class="priv-metric-label">Hit Rate</div>
-                                    <div class="priv-metric-value">${user.hit_rate?.toFixed(1) || '0'}%</div>
-                                </div>
-                            </div>
-                        </div>
-                        <div id="priv-hits-${idx}" class="priv-hits-panel">
-                            <table class="priv-hits-table">
-                                <thead>
-                                    <tr>
-                                        <th>Market</th>
-                                        <th>Outcome</th>
-                                        <th>Buy Price</th>
-                                        <th>Gain</th>
-                                        <th>Time</th>
-                                        <th>Date</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${hitsHtml || '<tr><td colspan="6" style="text-align:center;padding:20px;">No hit details</td></tr>'}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                `;
-            });
-
-            container.innerHTML = html;
-        }
-
-        function togglePrivHits(idx) {
-            const card = document.getElementById(`priv-card-${idx}`);
-            const panel = document.getElementById(`priv-hits-${idx}`);
-            card.classList.toggle('expanded');
-            panel.classList.toggle('expanded');
         }
 
         // Initialize

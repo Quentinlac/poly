@@ -1117,19 +1117,6 @@ func (s *Service) SetUserCopySettings(ctx context.Context, settings storage.User
 	return s.store.SetUserCopySettings(ctx, settings)
 }
 
-// GetAllUserCopySettings returns all user copy trading settings
-func (s *Service) GetAllUserCopySettings(ctx context.Context) ([]storage.UserCopySettings, error) {
-	return s.store.GetAllUserCopySettings(ctx)
-}
-
-// DeleteUserCopySettings removes custom settings for a user
-func (s *Service) DeleteUserCopySettings(ctx context.Context, userAddress string) error {
-	normalized := normalizeUserID(userAddress)
-	if normalized == "" {
-		return fmt.Errorf("invalid user address")
-	}
-	return s.store.DeleteUserCopySettings(ctx, normalized)
-}
 
 // GetUserAnalyticsList returns filtered and sorted user analytics
 func (s *Service) GetUserAnalyticsList(ctx context.Context, filter storage.UserAnalyticsFilter) ([]storage.UserAnalyticsRecord, int, error) {
@@ -1390,15 +1377,4 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 	}
 
 	return allTrades, nil
-}
-
-// GetPrivilegedKnowledgeAnalysis reads pre-computed results
-func (s *Service) GetPrivilegedKnowledgeAnalysis(ctx context.Context, timeWindowMinutes int, priceThresholdPct int) ([]storage.PrivilegedUser, *storage.PrivilegedAnalysisMeta, error) {
-	// Type assert to PostgresStore since this method is only on PostgresStore
-	pgStore, ok := s.store.(*storage.PostgresStore)
-	if !ok {
-		return nil, nil, fmt.Errorf("privileged knowledge analysis requires PostgreSQL store")
-	}
-
-	return pgStore.GetPrivilegedKnowledgeAnalysis(ctx, timeWindowMinutes, priceThresholdPct)
 }
