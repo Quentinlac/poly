@@ -38,6 +38,10 @@ type CopyTrader struct {
 	// HTTP client for calling main app (critical path execution)
 	mainAppURL string
 	httpClient *http.Client
+
+	// In-flight trades - prevents duplicate processing during the ~600ms order window
+	inFlightTrades   map[string]time.Time
+	inFlightTradesMu sync.Mutex
 }
 
 // CopyTraderMetrics tracks performance metrics
@@ -170,14 +174,15 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	mainAppURL = strings.TrimRight(mainAppURL, "/")
 
 	ct := &CopyTrader{
-		store:      store,
-		client:     client,
-		clobClient: clobClient,
-		config:     config,
-		stopCh:     make(chan struct{}),
-		myAddress:  myAddress,
-		metrics:    &CopyTraderMetrics{},
-		mainAppURL: mainAppURL,
+		store:          store,
+		client:         client,
+		clobClient:     clobClient,
+		config:         config,
+		stopCh:         make(chan struct{}),
+		myAddress:      myAddress,
+		metrics:        &CopyTraderMetrics{},
+		mainAppURL:     mainAppURL,
+		inFlightTrades: make(map[string]time.Time),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -460,6 +465,23 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 
 func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail) error {
 	processStart := time.Now()
+
+	// CRITICAL: Check if this trade is already being processed (prevents duplicate orders)
+	ct.inFlightTradesMu.Lock()
+	if startTime, exists := ct.inFlightTrades[trade.ID]; exists {
+		ct.inFlightTradesMu.Unlock()
+		log.Printf("[CopyTrader] Skipping duplicate trade %s (already in-flight since %s ago)",
+			trade.ID[:16], time.Since(startTime).Round(time.Millisecond))
+		return nil
+	}
+	ct.inFlightTrades[trade.ID] = time.Now()
+	// Cleanup old entries (older than 2 minutes)
+	for id, t := range ct.inFlightTrades {
+		if time.Since(t) > 2*time.Minute {
+			delete(ct.inFlightTrades, id)
+		}
+	}
+	ct.inFlightTradesMu.Unlock()
 
 	// Skip non-TRADE types (REDEEM, SPLIT, MERGE)
 	if trade.Type != "" && trade.Type != "TRADE" {
