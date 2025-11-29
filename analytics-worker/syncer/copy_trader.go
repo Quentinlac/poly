@@ -879,7 +879,10 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		"remainingUSDC": remainingUSDC,
 	}
 
-	if totalSize < 0.01 || totalCost < minUSDC {
+	// Polymarket requires minimum $1 order
+	const polymarketMinOrder = 1.0
+
+	if totalSize < 0.01 {
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
 		log.Printf("[CopyTrader-Bot] BUY: insufficient affordable liquidity (size=%.4f, cost=$%.4f)",
 			totalSize, totalCost)
@@ -888,6 +891,22 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	}
 
 	avgPrice := totalCost / totalSize
+
+	// Ensure we meet Polymarket's minimum order size ($1)
+	// If we calculated less than $1 but have liquidity, bump up to $1
+	if totalCost < polymarketMinOrder {
+		log.Printf("[CopyTrader-Bot] BUY: calculated $%.4f, bumping to $%.2f minimum", totalCost, polymarketMinOrder)
+		totalCost = polymarketMinOrder
+		// Recalculate size based on average price
+		if avgPrice > 0 {
+			totalSize = totalCost / avgPrice
+		}
+		debugLog["minOrderAdjustment"] = map[string]interface{}{
+			"originalCost": totalCost,
+			"adjustedCost": polymarketMinOrder,
+			"adjustedSize": totalSize,
+		}
+	}
 	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f",
 		totalSize, totalCost, avgPrice)
 
