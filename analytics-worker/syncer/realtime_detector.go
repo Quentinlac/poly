@@ -379,32 +379,37 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	go logBlockchainLatency(event.BlockNumber, detectedAt, event.TxHash)
 
 	// Determine token ID and side based on role
-	// In CTF Exchange:
-	// - MakerAssetID = what the maker gave (outcome token if they're selling)
-	// - TakerAssetID = what the taker gave (USDC if they're buying)
+	// In CTF Exchange OrderFilled:
+	// - MakerAssetID = what the maker gave
+	// - TakerAssetID = what the taker gave
 	//
-	// For copy trading, we primarily care about BUY trades (TAKER receiving outcome tokens)
-	// - TAKER with makerAssetId != 0: they're BUYING (receiving outcome tokens)
-	// - TAKER with makerAssetId = 0: skip (they're selling, received USDC)
-	// - MAKER: skip for now (limit order fills, less relevant for copy trading)
+	// Trade direction logic:
+	// - MakerAssetID = token (non-zero): Maker SOLD tokens, Taker BOUGHT tokens
+	// - MakerAssetID = 0 (USDC): Maker BOUGHT tokens, Taker SOLD tokens
 
-	// Skip MAKER trades (they placed limit orders, not active trading)
-	if role == "MAKER" {
-		log.Printf("[RealtimeDetector] Skipping MAKER trade (limit order fill): %s", event.TxHash[:16])
-		return
-	}
+	var tokenID string
+	var side string
+	zeroAsset := "0x0000000000000000000000000000000000000000000000000000000000000000"
 
-	tokenID := event.MakerAssetID
-	side := "BUY"
-
-	// Check if makerAssetId is USDC (0 or very small) - that means taker SOLD
-	if event.MakerAssetID == "0x0000000000000000000000000000000000000000000000000000000000000000" {
-		// Taker received USDC (makerAssetId=0), meaning they SOLD their tokens
-		// Use takerAssetId (what they gave = the outcome token they sold)
+	if event.MakerAssetID == zeroAsset {
+		// Maker gave USDC → Maker BOUGHT, Taker SOLD
 		tokenID = event.TakerAssetID
-		side = "SELL"
-		log.Printf("[RealtimeDetector] Detected SELL trade (taker sold tokens)")
+		if role == "MAKER" {
+			side = "BUY"
+		} else {
+			side = "SELL"
+		}
+	} else {
+		// Maker gave tokens → Maker SOLD, Taker BOUGHT
+		tokenID = event.MakerAssetID
+		if role == "MAKER" {
+			side = "SELL"
+		} else {
+			side = "BUY"
+		}
 	}
+
+	log.Printf("[RealtimeDetector] Trade decoded: role=%s side=%s tokenID=%s...", role, side, tokenID[:20])
 
 	// Clean up token ID (remove leading zeros if needed)
 	if len(tokenID) == 66 && tokenID[:2] == "0x" {
