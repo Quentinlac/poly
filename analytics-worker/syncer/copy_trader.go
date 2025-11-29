@@ -652,12 +652,20 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	}
 
 	// Calculate max allowed price based on tiered slippage
-	maxSlippage := getMaxSlippage(trade.Price)
-	maxAllowedPrice := trade.Price * (1 + maxSlippage)
+	// For blockchain trades (price=0), skip slippage check - execute at market
+	var maxAllowedPrice float64
+	if trade.Price > 0 {
+		maxSlippage := getMaxSlippage(trade.Price)
+		maxAllowedPrice = trade.Price * (1 + maxSlippage)
+		log.Printf("[CopyTrader] DEBUG executeBuy: trade.Price=%.4f, maxSlippage=%.0f%%, maxAllowedPrice=%.4f",
+			trade.Price, maxSlippage*100, maxAllowedPrice)
+	} else {
+		// Blockchain trade - no price info, allow any price
+		maxAllowedPrice = 1.0 // Max possible price is 1.0 (100%)
+		log.Printf("[CopyTrader] DEBUG executeBuy: blockchain trade (no price), allowing any price")
+	}
 
 	log.Printf("[CopyTrader] DEBUG executeBuy: trade.MarketID=%s, tokenID=%s", trade.MarketID, tokenID)
-	log.Printf("[CopyTrader] DEBUG executeBuy: trade.Price=%.4f, maxSlippage=%.0f%%, maxAllowedPrice=%.4f",
-		trade.Price, maxSlippage*100, maxAllowedPrice)
 
 	// Add token to cache for faster order book lookups
 	ct.clobClient.AddTokenToCache(tokenID)

@@ -440,6 +440,14 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		// Size, Price will be determined by copy_trader from orderbook
 	}
 
+	// Save trade to user_trades table asynchronously (don't block critical path)
+	go func() {
+		bgCtx := context.Background()
+		if err := d.store.SaveTrades(bgCtx, []models.TradeDetail{detail}, false); err != nil {
+			log.Printf("[RealtimeDetector] Warning: async save trade failed: %v", err)
+		}
+	}()
+
 	// Notify callback - copy trader will handle the rest
 	if d.onNewTrade != nil {
 		d.onNewTrade(detail)
