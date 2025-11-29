@@ -726,10 +726,13 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	}
 
 	// Copied user's price is our target price
+	// Use dynamic slippage based on price (lower prices are more volatile)
 	copiedPrice := trade.Price
 	var maxPrice float64
 	if copiedPrice > 0 {
-		maxPrice = copiedPrice * 1.10 // Max 10% above copied price
+		slippage := getMaxSlippage(copiedPrice)
+		maxPrice = copiedPrice * (1 + slippage)
+		log.Printf("[CopyTrader-Bot] BUY: Using dynamic slippage +%.0f%% for price $%.2f", slippage*100, copiedPrice)
 	} else {
 		// Blockchain trades don't have price - allow any price up to $1
 		maxPrice = 1.0
@@ -737,17 +740,18 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	}
 	timing["2_calculation_ms"] = float64(time.Since(calcStart).Microseconds()) / 1000
 
+	slippagePct := getMaxSlippage(copiedPrice) * 100
 	debugLog["calculation"] = map[string]interface{}{
 		"copiedTradeUSDC":    trade.UsdcSize,
 		"originalTargetUSDC": originalTargetUSDC,
 		"finalTargetUSDC":    targetUSDC,
 		"copiedPrice":        copiedPrice,
 		"maxPrice":           maxPrice,
-		"priceLimit":         "+10%",
+		"priceLimit":         fmt.Sprintf("+%.0f%%", slippagePct),
 	}
 
-	log.Printf("[CopyTrader-Bot] BUY: Copied price=%.4f, maxPrice=%.4f (+10%%), targetUSDC=$%.2f, market=%s",
-		copiedPrice, maxPrice, targetUSDC, trade.Title)
+	log.Printf("[CopyTrader-Bot] BUY: Copied price=%.4f, maxPrice=%.4f (+%.0f%%), targetUSDC=$%.2f, market=%s",
+		copiedPrice, maxPrice, slippagePct, targetUSDC, trade.Title)
 
 	// Step 3: Add token to cache
 	cacheStart := time.Now()
@@ -1003,17 +1007,23 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
 	}
 
+	// Use dynamic slippage based on price (lower prices are more volatile)
 	copiedPrice := trade.Price
 	var minPrice float64
 	if copiedPrice > 0 {
-		minPrice = copiedPrice * 0.90 // Min 10% below copied price
+		slippage := getMaxSlippage(copiedPrice)
+		minPrice = copiedPrice * (1 - slippage)
+		if minPrice < 0 {
+			minPrice = 0.01 // Never go below 1 cent
+		}
+		log.Printf("[CopyTrader-Bot] SELL: Using dynamic slippage -%.0f%% for price $%.2f", slippage*100, copiedPrice)
 	} else {
 		// Blockchain trades don't have price - allow any price (accept any bid)
 		minPrice = 0.0
 		log.Printf("[CopyTrader-Bot] SELL: No price from blockchain, accepting any bid")
 	}
 
-	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f (-10%%), sellSize=%.4f, market=%s",
+	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f, sellSize=%.4f, market=%s",
 		copiedPrice, minPrice, sellSize, trade.Title)
 
 	// Add token to cache
