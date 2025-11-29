@@ -160,7 +160,7 @@ func (c *RelayerClient) generateBuilderHeaders(method, path string, body []byte)
 
 // GetNonce retrieves the current nonce for the signer
 func (c *RelayerClient) GetNonce(ctx context.Context) (string, error) {
-	path := "/nonce?address=" + c.signerAddr.Hex()
+	path := "/nonce?address=" + c.signerAddr.Hex() + "&type=SAFE"
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -195,7 +195,7 @@ func (c *RelayerClient) GetNonce(ctx context.Context) (string, error) {
 
 // IsDeployed checks if the Safe wallet is deployed
 func (c *RelayerClient) IsDeployed(ctx context.Context) (bool, error) {
-	path := "/deployed?address=" + c.safeAddr.Hex()
+	path := "/deployed?address=" + c.safeAddr.Hex() + "&type=SAFE"
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
