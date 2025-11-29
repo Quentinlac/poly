@@ -702,24 +702,23 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	sideStr := "BUY" // String for JSON payload
 
 	// Polymarket precision requirements:
-	// - Token amounts: max 2 decimal places (0.01 precision)
-	// - USDC amounts: max 4 decimal places (0.0001 precision)
-	// In 6-decimal representation: 2 decimals = divisible by 10000, 4 decimals = divisible by 100
+	// - Token amounts: max 2 decimal places (0.01 precision) = divisible by 10000 in 6-decimal format
+	// - USDC amounts: max 4 decimal places (0.0001 precision) = divisible by 100 in 6-decimal format
 
-	// Round size to 2 decimal places and convert to integer in one step to avoid floating point errors
-	// size * 100 -> round -> this gives us "cents" of tokens (2 decimal places)
-	sizeIn2Dec := int64(size*100 + 0.5)
-	// Convert to 6-decimal representation: multiply by 10000 (since we already have 2 decimals)
-	sizeInt := big.NewInt(sizeIn2Dec * 10000)
+	// Calculate in 6-decimal format (native Polymarket precision)
+	// Use math.Round to avoid floating point truncation errors
 
-	// Calculate USDC value using integer math to avoid floating point errors
-	// price is already in 2 decimal places (0.01 tick size)
-	priceIn2Dec := int64(price*100 + 0.5)
-	// usdcValue = size * price, but we need 4 decimal precision
-	// sizeIn2Dec * priceIn2Dec = value in 4 decimals (2+2=4)
-	usdcIn4Dec := sizeIn2Dec * priceIn2Dec / 100 // Divide by 100 to get back to 4 decimals
-	// Convert to 6-decimal representation: multiply by 100 (since we have 4 decimals)
-	usdcInt := big.NewInt(usdcIn4Dec * 100)
+	// Size: round to 2 decimals, then convert to 6-decimal format
+	// Example: 1.56 -> 1560000 (divisible by 10000 ✓)
+	sizeIn6Dec := int64(math.Round(size*100)) * 10000
+	sizeInt := big.NewInt(sizeIn6Dec)
+
+	// USDC: calculate size * price, round to 4 decimals, convert to 6-decimal format
+	// Example: 1.56 * 0.006 = 0.00936 -> 0.0093 (truncate to 4 decimals) -> 9300 in 6-decimal
+	// Note: Polymarket truncates (floors) rather than rounds for USDC calculation
+	usdcValue := size * price
+	usdcIn6Dec := (int64(usdcValue*10000) * 100) // Truncate to 4 decimals, convert to 6-decimal
+	usdcInt := big.NewInt(usdcIn6Dec)
 
 	if side == SideBuy {
 		// BUY: makerAmount=USDC, takerAmount=tokens
