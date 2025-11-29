@@ -1814,8 +1814,8 @@ func (s *PostgresStore) UpdateBlockchainConfirmedAt(ctx context.Context, tokenID
 			AND status = 'executed'
 			AND blockchain_confirmed_at IS NULL
 			AND (
-				($3 = 'BUY' AND following_shares < 0) OR
-				($3 = 'SELL' AND following_shares > 0)
+				($3 = 'BUY' AND following_shares > 0) OR
+				($3 = 'SELL' AND following_shares < 0)
 			)
 			AND follower_time IS NOT NULL
 			AND follower_time > $1 - INTERVAL '5 minutes'
