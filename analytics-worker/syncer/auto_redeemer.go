@@ -1,4 +1,5 @@
 // Package syncer provides auto-redemption for resolved Polymarket positions.
+// Uses Polymarket's Relayer API for gasless transactions via Safe wallets.
 package syncer
 
 import (
@@ -14,63 +15,33 @@ import (
 
 	"polymarket-analyzer/api"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 const (
-	// Polygon RPC endpoints
-	polygonRPCURL = "https://polygon-rpc.com"
-
-	// Contract addresses on Polygon
-	conditionalTokensAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-	usdcAddress              = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-
-	// Polygon chain ID
-	polygonChainID = 137
-
 	// Redeem check interval
 	redeemInterval = 5 * time.Second
 )
 
-// Conditional Tokens ABI (only redeemPositions function)
-const conditionalTokensABI = `[{
-	"inputs": [
-		{"internalType": "contract IERC20", "name": "collateralToken", "type": "address"},
-		{"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
-		{"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
-		{"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"}
-	],
-	"name": "redeemPositions",
-	"outputs": [],
-	"stateMutability": "nonpayable",
-	"type": "function"
-}]`
-
-// AutoRedeemer automatically redeems resolved positions
+// AutoRedeemer automatically redeems resolved positions via Polymarket Relayer
 type AutoRedeemer struct {
-	client     *api.Client
-	ethClient  *ethclient.Client
-	privateKey *ecdsa.PrivateKey
-	address    common.Address
-	ctABI      abi.ABI
+	client        *api.Client
+	relayerClient *api.RelayerClient
+	safeAddr      common.Address
 
 	running bool
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
 	// Stats
-	totalRedeemed   int
-	totalUSDC       float64
-	lastRedeemTime  time.Time
-	statsMu         sync.RWMutex
+	totalRedeemed  int
+	totalUSDC      float64
+	lastRedeemTime time.Time
+	statsMu        sync.RWMutex
 }
 
-// NewAutoRedeemer creates a new auto-redeemer
+// NewAutoRedeemer creates a new auto-redeemer using the Relayer API
 func NewAutoRedeemer(apiClient *api.Client) (*AutoRedeemer, error) {
 	// Get private key from env
 	pkHex := strings.TrimSpace(os.Getenv("POLYMARKET_PRIVATE_KEY"))
@@ -89,35 +60,43 @@ func NewAutoRedeemer(apiClient *api.Client) (*AutoRedeemer, error) {
 	if !ok {
 		return nil, fmt.Errorf("error casting public key")
 	}
-	address := crypto.PubkeyToAddress(*publicKeyECDSA)
+	eoaAddr := crypto.PubkeyToAddress(*publicKeyECDSA)
 
-	// Check for funder address (Magic wallet)
+	// Get Safe/funder address (Magic wallet)
 	funderAddr := strings.TrimSpace(os.Getenv("POLYMARKET_FUNDER_ADDRESS"))
+	var safeAddr common.Address
 	if funderAddr != "" {
-		address = common.HexToAddress(funderAddr)
+		safeAddr = common.HexToAddress(funderAddr)
+	} else {
+		// If no funder, use EOA as Safe (for EOA-only wallets)
+		safeAddr = eoaAddr
 	}
 
-	// Connect to Polygon RPC
-	ethClient, err := ethclient.Dial(polygonRPCURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Polygon: %w", err)
+	// Get Builder credentials
+	builderKey := strings.TrimSpace(os.Getenv("BUILDER_API_KEY"))
+	builderSecret := strings.TrimSpace(os.Getenv("BUILDER_SECRET"))
+	builderPassphrase := strings.TrimSpace(os.Getenv("BUILDER_PASS_PHRASE"))
+
+	if builderKey == "" || builderSecret == "" || builderPassphrase == "" {
+		return nil, fmt.Errorf("BUILDER_API_KEY, BUILDER_SECRET, and BUILDER_PASS_PHRASE are required for auto-redeem")
 	}
 
-	// Parse ABI
-	ctABI, err := abi.JSON(strings.NewReader(conditionalTokensABI))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse ABI: %w", err)
+	creds := &api.BuilderCreds{
+		Key:        builderKey,
+		Secret:     builderSecret,
+		Passphrase: builderPassphrase,
 	}
 
-	log.Printf("[AutoRedeemer] Initialized for wallet %s", address.Hex())
+	relayerClient := api.NewRelayerClient(privateKey, safeAddr, creds)
+
+	log.Printf("[AutoRedeemer] Initialized with Relayer API for Safe wallet %s (signer: %s)",
+		safeAddr.Hex(), eoaAddr.Hex())
 
 	return &AutoRedeemer{
-		client:     apiClient,
-		ethClient:  ethClient,
-		privateKey: privateKey,
-		address:    address,
-		ctABI:      ctABI,
-		stopCh:     make(chan struct{}),
+		client:        apiClient,
+		relayerClient: relayerClient,
+		safeAddr:      safeAddr,
+		stopCh:        make(chan struct{}),
 	}, nil
 }
 
@@ -127,11 +106,19 @@ func (ar *AutoRedeemer) Start(ctx context.Context) error {
 		return fmt.Errorf("auto-redeemer already running")
 	}
 
+	// Check if Safe is deployed
+	deployed, err := ar.relayerClient.IsDeployed(ctx)
+	if err != nil {
+		log.Printf("[AutoRedeemer] Warning: could not check Safe deployment: %v", err)
+	} else if !deployed {
+		log.Printf("[AutoRedeemer] Warning: Safe wallet not deployed yet")
+	}
+
 	ar.running = true
 	ar.wg.Add(1)
 	go ar.redeemLoop(ctx)
 
-	log.Printf("[AutoRedeemer] Started - checking every %v", redeemInterval)
+	log.Printf("[AutoRedeemer] Started - checking every %v (gasless via Relayer)", redeemInterval)
 	return nil
 }
 
@@ -143,7 +130,6 @@ func (ar *AutoRedeemer) Stop() {
 	ar.running = false
 	close(ar.stopCh)
 	ar.wg.Wait()
-	ar.ethClient.Close()
 	log.Printf("[AutoRedeemer] Stopped - total redeemed: %d positions, $%.2f USDC", ar.totalRedeemed, ar.totalUSDC)
 }
 
@@ -176,18 +162,15 @@ func (ar *AutoRedeemer) redeemLoop(ctx context.Context) {
 }
 
 func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
-	log.Printf("[AutoRedeemer] Checking for redeemable positions...")
-
 	// Get open positions
-	positions, err := ar.client.GetOpenPositions(ctx, ar.address.Hex())
+	positions, err := ar.client.GetOpenPositions(ctx, ar.safeAddr.Hex())
 	if err != nil {
 		log.Printf("[AutoRedeemer] Failed to get positions: %v", err)
 		return
 	}
 
 	if len(positions) == 0 {
-		log.Printf("[AutoRedeemer] No open positions")
-		return
+		return // No positions to check
 	}
 
 	// Find resolved positions (curPrice = 0 or 1)
@@ -201,19 +184,16 @@ func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
 		// 2. We have tokens to redeem
 		if size > 0.001 && (curPrice < 0.001 || curPrice > 0.999) {
 			redeemable = append(redeemable, pos)
-			log.Printf("[AutoRedeemer] Found redeemable: %s - %s @ $%.4f (size: %.4f)",
-				pos.Title, pos.Outcome, curPrice, size)
 		}
 	}
 
 	if len(redeemable) == 0 {
-		log.Printf("[AutoRedeemer] No redeemable positions found (checked %d positions)", len(positions))
-		return
+		return // No redeemable positions
 	}
 
 	log.Printf("[AutoRedeemer] Found %d redeemable positions", len(redeemable))
 
-	// Redeem each position
+	// Redeem each position via Relayer (gasless!)
 	for _, pos := range redeemable {
 		if err := ar.redeemPosition(ctx, pos); err != nil {
 			log.Printf("[AutoRedeemer] Failed to redeem %s: %v", pos.Title, err)
@@ -233,7 +213,8 @@ func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
 }
 
 func (ar *AutoRedeemer) redeemPosition(ctx context.Context, pos api.OpenPosition) error {
-	log.Printf("[AutoRedeemer] Redeeming: %s - %s (condition: %s)", pos.Title, pos.Outcome, pos.ConditionID)
+	log.Printf("[AutoRedeemer] Redeeming via Relayer: %s - %s (condition: %s)",
+		pos.Title, pos.Outcome, pos.ConditionID)
 
 	// Convert condition ID to bytes32
 	conditionID := common.HexToHash(pos.ConditionID)
@@ -244,81 +225,21 @@ func (ar *AutoRedeemer) redeemPosition(ctx context.Context, pos api.OpenPosition
 		indexSet = big.NewInt(2)
 	}
 
-	// Build transaction data
-	data, err := ar.ctABI.Pack("redeemPositions",
-		common.HexToAddress(usdcAddress),     // collateralToken
-		common.Hash{},                        // parentCollectionId (0x0 for top-level)
-		conditionID,                          // conditionId
-		[]*big.Int{indexSet},                 // indexSets
-	)
+	// Build redeem transaction
+	tx, err := api.BuildRedeemTransaction(conditionID, indexSet)
 	if err != nil {
-		return fmt.Errorf("failed to pack tx data: %w", err)
+		return fmt.Errorf("failed to build redeem tx: %w", err)
 	}
 
-	// Get nonce
-	nonce, err := ar.ethClient.PendingNonceAt(ctx, ar.address)
+	// Execute via Relayer (gasless!)
+	metadata := fmt.Sprintf("Redeem: %s - %s", pos.Title, pos.Outcome)
+	resp, err := ar.relayerClient.Execute(ctx, []api.SafeTransaction{tx}, metadata)
 	if err != nil {
-		return fmt.Errorf("failed to get nonce: %w", err)
+		return fmt.Errorf("relayer execution failed: %w", err)
 	}
 
-	// Get gas price
-	gasPrice, err := ar.ethClient.SuggestGasPrice(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get gas price: %w", err)
-	}
-	// Add 20% buffer for faster confirmation
-	gasPrice = new(big.Int).Mul(gasPrice, big.NewInt(120))
-	gasPrice = new(big.Int).Div(gasPrice, big.NewInt(100))
-
-	// Estimate gas
-	ctAddress := common.HexToAddress(conditionalTokensAddress)
-	gasLimit := uint64(200000) // Conservative estimate for redeem
-
-	// Create transaction
-	tx := types.NewTransaction(
-		nonce,
-		ctAddress,
-		big.NewInt(0), // No value transfer
-		gasLimit,
-		gasPrice,
-		data,
-	)
-
-	// Sign transaction
-	chainID := big.NewInt(polygonChainID)
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), ar.privateKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign tx: %w", err)
-	}
-
-	// Send transaction
-	err = ar.ethClient.SendTransaction(ctx, signedTx)
-	if err != nil {
-		return fmt.Errorf("failed to send tx: %w", err)
-	}
-
-	log.Printf("[AutoRedeemer] ✅ Redemption tx sent: %s", signedTx.Hash().Hex())
-
-	// Wait for confirmation (optional - don't block)
-	go ar.waitForConfirmation(ctx, signedTx.Hash(), pos.Title)
+	log.Printf("[AutoRedeemer] ✅ Redemption submitted via Relayer: txID=%s hash=%s state=%s",
+		resp.ID, resp.TransactionHash, resp.State)
 
 	return nil
-}
-
-func (ar *AutoRedeemer) waitForConfirmation(ctx context.Context, txHash common.Hash, title string) {
-	// Wait up to 2 minutes for confirmation
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	receipt, err := bind.WaitMined(ctx, ar.ethClient, &types.Transaction{})
-	if err != nil {
-		log.Printf("[AutoRedeemer] Tx %s: waiting for confirmation failed: %v", txHash.Hex()[:10], err)
-		return
-	}
-
-	if receipt != nil && receipt.Status == 1 {
-		log.Printf("[AutoRedeemer] ✅ Confirmed: %s - %s", title, txHash.Hex())
-	} else if receipt != nil {
-		log.Printf("[AutoRedeemer] ❌ Failed: %s - %s", title, txHash.Hex())
-	}
 }
