@@ -620,6 +620,15 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 }
 
 func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
+	// Initialize timestamps for latency tracking
+	startTime := time.Now()
+	timestamps := &CopyTradeTimestamps{
+		ProcessingStartedAt: &startTime,
+	}
+	if !trade.DetectedAt.IsZero() {
+		timestamps.DetectedAt = &trade.DetectedAt
+	}
+
 	// Get per-user settings or use defaults
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
@@ -638,38 +647,57 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 		tokenID, multiplier, minUSDC)
 
 	// Send to main app for execution (critical path)
+	orderPlacedAt := time.Now()
+	timestamps.OrderPlacedAt = &orderPlacedAt
 	resp, err := ct.executeViaMainApp(ctx, trade, tokenID, "BUY")
+	orderConfirmedAt := time.Now()
 	if err != nil {
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "", storage.StrategyHuman, nil, nil, timestamps)
 	}
 
+	timestamps.OrderConfirmedAt = &orderConfirmedAt
+
 	if !resp.Success {
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "", storage.StrategyHuman, nil, nil, timestamps)
 	}
 
 	log.Printf("[CopyTrader] BUY executed via main app: orderID=%s, price=%.4f, size=%.4f, executionMs=%d",
 		resp.OrderID, resp.FollowerPrice, resp.FollowerShares, resp.ExecutionMs)
 
-	return ct.logCopyTrade(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID, storage.StrategyHuman, nil, nil, timestamps)
 }
 
 func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
+	// Initialize timestamps for latency tracking
+	startTime := time.Now()
+	timestamps := &CopyTradeTimestamps{
+		ProcessingStartedAt: &startTime,
+	}
+	if !trade.DetectedAt.IsZero() {
+		timestamps.DetectedAt = &trade.DetectedAt
+	}
+
 	log.Printf("[CopyTrader] SELL: Sending to main app - tokenID=%s", tokenID)
 
 	// Send to main app for execution (critical path)
+	orderPlacedAt := time.Now()
+	timestamps.OrderPlacedAt = &orderPlacedAt
 	resp, err := ct.executeViaMainApp(ctx, trade, tokenID, "SELL")
+	orderConfirmedAt := time.Now()
 	if err != nil {
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "", storage.StrategyHuman, nil, nil, timestamps)
 	}
 
+	timestamps.OrderConfirmedAt = &orderConfirmedAt
+
 	if !resp.Success {
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "")
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "", storage.StrategyHuman, nil, nil, timestamps)
 	}
 
 	log.Printf("[CopyTrader] SELL executed via main app: orderID=%s, price=%.4f, size=%.4f, executionMs=%d",
 		resp.OrderID, resp.FollowerPrice, resp.FollowerShares, resp.ExecutionMs)
 
-	return ct.logCopyTrade(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID, storage.StrategyHuman, nil, nil, timestamps)
 }
 
 // executeBotBuy implements the bot following strategy for buys.
@@ -984,6 +1012,15 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 // It tries to sell at the copied user's exact price, then sweeps bids down to -10%.
 // If still not filled, creates limit orders at -3% and -5%, waits 3 min, then market sells remainder.
 func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
+	// Initialize timestamps for latency tracking
+	startTime := time.Now()
+	timestamps := &CopyTradeTimestamps{
+		ProcessingStartedAt: &startTime,
+	}
+	if !trade.DetectedAt.IsZero() {
+		timestamps.DetectedAt = &trade.DetectedAt
+	}
+
 	// Get settings
 	multiplier := ct.config.Multiplier
 	if userSettings != nil {
@@ -1058,14 +1095,14 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	if err != nil {
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
 			log.Printf("[CopyTrader-Bot] SELL: market closed/resolved, skipping")
-			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "", storage.StrategyBot, nil, nil, nil)
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "", storage.StrategyBot, nil, nil, timestamps)
 		}
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "", storage.StrategyBot, nil, nil, nil)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "", storage.StrategyBot, nil, nil, timestamps)
 	}
 
 	if len(book.Bids) == 0 {
 		log.Printf("[CopyTrader-Bot] SELL: no bids in order book")
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "no bids in order book", "", storage.StrategyBot, nil, nil, nil)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "no bids in order book", "", storage.StrategyBot, nil, nil, timestamps)
 	}
 
 	// Find all bids within our price range, sorted by price (highest first)
@@ -1120,15 +1157,20 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 		log.Printf("[CopyTrader-Bot] SELL: selling %.4f tokens at avg price %.4f for $%.4f",
 			totalSold, avgPrice, totalUSDC)
 
+		orderPlacedAt := time.Now()
+		timestamps.OrderPlacedAt = &orderPlacedAt
 		resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, totalUSDC, negRisk)
+		orderConfirmedAt := time.Now()
 		if err != nil {
 			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
-			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot, nil, nil, nil)
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot, nil, nil, timestamps)
 		}
+
+		timestamps.OrderConfirmedAt = &orderConfirmedAt
 
 		if !resp.Success {
 			log.Printf("[CopyTrader-Bot] SELL rejected: %s", resp.ErrorMsg)
-			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "", storage.StrategyBot, nil, nil, nil)
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "", storage.StrategyBot, nil, nil, timestamps)
 		}
 
 		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
@@ -1139,7 +1181,7 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 			ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
 		}
 
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalUSDC, avgPrice, totalSold, "executed", "", resp.OrderID, storage.StrategyBot, nil, nil, nil)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalUSDC, avgPrice, totalSold, "executed", "", resp.OrderID, storage.StrategyBot, nil, nil, timestamps)
 	}
 
 	// No acceptable bids found within 10% - need to create limit orders
@@ -1169,8 +1211,12 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 
 	// For now, we'll use market orders with our best effort at the lowest acceptable price
 	// In production, this should be replaced with actual limit order placement
+	orderPlacedAt := time.Now()
+	timestamps.OrderPlacedAt = &orderPlacedAt
 	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, sellSize*order3Price, negRisk)
+	orderConfirmedAt := time.Now()
 	if err == nil && resp.Success {
+		timestamps.OrderConfirmedAt = &orderConfirmedAt
 		orderIDs = append(orderIDs, resp.OrderID)
 		// Estimate fill
 		if len(book.Bids) > 0 {
@@ -1184,12 +1230,12 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	if totalFilled > 0 {
 		avgPrice := totalValue / totalFilled
 		ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","), storage.StrategyBot, nil, nil, nil)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","), storage.StrategyBot, nil, nil, timestamps)
 	}
 
 	// Failed to sell
 	log.Printf("[CopyTrader-Bot] SELL: failed to fill any orders")
-	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "", storage.StrategyBot, nil, nil, nil)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "", storage.StrategyBot, nil, nil, timestamps)
 }
 
 // CopyTradeTimestamps holds timing information for a copy trade
