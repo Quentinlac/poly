@@ -21,9 +21,11 @@ import (
 
 const (
 	// Redeem check interval - not too frequent to avoid rate limits
-	redeemInterval = 60 * time.Second
-	// Delay between individual redeem calls to avoid rate limits
-	redeemDelay = 3 * time.Second
+	redeemInterval = 2 * time.Minute
+	// Delay between individual redeem calls - relayer limit is 15/min, so 5s = 12/min max (safe)
+	redeemDelay = 5 * time.Second
+	// Max redeems per check cycle to stay under rate limit
+	maxRedeemsPerCycle = 10
 )
 
 // AutoRedeemer automatically redeems resolved positions via Polymarket Relayer
@@ -217,7 +219,13 @@ func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
 		return // No redeemable positions
 	}
 
-	log.Printf("[AutoRedeemer] Found %d redeemable positions to submit", len(redeemable))
+	// Limit to max redeems per cycle to stay under rate limit
+	if len(redeemable) > maxRedeemsPerCycle {
+		log.Printf("[AutoRedeemer] Found %d redeemable positions, processing %d this cycle (rate limit)", len(redeemable), maxRedeemsPerCycle)
+		redeemable = redeemable[:maxRedeemsPerCycle]
+	} else {
+		log.Printf("[AutoRedeemer] Found %d redeemable positions to submit", len(redeemable))
+	}
 
 	// Redeem each position via Relayer (gasless!) with delay between calls
 	for i, pos := range redeemable {
