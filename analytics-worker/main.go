@@ -102,22 +102,17 @@ func main() {
 		log.Println("[Worker] This is correct for analytics-worker to avoid duplicate orders")
 	}
 
-	// Start auto-redeemer if enabled
-	autoRedeemEnabled := os.Getenv("AUTO_REDEEM_ENABLED")
-	if autoRedeemEnabled == "true" || autoRedeemEnabled == "1" {
-		redeemer, err := syncer.NewAutoRedeemer(apiClient)
-		if err != nil {
-			log.Printf("[Worker] Warning: Failed to create auto-redeemer: %v", err)
-		} else {
-			if err := redeemer.Start(ctx); err != nil {
-				log.Printf("[Worker] Warning: Failed to start auto-redeemer: %v", err)
-			} else {
-				defer redeemer.Stop()
-				log.Println("[Worker] Auto-redeemer started (checking every 15 min)")
-			}
-		}
+	// Start auto-redeemer (always enabled - automatically redeems resolved positions)
+	redeemer, err := syncer.NewAutoRedeemer(apiClient)
+	if err != nil {
+		log.Printf("[Worker] Warning: Failed to create auto-redeemer: %v", err)
 	} else {
-		log.Println("[Worker] Auto-redeemer DISABLED (AUTO_REDEEM_ENABLED != true)")
+		if err := redeemer.Start(ctx); err != nil {
+			log.Printf("[Worker] Warning: Failed to start auto-redeemer: %v", err)
+		} else {
+			defer redeemer.Stop()
+			log.Println("[Worker] Auto-redeemer started (checking every 15 min)")
+		}
 	}
 
 	// Setup signal handling for graceful shutdown
