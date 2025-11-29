@@ -979,9 +979,11 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	if err != nil {
 		log.Printf("[CopyTrader-Bot] SELL: Warning: failed to fetch positions: %v", err)
 	} else {
+		log.Printf("[CopyTrader-Bot] SELL: Found %d positions, looking for tokenID=%s", len(actualPositions), tokenID)
 		for _, pos := range actualPositions {
 			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
 				ourPosition = pos.Size.Float64()
+				log.Printf("[CopyTrader-Bot] SELL: Found matching position: %.4f shares", ourPosition)
 				break
 			}
 		}
@@ -992,11 +994,12 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
 		if err == nil && position.Size > 0 {
 			ourPosition = position.Size
+			log.Printf("[CopyTrader-Bot] SELL: Found position in local DB: %.4f shares", ourPosition)
 		}
 	}
 
 	if ourPosition <= 0 {
-		log.Printf("[CopyTrader-Bot] SELL: no position to sell for %s/%s", trade.Title, trade.Outcome)
+		log.Printf("[CopyTrader-Bot] SELL: no position to sell for %s/%s (tokenID=%s)", trade.Title, trade.Outcome, tokenID)
 		return nil
 	}
 
