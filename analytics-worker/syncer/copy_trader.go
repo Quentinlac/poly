@@ -465,24 +465,40 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		return nil
 	}
 
-	// Verify the token matches the intended outcome
-	// trade.MarketID is the token ID, but trade.Outcome might not match the actual token's outcome
-	tokenLookupStart := time.Now()
-	tokenID, actualOutcome, negRisk, err := ct.getVerifiedTokenID(ctx, trade)
-	log.Printf("[CopyTrader] ⏱️ TIMING: tokenLookup=%dms", time.Since(tokenLookupStart).Milliseconds())
-	if err != nil {
-		return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get token ID: %v", err), "")
-	}
-	_ = processStart // will use at end
+	// FAST PATH: For blockchain-detected trades, we already have the token ID
+	// Skip all the Gamma/CLOB lookups - they just slow us down
+	isBlockchainTrade := trade.TransactionHash != "" && trade.DetectedAt != (time.Time{})
 
-	// Update trade outcome if it was wrong
-	if actualOutcome != "" && actualOutcome != trade.Outcome {
-		log.Printf("[CopyTrader] WARNING: Corrected outcome from '%s' to '%s' for %s", trade.Outcome, actualOutcome, trade.Title)
-		trade.Outcome = actualOutcome
+	var tokenID string
+	var negRisk bool
+
+	if isBlockchainTrade {
+		// Fast path: use token ID directly (already in decimal format from realtime_detector)
+		tokenID = trade.MarketID
+		negRisk = false // Default, will be overridden by order book if needed
+		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, skipping API lookups, tokenID=%s", tokenID)
+	} else {
+		// Slow path: legacy trades need verification
+		tokenLookupStart := time.Now()
+		var actualOutcome string
+		var err error
+		tokenID, actualOutcome, negRisk, err = ct.getVerifiedTokenID(ctx, trade)
+		log.Printf("[CopyTrader] ⏱️ TIMING: tokenLookup=%dms", time.Since(tokenLookupStart).Milliseconds())
+		if err != nil {
+			return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get token ID: %v", err), "")
+		}
+
+		// Update trade outcome if it was wrong
+		if actualOutcome != "" && actualOutcome != trade.Outcome {
+			log.Printf("[CopyTrader] WARNING: Corrected outcome from '%s' to '%s' for %s", trade.Outcome, actualOutcome, trade.Title)
+			trade.Outcome = actualOutcome
+		}
 	}
 
-	// Get user settings to determine strategy type
-	strategyType := storage.StrategyHuman // Default to human
+	log.Printf("[CopyTrader] ⏱️ TIMING: preExecution=%dms", time.Since(processStart).Milliseconds())
+
+	// Get user settings (fast DB lookup)
+	strategyType := storage.StrategyHuman
 	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
 	if err == nil && userSettings != nil {
 		if !userSettings.Enabled {
