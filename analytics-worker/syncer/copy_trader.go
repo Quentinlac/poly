@@ -727,7 +727,14 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 
 	// Copied user's price is our target price
 	copiedPrice := trade.Price
-	maxPrice := copiedPrice * 1.10 // Max 10% above copied price
+	var maxPrice float64
+	if copiedPrice > 0 {
+		maxPrice = copiedPrice * 1.10 // Max 10% above copied price
+	} else {
+		// Blockchain trades don't have price - allow any price up to $1
+		maxPrice = 1.0
+		log.Printf("[CopyTrader-Bot] BUY: No price from blockchain, allowing any price up to $1.00")
+	}
 	timing["2_calculation_ms"] = float64(time.Since(calcStart).Microseconds()) / 1000
 
 	debugLog["calculation"] = map[string]interface{}{
@@ -997,7 +1004,14 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	}
 
 	copiedPrice := trade.Price
-	minPrice := copiedPrice * 0.90 // Min 10% below copied price
+	var minPrice float64
+	if copiedPrice > 0 {
+		minPrice = copiedPrice * 0.90 // Min 10% below copied price
+	} else {
+		// Blockchain trades don't have price - allow any price (accept any bid)
+		minPrice = 0.0
+		log.Printf("[CopyTrader-Bot] SELL: No price from blockchain, accepting any bid")
+	}
 
 	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f (-10%%), sellSize=%.4f, market=%s",
 		copiedPrice, minPrice, sellSize, trade.Title)

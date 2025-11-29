@@ -424,9 +424,56 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		tokenID = bigInt.String()
 	}
 
-	log.Printf("[RealtimeDetector] Trade decoded: role=%s side=%s tokenID=%s", role, side, tokenID)
+	// Calculate price and size from blockchain amounts
+	// Amounts are in wei (10^6 decimals for both USDC and shares on Polymarket)
+	var price, size, usdcSize float64
+	decimals := new(big.Float).SetFloat64(1e6)
 
-	// Convert to TradeDetail
+	if event.MakerAssetID == zeroAsset {
+		// Maker gave USDC, Taker gave tokens
+		// MakerAmount = USDC, TakerAmount = tokens
+		makerAmt := new(big.Float).SetInt(event.MakerAmount)
+		takerAmt := new(big.Float).SetInt(event.TakerAmount)
+
+		usdcFloat := new(big.Float).Quo(makerAmt, decimals)
+		tokenFloat := new(big.Float).Quo(takerAmt, decimals)
+
+		usdcSize, _ = usdcFloat.Float64()
+		size, _ = tokenFloat.Float64()
+		if size > 0 {
+			price = usdcSize / size
+		}
+	} else {
+		// Maker gave tokens, Taker gave USDC
+		// MakerAmount = tokens, TakerAmount = USDC
+		makerAmt := new(big.Float).SetInt(event.MakerAmount)
+		takerAmt := new(big.Float).SetInt(event.TakerAmount)
+
+		tokenFloat := new(big.Float).Quo(makerAmt, decimals)
+		usdcFloat := new(big.Float).Quo(takerAmt, decimals)
+
+		size, _ = tokenFloat.Float64()
+		usdcSize, _ = usdcFloat.Float64()
+		if size > 0 {
+			price = usdcSize / size
+		}
+	}
+
+	log.Printf("[RealtimeDetector] Trade decoded: role=%s side=%s tokenID=%s price=%.4f size=%.4f usdc=$%.2f",
+		role, side, tokenID, price, size, usdcSize)
+
+	// Look up market title and outcome from our token cache
+	var title, outcome string
+	tokenInfo, err := d.store.GetTokenInfo(context.Background(), tokenID)
+	if err == nil && tokenInfo != nil {
+		title = tokenInfo.Title
+		outcome = tokenInfo.Outcome
+		log.Printf("[RealtimeDetector] Token info from cache: title=%s outcome=%s", title, outcome)
+	} else {
+		log.Printf("[RealtimeDetector] Token info not in cache, will need to fetch later")
+	}
+
+	// Convert to TradeDetail with all the data from blockchain
 	detail := models.TradeDetail{
 		ID:              event.TxHash,
 		UserID:          userAddr,
@@ -434,10 +481,14 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		Type:            "TRADE",
 		Side:            side,
 		Role:            role,
+		Size:            size,
+		UsdcSize:        usdcSize,
+		Price:           price,
+		Title:           title,
+		Outcome:         outcome,
 		TransactionHash: event.TxHash,
 		Timestamp:       event.Timestamp,
 		DetectedAt:      detectedAt,
-		// Size, Price will be determined by copy_trader from orderbook
 	}
 
 	// Save trade to user_trades table asynchronously (don't block critical path)
