@@ -3,8 +3,12 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -368,8 +372,11 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		return // Neither maker nor taker is followed (shouldn't happen)
 	}
 
-	log.Printf("[RealtimeDetector] 🚀 BLOCKCHAIN TRADE DETECTED in ~1s! user=%s role=%s tx=%s",
-		utils.ShortAddress(userAddr), role, event.TxHash[:16])
+	log.Printf("[RealtimeDetector] 🚀 BLOCKCHAIN TRADE DETECTED! user=%s role=%s block=%d tx=%s detected=%s",
+		utils.ShortAddress(userAddr), role, event.BlockNumber, event.TxHash[:16], detectedAt.Format("15:04:05.000"))
+
+	// Log actual latency asynchronously (doesn't block detection path)
+	go logBlockchainLatency(event.BlockNumber, detectedAt, event.TxHash)
 
 	// Determine token ID and side based on role
 	// In CTF Exchange:
@@ -518,4 +525,41 @@ func (d *RealtimeDetector) convertToTradeDetail(trade api.DataTrade, userAddr st
 		Pseudonym:       trade.Pseudonym,
 		Timestamp:       time.Unix(trade.Timestamp, 0).UTC(),
 	}
+}
+
+// getBlockTimestamp fetches the timestamp of a block from Polygon RPC
+func getBlockTimestamp(blockNum uint64) (time.Time, error) {
+	blockHex := fmt.Sprintf("0x%x", blockNum)
+	payload := fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["%s",false],"id":1}`, blockHex)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post("https://polygon-bor-rpc.publicnode.com", "application/json", strings.NewReader(payload))
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Result struct {
+			Timestamp string `json:"timestamp"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return time.Time{}, err
+	}
+
+	ts, _ := strconv.ParseInt(strings.TrimPrefix(result.Result.Timestamp, "0x"), 16, 64)
+	return time.Unix(ts, 0), nil
+}
+
+// logBlockchainLatency fetches block timestamp and logs actual detection latency
+func logBlockchainLatency(blockNum uint64, detectedAt time.Time, txHash string) {
+	blockTime, err := getBlockTimestamp(blockNum)
+	if err != nil {
+		log.Printf("[RealtimeDetector] ⏱️ LATENCY: block=%d (failed to fetch timestamp: %v)", blockNum, err)
+		return
+	}
+	latency := detectedAt.Sub(blockTime)
+	log.Printf("[RealtimeDetector] ⏱️ LATENCY: %dms (block=%d @ %s, detected=%s) tx=%s",
+		latency.Milliseconds(), blockNum, blockTime.Format("15:04:05"), detectedAt.Format("15:04:05.000"), txHash[:16])
 }
