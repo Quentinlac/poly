@@ -470,7 +470,9 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		outcome = tokenInfo.Outcome
 		log.Printf("[RealtimeDetector] Token info from cache: title=%s outcome=%s", title, outcome)
 	} else {
-		log.Printf("[RealtimeDetector] Token info not in cache, will need to fetch later")
+		// Not in cache - fetch async from Gamma API (don't block critical path)
+		log.Printf("[RealtimeDetector] Token info not in cache, fetching async from Gamma API")
+		go d.fetchAndCacheTokenInfo(tokenID)
 	}
 
 	// Convert to TradeDetail with all the data from blockchain
@@ -634,4 +636,58 @@ func logBlockchainLatency(blockNum uint64, detectedAt time.Time, txHash string) 
 	latency := detectedAt.Sub(blockTime)
 	log.Printf("[RealtimeDetector] ⏱️ LATENCY: %dms (block=%d @ %s, detected=%s) tx=%s",
 		latency.Milliseconds(), blockNum, blockTime.Format("15:04:05"), detectedAt.Format("15:04:05.000"), txHash[:16])
+}
+
+// fetchAndCacheTokenInfo fetches token info from Gamma API and caches it
+func (d *RealtimeDetector) fetchAndCacheTokenInfo(tokenID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Fetch from Gamma API directly
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/tokens?token_ids=%s", tokenID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("[RealtimeDetector] Failed to create request: %v", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[RealtimeDetector] Failed to fetch from Gamma: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("[RealtimeDetector] Gamma API returned %d", resp.StatusCode)
+		return
+	}
+
+	var tokens []struct {
+		TokenID     string `json:"token_id"`
+		ConditionID string `json:"condition_id"`
+		Outcome     string `json:"outcome"`
+		Question    string `json:"question"`
+		Slug        string `json:"market_slug"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+		log.Printf("[RealtimeDetector] Failed to decode Gamma response: %v", err)
+		return
+	}
+
+	if len(tokens) == 0 {
+		log.Printf("[RealtimeDetector] No token found in Gamma for ID: %s", tokenID)
+		return
+	}
+
+	token := tokens[0]
+
+	// Cache it for future trades
+	if err := d.store.SaveTokenInfo(ctx, tokenID, token.ConditionID, token.Outcome, token.Question, token.Slug); err != nil {
+		log.Printf("[RealtimeDetector] Failed to cache token info: %v", err)
+		return
+	}
+
+	log.Printf("[RealtimeDetector] Cached token info: %s - %s", token.Question, token.Outcome)
 }
