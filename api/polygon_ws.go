@@ -31,6 +31,7 @@ const (
 // PolygonTradeEvent represents a decoded trade from the blockchain
 type PolygonTradeEvent struct {
 	TxHash       string
+	LogIndex     string // unique within transaction - needed to distinguish multiple fills
 	BlockNumber  uint64
 	Maker        string // maker address (lowercase, 0x-prefixed)
 	Taker        string // taker address (lowercase, 0x-prefixed)
@@ -336,7 +337,7 @@ func (c *PolygonWSClient) handleMessage(data []byte) {
 	c.statsMu.Unlock()
 
 	// Parse the event
-	event, err := c.decodeOrderFilledEvent(logEntry.Topics, logEntry.Data, logEntry.TransactionHash, logEntry.BlockNumber)
+	event, err := c.decodeOrderFilledEvent(logEntry.Topics, logEntry.Data, logEntry.TransactionHash, logEntry.BlockNumber, logEntry.LogIndex)
 	if err != nil {
 		log.Printf("[PolygonWS] Failed to decode event: %v", err)
 		return
@@ -364,9 +365,10 @@ func (c *PolygonWSClient) handleMessage(data []byte) {
 }
 
 // decodeOrderFilledEvent decodes an OrderFilled event from topics and data
-func (c *PolygonWSClient) decodeOrderFilledEvent(topics []string, data string, txHash string, blockNum string) (PolygonTradeEvent, error) {
+func (c *PolygonWSClient) decodeOrderFilledEvent(topics []string, data string, txHash string, blockNum string, logIndex string) (PolygonTradeEvent, error) {
 	event := PolygonTradeEvent{
 		TxHash:    txHash,
+		LogIndex:  logIndex, // unique within tx - needed to process all fills
 		Timestamp: time.Now(), // Blockchain event is essentially real-time
 	}
 

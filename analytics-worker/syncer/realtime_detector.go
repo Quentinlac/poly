@@ -336,13 +336,16 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	d.metrics.LastDetectionTime = detectedAt
 	d.metricsMu.Unlock()
 
-	// Check if we already processed this transaction
+	// Check if we already processed this specific log event
+	// Use TxHash+LogIndex as key because one tx can have MULTIPLE OrderFilled events
+	// (e.g., market order filling against multiple limit orders)
+	eventKey := event.TxHash + ":" + event.LogIndex
 	d.processedTxsMu.Lock()
-	if d.processedTxs[event.TxHash] {
+	if d.processedTxs[eventKey] {
 		d.processedTxsMu.Unlock()
 		return
 	}
-	d.processedTxs[event.TxHash] = true
+	d.processedTxs[eventKey] = true
 	// Cleanup old entries (keep last 1000)
 	if len(d.processedTxs) > 1000 {
 		for k := range d.processedTxs {
@@ -476,8 +479,13 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	}
 
 	// Convert to TradeDetail with all the data from blockchain
+	// Use TxHash:LogIndex as ID to ensure uniqueness for multiple fills in same tx
+	tradeID := event.TxHash
+	if event.LogIndex != "" {
+		tradeID = event.TxHash + ":" + event.LogIndex
+	}
 	detail := models.TradeDetail{
-		ID:              event.TxHash,
+		ID:              tradeID,
 		UserID:          userAddr,
 		MarketID:        tokenID, // Token ID from blockchain
 		Type:            "TRADE",
