@@ -706,17 +706,20 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// - USDC amounts: max 4 decimal places (0.0001 precision)
 	// In 6-decimal representation: 2 decimals = divisible by 10000, 4 decimals = divisible by 100
 
-	// First, round size to 2 decimal places (required precision for tokens)
-	size = float64(int(size*100+0.5)) / 100
+	// Round size to 2 decimal places and convert to integer in one step to avoid floating point errors
+	// size * 100 -> round -> this gives us "cents" of tokens (2 decimal places)
+	sizeIn2Dec := int64(size*100 + 0.5)
+	// Convert to 6-decimal representation: multiply by 10000 (since we already have 2 decimals)
+	sizeInt := big.NewInt(sizeIn2Dec * 10000)
 
-	// Calculate USDC based on rounded size
-	usdcValue := size * price
-	// Round USDC to 4 decimal places
-	usdcValue = float64(int(usdcValue*10000+0.5)) / 10000
-
-	// Convert to 6-decimal integers
-	sizeInt := big.NewInt(int64(size * 1e6))
-	usdcInt := big.NewInt(int64(usdcValue * 1e6))
+	// Calculate USDC value using integer math to avoid floating point errors
+	// price is already in 2 decimal places (0.01 tick size)
+	priceIn2Dec := int64(price*100 + 0.5)
+	// usdcValue = size * price, but we need 4 decimal precision
+	// sizeIn2Dec * priceIn2Dec = value in 4 decimals (2+2=4)
+	usdcIn4Dec := sizeIn2Dec * priceIn2Dec / 100 // Divide by 100 to get back to 4 decimals
+	// Convert to 6-decimal representation: multiply by 100 (since we have 4 decimals)
+	usdcInt := big.NewInt(usdcIn4Dec * 100)
 
 	if side == SideBuy {
 		// BUY: makerAmount=USDC, takerAmount=tokens
