@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -409,14 +410,21 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		}
 	}
 
-	log.Printf("[RealtimeDetector] Trade decoded: role=%s side=%s tokenID=%s...", role, side, tokenID[:20])
-
-	// Clean up token ID (remove leading zeros if needed)
-	if len(tokenID) == 66 && tokenID[:2] == "0x" {
-		// Token IDs are 32 bytes (64 hex + 0x prefix)
-		// Convert to decimal string for compatibility
-		tokenID = tokenID // Keep as hex for now, copy_trader will handle it
+	// Convert hex token ID to decimal string (APIs expect decimal format)
+	if len(tokenID) >= 2 && tokenID[:2] == "0x" {
+		hexVal := strings.TrimPrefix(tokenID, "0x")
+		// Remove leading zeros
+		hexVal = strings.TrimLeft(hexVal, "0")
+		if hexVal == "" {
+			hexVal = "0"
+		}
+		// Convert to big.Int then to decimal string
+		bigInt := new(big.Int)
+		bigInt.SetString(hexVal, 16)
+		tokenID = bigInt.String()
 	}
+
+	log.Printf("[RealtimeDetector] Trade decoded: role=%s side=%s tokenID=%s", role, side, tokenID)
 
 	// Convert to TradeDetail
 	detail := models.TradeDetail{
