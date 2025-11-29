@@ -109,10 +109,12 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 	}
 
 	// Start Polymarket WebSocket client for market events (supplementary)
-	d.wsClient = api.NewWSClient(d.handleWSTradeEvent)
-	if err := d.wsClient.Start(ctx); err != nil {
-		log.Printf("[RealtimeDetector] Warning: Polymarket WebSocket failed to start: %v", err)
-		// Continue without WebSocket - we'll rely on polling
+	// Only useful when blockchain WS is NOT enabled (it only logs market activity, not user trades)
+	if d.polygonWS == nil {
+		d.wsClient = api.NewWSClient(d.handleWSTradeEvent)
+		if err := d.wsClient.Start(ctx); err != nil {
+			log.Printf("[RealtimeDetector] Warning: Polymarket WebSocket failed to start: %v", err)
+		}
 	}
 
 	d.running = true
