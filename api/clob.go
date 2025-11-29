@@ -780,6 +780,22 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// Round USDC to 4 decimal places
 	usdcValue = float64(int(usdcValue*10000+0.5)) / 10000
 
+	// Polymarket requires minimum $1 for marketable orders
+	// If rounding caused us to drop below $1, bump up the size
+	const minOrderUSDC = 1.0
+	if side == SideBuy && usdcValue < minOrderUSDC && price > 0 {
+		// Calculate minimum size needed to reach $1
+		minSize := minOrderUSDC / price
+		// Round UP to 2 decimal places
+		minSize = float64(int(minSize*100)+1) / 100
+		if minSize > size {
+			log.Printf("[CLOB] Bumping size from %.4f to %.4f to meet $1 minimum (price=%.4f)", size, minSize, price)
+			size = minSize
+			usdcValue = size * price
+			usdcValue = float64(int(usdcValue*10000+0.5)) / 10000
+		}
+	}
+
 	// Convert to 6-decimal integers
 	sizeInt := big.NewInt(int64(size * 1e6))
 	usdcInt := big.NewInt(int64(usdcValue * 1e6))
