@@ -111,7 +111,7 @@ func main() {
 			log.Printf("[Worker] Warning: Failed to start auto-redeemer: %v", err)
 		} else {
 			defer redeemer.Stop()
-			log.Println("[Worker] Auto-redeemer started (checking every 5 sec)")
+			log.Println("[Worker] Auto-redeemer started (checking every 60 sec)")
 		}
 	}
 

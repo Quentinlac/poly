@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	// Redeem check interval
-	redeemInterval = 5 * time.Second
+	// Redeem check interval - not too frequent to avoid rate limits
+	redeemInterval = 60 * time.Second
+	// Delay between individual redeem calls to avoid rate limits
+	redeemDelay = 3 * time.Second
 )
 
 // AutoRedeemer automatically redeems resolved positions via Polymarket Relayer
@@ -33,6 +35,10 @@ type AutoRedeemer struct {
 	running bool
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
+
+	// Track submitted redeems to avoid duplicates
+	submittedRedeems   map[string]time.Time
+	submittedRedeemsMu sync.RWMutex
 
 	// Stats
 	totalRedeemed  int
@@ -93,10 +99,11 @@ func NewAutoRedeemer(apiClient *api.Client) (*AutoRedeemer, error) {
 		safeAddr.Hex(), eoaAddr.Hex())
 
 	return &AutoRedeemer{
-		client:        apiClient,
-		relayerClient: relayerClient,
-		safeAddr:      safeAddr,
-		stopCh:        make(chan struct{}),
+		client:           apiClient,
+		relayerClient:    relayerClient,
+		safeAddr:         safeAddr,
+		stopCh:           make(chan struct{}),
+		submittedRedeems: make(map[string]time.Time),
 	}, nil
 }
 
@@ -162,6 +169,16 @@ func (ar *AutoRedeemer) redeemLoop(ctx context.Context) {
 }
 
 func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
+	// Clean up old submitted entries (older than 10 minutes)
+	ar.submittedRedeemsMu.Lock()
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for key, submittedAt := range ar.submittedRedeems {
+		if submittedAt.Before(cutoff) {
+			delete(ar.submittedRedeems, key)
+		}
+	}
+	ar.submittedRedeemsMu.Unlock()
+
 	// Get open positions
 	positions, err := ar.client.GetOpenPositions(ctx, ar.safeAddr.Hex())
 	if err != nil {
@@ -182,8 +199,17 @@ func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
 		// Position is redeemable if:
 		// 1. curPrice is exactly 0 or 1 (resolved)
 		// 2. We have tokens to redeem
+		// 3. Not already submitted
 		if size > 0.001 && (curPrice < 0.001 || curPrice > 0.999) {
-			redeemable = append(redeemable, pos)
+			// Check if already submitted
+			key := pos.ConditionID + "-" + pos.Outcome
+			ar.submittedRedeemsMu.RLock()
+			_, alreadySubmitted := ar.submittedRedeems[key]
+			ar.submittedRedeemsMu.RUnlock()
+
+			if !alreadySubmitted {
+				redeemable = append(redeemable, pos)
+			}
 		}
 	}
 
@@ -191,14 +217,26 @@ func (ar *AutoRedeemer) checkAndRedeem(ctx context.Context) {
 		return // No redeemable positions
 	}
 
-	log.Printf("[AutoRedeemer] Found %d redeemable positions", len(redeemable))
+	log.Printf("[AutoRedeemer] Found %d redeemable positions to submit", len(redeemable))
 
-	// Redeem each position via Relayer (gasless!)
-	for _, pos := range redeemable {
+	// Redeem each position via Relayer (gasless!) with delay between calls
+	for i, pos := range redeemable {
+		// Add delay between calls to avoid rate limits (skip first)
+		if i > 0 {
+			time.Sleep(redeemDelay)
+		}
+
+		key := pos.ConditionID + "-" + pos.Outcome
+
 		if err := ar.redeemPosition(ctx, pos); err != nil {
 			log.Printf("[AutoRedeemer] Failed to redeem %s: %v", pos.Title, err)
 			continue
 		}
+
+		// Mark as submitted
+		ar.submittedRedeemsMu.Lock()
+		ar.submittedRedeems[key] = time.Now()
+		ar.submittedRedeemsMu.Unlock()
 
 		// Track stats
 		ar.statsMu.Lock()
