@@ -117,9 +117,15 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 
 	d.running = true
 
-	// Start fast polling loop (fallback detection method)
-	d.wg.Add(1)
-	go d.fastPollLoop(ctx)
+	// Start fast polling loop ONLY if blockchain WebSocket is NOT enabled
+	// When blockchain WS is active, it provides ~1s detection - no need for slow 28s+ API polling
+	if d.polygonWS == nil {
+		d.wg.Add(1)
+		go d.fastPollLoop(ctx)
+		log.Printf("[RealtimeDetector] API polling enabled (fallback mode)")
+	} else {
+		log.Printf("[RealtimeDetector] API polling DISABLED (using blockchain WebSocket)")
+	}
 
 	// Start user refresh loop (every 30s)
 	d.wg.Add(1)
