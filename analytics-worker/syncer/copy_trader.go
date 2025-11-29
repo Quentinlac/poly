@@ -621,7 +621,6 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	// Get per-user settings or use defaults
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
-	var maxUSD *float64
 
 	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
 	if err == nil && userSettings != nil {
@@ -631,311 +630,44 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 		}
 		multiplier = userSettings.Multiplier
 		minUSDC = userSettings.MinUSDC
-		maxUSD = userSettings.MaxUSD
-		log.Printf("[CopyTrader] Using custom settings for %s: multiplier=%.4f, minUSDC=$%.2f, maxUSD=%v",
-			trade.UserID, multiplier, minUSDC, maxUSD)
 	}
 
-	// Calculate amount to buy
-	intendedUSDC := trade.UsdcSize * multiplier
+	log.Printf("[CopyTrader] BUY: Sending to main app - tokenID=%s, multiplier=%.2f, minUSDC=$%.2f",
+		tokenID, multiplier, minUSDC)
 
-	// Ensure minimum order
-	if intendedUSDC < minUSDC {
-		intendedUSDC = minUSDC
-		log.Printf("[CopyTrader] BUY amount below minimum, using $%.2f", intendedUSDC)
-	}
-
-	// Apply max cap if set
-	if maxUSD != nil && intendedUSDC > *maxUSD {
-		log.Printf("[CopyTrader] BUY amount $%.2f exceeds max cap $%.2f, capping", intendedUSDC, *maxUSD)
-		intendedUSDC = *maxUSD
-	}
-
-	// Calculate max allowed price based on tiered slippage
-	// For blockchain trades (price=0), skip slippage check - execute at market
-	var maxAllowedPrice float64
-	if trade.Price > 0 {
-		maxSlippage := getMaxSlippage(trade.Price)
-		maxAllowedPrice = trade.Price * (1 + maxSlippage)
-		log.Printf("[CopyTrader] DEBUG executeBuy: trade.Price=%.4f, maxSlippage=%.0f%%, maxAllowedPrice=%.4f",
-			trade.Price, maxSlippage*100, maxAllowedPrice)
-	} else {
-		// Blockchain trade - no price info, allow any price
-		maxAllowedPrice = 1.0 // Max possible price is 1.0 (100%)
-		log.Printf("[CopyTrader] DEBUG executeBuy: blockchain trade (no price), allowing any price")
-	}
-
-	log.Printf("[CopyTrader] DEBUG executeBuy: trade.MarketID=%s, tokenID=%s", trade.MarketID, tokenID)
-
-	// Add token to cache for faster order book lookups
-	ct.clobClient.AddTokenToCache(tokenID)
-
-	// Retry loop: check every second for up to 3 minutes for affordable liquidity
-	const maxRetryDuration = 3 * time.Minute
-	const retryInterval = 1 * time.Second
-	startTime := time.Now()
-	attempt := 0
-	remainingUSDC := intendedUSDC
-	totalSizeBought := 0.0
-	totalUSDCSpent := 0.0
-	var lastOrderID string
-
-	for remainingUSDC >= minUSDC && time.Since(startTime) < maxRetryDuration {
-		attempt++
-
-		// Get order book - use cached for first attempt (speed), fresh for retries (accuracy)
-		var book *api.OrderBook
-		var err error
-		if attempt == 1 {
-			book, err = ct.clobClient.GetCachedOrderBook(ctx, tokenID)
-		} else {
-			book, err = ct.clobClient.GetOrderBook(ctx, tokenID)
-		}
-		if err != nil {
-			// If market doesn't exist (404), skip immediately - it's likely closed/resolved
-			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
-				log.Printf("[CopyTrader] BUY: market closed/resolved, skipping: %v", err)
-				return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "skipped", "market closed/resolved", "")
-			}
-			log.Printf("[CopyTrader] BUY attempt %d: failed to get order book: %v", attempt, err)
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		// DEBUG: Log order book details
-		if attempt == 1 {
-			log.Printf("[CopyTrader] DEBUG executeBuy: OrderBook response - asset_id=%s, market=%s, numAsks=%d, numBids=%d",
-				book.AssetID, book.Market, len(book.Asks), len(book.Bids))
-			if book.AssetID != tokenID {
-				log.Printf("[CopyTrader] WARNING: OrderBook asset_id MISMATCH! requested=%s, got=%s", tokenID, book.AssetID)
-			}
-		}
-
-		if len(book.Asks) == 0 {
-			if attempt == 1 {
-				log.Printf("[CopyTrader] BUY attempt %d: no asks in order book, will retry...", attempt)
-			}
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		// Find how much we can buy at or below maxAllowedPrice
-		affordableSize := 0.0
-		affordableUSDC := 0.0
-		bestAskPrice := 0.0
-
-		for i, ask := range book.Asks {
-			price, _ := fmt.Sscanf(ask.Price, "%f", &bestAskPrice)
-			if price == 0 {
-				continue
-			}
-			var askPrice, askSize float64
-			fmt.Sscanf(ask.Price, "%f", &askPrice)
-			fmt.Sscanf(ask.Size, "%f", &askSize)
-
-			if i == 0 {
-				bestAskPrice = askPrice
-			}
-
-			if askPrice > maxAllowedPrice {
-				break // No more affordable liquidity at this level or beyond
-			}
-
-			levelCost := askPrice * askSize
-			if affordableUSDC+levelCost <= remainingUSDC {
-				affordableSize += askSize
-				affordableUSDC += levelCost
-			} else {
-				// Partial fill at this level
-				remainingForLevel := remainingUSDC - affordableUSDC
-				partialSize := remainingForLevel / askPrice
-				affordableSize += partialSize
-				affordableUSDC += remainingForLevel
-				break
-			}
-		}
-
-		// Log timing info on first attempt
-		if attempt == 1 {
-			delay := time.Since(trade.Timestamp)
-			log.Printf("[CopyTrader] DEBUG executeBuy: trade.Timestamp=%s, delay=%s",
-				trade.Timestamp.Format("15:04:05.000"), delay.Round(time.Millisecond))
-			// Log top 3 asks for debugging
-			for i, ask := range book.Asks {
-				if i >= 3 {
-					break
-				}
-				log.Printf("[CopyTrader] DEBUG executeBuy: Ask[%d] price=%s size=%s", i, ask.Price, ask.Size)
-			}
-		}
-
-		// If no affordable liquidity, wait and retry
-		if affordableSize < 0.01 || affordableUSDC < minUSDC {
-			if attempt == 1 {
-				log.Printf("[CopyTrader] BUY attempt %d: price too high (best ask %.4f > max %.4f), will retry for up to 3 min...",
-					attempt, bestAskPrice, maxAllowedPrice)
-			} else if attempt%30 == 0 { // Log every 30 seconds
-				log.Printf("[CopyTrader] BUY attempt %d: still waiting for affordable price (best ask %.4f > max %.4f), elapsed=%s",
-					attempt, bestAskPrice, maxAllowedPrice, time.Since(startTime).Round(time.Second))
-			}
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		// We have affordable liquidity - place the order
-		log.Printf("[CopyTrader] BUY attempt %d: found affordable liquidity - size=%.4f, cost=$%.4f, bestAsk=%.4f, maxAllowed=%.4f",
-			attempt, affordableSize, affordableUSDC, bestAskPrice, maxAllowedPrice)
-
-		log.Printf("[CopyTrader] BUY: Original=$%.2f@%.4f, Copy=$%.4f, CurrentAsk=%.4f, MaxPrice=%.4f, Market=%s, Outcome=%s",
-			trade.UsdcSize, trade.Price, affordableUSDC, bestAskPrice, maxAllowedPrice, trade.Title, trade.Outcome)
-
-		// Place order for affordable amount
-		resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideBuy, affordableUSDC, negRisk)
-		if err != nil {
-			log.Printf("[CopyTrader] BUY attempt %d: order failed: %v", attempt, err)
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		if !resp.Success {
-			log.Printf("[CopyTrader] BUY attempt %d: order rejected: %s", attempt, resp.ErrorMsg)
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		// Order succeeded
-		sizeBought, avgPrice, actualUSDC := api.CalculateOptimalFill(book, api.SideBuy, affordableUSDC)
-		totalSizeBought += sizeBought
-		totalUSDCSpent += actualUSDC
-		remainingUSDC -= actualUSDC
-		lastOrderID = resp.OrderID
-
-		log.Printf("[CopyTrader] BUY success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, Spent=$%.4f, Remaining=$%.4f",
-			resp.OrderID, sizeBought, avgPrice, actualUSDC, remainingUSDC)
-
-		// If we've filled enough or remaining is below minimum, we're done
-		if remainingUSDC < minUSDC {
-			break
-		}
-
-		// Small delay before next attempt to fill remaining
-		time.Sleep(retryInterval)
-	}
-
-	// Log final result and update position
-	if totalSizeBought > 0 {
-		log.Printf("[CopyTrader] BUY completed: TotalSize=%.4f, TotalSpent=$%.4f, Attempts=%d, Duration=%s",
-			totalSizeBought, totalUSDCSpent, attempt, time.Since(startTime).Round(time.Millisecond))
-
-		avgPrice := totalUSDCSpent / totalSizeBought
-		if err := ct.store.UpdateMyPosition(ctx, MyPosition{
-			MarketID:  trade.MarketID,
-			TokenID:   tokenID,
-			Outcome:   trade.Outcome,
-			Title:     trade.Title,
-			Size:      totalSizeBought,
-			AvgPrice:  avgPrice,
-			TotalCost: totalUSDCSpent,
-		}); err != nil {
-			log.Printf("[CopyTrader] Warning: failed to update position: %v", err)
-		}
-
-		return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, totalUSDCSpent, avgPrice, totalSizeBought, "executed", "", lastOrderID)
-	}
-
-	// No fills after 3 minutes - log as skipped
-	log.Printf("[CopyTrader] BUY gave up: no affordable liquidity found after %d attempts over %s",
-		attempt, time.Since(startTime).Round(time.Second))
-	return ct.logCopyTrade(ctx, trade, tokenID, intendedUSDC, 0, 0, 0, "skipped",
-		fmt.Sprintf("no affordable liquidity after %d attempts over %s", attempt, maxRetryDuration), "")
-}
-
-func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
-	// Get actual position from Polymarket API - this is the source of truth
-	var sellSize float64
-	actualPositions, err := ct.client.GetOpenPositions(ctx, ct.myAddress)
+	// Send to main app for execution (critical path)
+	resp, err := ct.executeViaMainApp(ctx, trade, tokenID, "BUY")
 	if err != nil {
-		log.Printf("[CopyTrader] SELL: Warning: failed to fetch actual positions: %v, falling back to local tracking", err)
-	} else {
-		// Find matching position by tokenID
-		for _, pos := range actualPositions {
-			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
-				sellSize = pos.Size.Float64()
-				log.Printf("[CopyTrader] SELL: Found actual position from API: %.4f tokens", sellSize)
-				break
-			}
-		}
-	}
-
-	// Fall back to local tracking if API didn't return position
-	if sellSize <= 0 {
-		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
-		if err != nil || position.Size <= 0 {
-			log.Printf("[CopyTrader] SELL: No position to sell for %s/%s (checked both API and local)", trade.Title, trade.Outcome)
-			return nil
-		}
-		sellSize = position.Size
-		log.Printf("[CopyTrader] SELL: Using local position: %.4f tokens", sellSize)
-	}
-
-	// Add token to cache for faster order book lookups
-	ct.clobClient.AddTokenToCache(tokenID)
-
-	// Calculate USDC value for market sell (sell everything at market)
-	// We need to estimate the USDC we'll get - use cached order book for speed
-	book, err := ct.clobClient.GetCachedOrderBook(ctx, tokenID)
-	if err != nil {
-		// If market doesn't exist (404), skip - it's likely closed/resolved
-		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
-			log.Printf("[CopyTrader] SELL: market closed/resolved, skipping: %v", err)
-			return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "")
-		}
-		errMsg := fmt.Sprintf("failed to get order book: %v", err)
-		log.Printf("[CopyTrader] SELL failed: %s", errMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", errMsg, "")
-	}
-
-	if len(book.Bids) == 0 {
-		errMsg := "no bids in order book - no liquidity"
-		log.Printf("[CopyTrader] SELL failed: %s", errMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", errMsg, "")
-	}
-
-	// Get best bid for logging
-	bestBidPrice := 0.0
-	fmt.Sscanf(book.Bids[0].Price, "%f", &bestBidPrice)
-
-	// Estimate USDC we'll receive from market sell
-	estimatedUSDC := sellSize * bestBidPrice
-
-	log.Printf("[CopyTrader] SELL: Market selling %.4f tokens at ~%.4f, expected ~$%.2f, Market=%s, Outcome=%s",
-		sellSize, bestBidPrice, estimatedUSDC, trade.Title, trade.Outcome)
-
-	// Place market sell order - sell everything at best available price
-	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, estimatedUSDC, negRisk)
-	if err != nil {
-		errMsg := fmt.Sprintf("market sell failed: %v", err)
-		log.Printf("[CopyTrader] SELL failed: %s", errMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, bestBidPrice, sellSize, "failed", errMsg, "")
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "")
 	}
 
 	if !resp.Success {
-		log.Printf("[CopyTrader] SELL rejected: %s", resp.ErrorMsg)
-		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, bestBidPrice, sellSize, "failed", resp.ErrorMsg, "")
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "")
 	}
 
-	// Calculate actual fill from order book
-	sizeSold, avgPrice, actualUSDC := api.CalculateOptimalFill(book, api.SideSell, estimatedUSDC)
+	log.Printf("[CopyTrader] BUY executed via main app: orderID=%s, price=%.4f, size=%.4f, executionMs=%d",
+		resp.OrderID, resp.FollowerPrice, resp.FollowerShares, resp.ExecutionMs)
 
-	log.Printf("[CopyTrader] SELL success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.2f",
-		resp.OrderID, resp.Status, sizeSold, avgPrice, actualUSDC)
+	return ct.logCopyTrade(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID)
+}
 
-	// Clear local position tracking
-	if err := ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome); err != nil {
-		log.Printf("[CopyTrader] Warning: failed to clear position: %v", err)
+func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
+	log.Printf("[CopyTrader] SELL: Sending to main app - tokenID=%s", tokenID)
+
+	// Send to main app for execution (critical path)
+	resp, err := ct.executeViaMainApp(ctx, trade, tokenID, "SELL")
+	if err != nil {
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("main app error: %v", err), "")
 	}
 
-	return ct.logCopyTrade(ctx, trade, tokenID, 0, actualUSDC, avgPrice, sizeSold, "executed", "", resp.OrderID)
+	if !resp.Success {
+		return ct.logCopyTrade(ctx, trade, tokenID, 0, 0, 0, 0, resp.Status, resp.FailedReason, "")
+	}
+
+	log.Printf("[CopyTrader] SELL executed via main app: orderID=%s, price=%.4f, size=%.4f, executionMs=%d",
+		resp.OrderID, resp.FollowerPrice, resp.FollowerShares, resp.ExecutionMs)
+
+	return ct.logCopyTrade(ctx, trade, tokenID, 0, resp.FollowerPrice*resp.FollowerShares, resp.FollowerPrice, resp.FollowerShares, "executed", "", resp.OrderID)
 }
 
 // executeBotBuy implements the bot following strategy for buys.
