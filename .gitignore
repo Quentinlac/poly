@@ -45,3 +45,4 @@ conv.md
 
 # DB sync script (contains credentials)
 sync-prod-db.sh
+analytics-worker/analytics-worker
