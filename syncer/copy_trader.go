@@ -184,16 +184,17 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	ct.clobClient.StartOrderBookCaching()
 
 	// Start real-time detector for faster trade detection
+	// Pass clobClient for fast CLOB API detection (~50ms latency)
 	// EnableBlockchainWS should only be true in the worker (heavy processing)
-	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade, ct.config.EnableBlockchainWS)
+	ct.detector = NewRealtimeDetector(ct.client, ct.clobClient, ct.store, ct.handleRealtimeTrade, ct.config.EnableBlockchainWS)
 	if err := ct.detector.Start(ctx); err != nil {
 		log.Printf("[CopyTrader] Warning: realtime detector failed to start: %v", err)
 		// Continue without it - we'll fall back to polling
 	} else {
 		if ct.config.EnableBlockchainWS {
-			log.Printf("[CopyTrader] Realtime detector started (blockchain WS + 200ms polling)")
+			log.Printf("[CopyTrader] Realtime detector started (CLOB API 100ms + blockchain WS backup)")
 		} else {
-			log.Printf("[CopyTrader] Realtime detector started (200ms polling only)")
+			log.Printf("[CopyTrader] Realtime detector started (CLOB API 100ms polling)")
 		}
 	}
 

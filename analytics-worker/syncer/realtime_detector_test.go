@@ -11,7 +11,7 @@ import (
 
 func TestNewRealtimeDetector(t *testing.T) {
 	t.Run("with blockchain WS enabled", func(t *testing.T) {
-		d := NewRealtimeDetector(nil, nil, nil, true, "")
+		d := NewRealtimeDetector(nil, nil, nil, nil, true, "")
 
 		if d.polygonWS == nil {
 			t.Error("polygonWS should be initialized when enableBlockchainWS is true")
@@ -31,7 +31,7 @@ func TestNewRealtimeDetector(t *testing.T) {
 	})
 
 	t.Run("with blockchain WS disabled", func(t *testing.T) {
-		d := NewRealtimeDetector(nil, nil, nil, false, "")
+		d := NewRealtimeDetector(nil, nil, nil, nil, false, "")
 
 		if d.polygonWS != nil {
 			t.Error("polygonWS should be nil when enableBlockchainWS is false")
@@ -49,7 +49,7 @@ func TestHandleBlockchainTrade(t *testing.T) {
 		mu.Unlock()
 	}
 
-	d := NewRealtimeDetector(nil, nil, callback, false, "")
+	d := NewRealtimeDetector(nil, nil, nil, callback, false, "")
 
 	// Set up followed user (with 0x prefix, lowercase - as NormalizeAddress does)
 	d.followedUsersMu.Lock()
@@ -191,7 +191,7 @@ func TestHandleBlockchainTrade(t *testing.T) {
 }
 
 func TestDetectorMetrics(t *testing.T) {
-	d := NewRealtimeDetector(nil, nil, nil, false, "")
+	d := NewRealtimeDetector(nil, nil, nil, nil, false, "")
 
 	// Initial metrics should be zero
 	metrics := d.GetMetrics()
@@ -223,7 +223,7 @@ func TestDetectorMetrics(t *testing.T) {
 }
 
 func TestAddRemoveFollowedUser(t *testing.T) {
-	d := NewRealtimeDetector(nil, nil, nil, false, "")
+	d := NewRealtimeDetector(nil, nil, nil, nil, false, "")
 
 	t.Run("AddFollowedUser", func(t *testing.T) {
 		d.AddFollowedUser("0x05c1882212a41aa8d7df5b70eebe03d9319345b7")
@@ -250,7 +250,7 @@ func TestAddRemoveFollowedUser(t *testing.T) {
 }
 
 func TestProcessedTxsCleanup(t *testing.T) {
-	d := NewRealtimeDetector(nil, nil, nil, false, "")
+	d := NewRealtimeDetector(nil, nil, nil, nil, false, "")
 
 	// Set up followed user (with 0x prefix)
 	d.followedUsersMu.Lock()
@@ -295,7 +295,7 @@ func TestSellTradeDetection(t *testing.T) {
 		mu.Unlock()
 	}
 
-	d := NewRealtimeDetector(nil, nil, callback, false, "")
+	d := NewRealtimeDetector(nil, nil, nil, callback, false, "")
 
 	// Set up followed user (with 0x prefix)
 	d.followedUsersMu.Lock()

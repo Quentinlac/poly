@@ -588,6 +588,72 @@ func (c *ClobClient) GetTokenInfoByID(ctx context.Context, tokenID string) (*Gam
 	}, nil
 }
 
+// GetCLOBTrades fetches trades from the CLOB /data/trades endpoint.
+// This endpoint has ~50ms latency (vs 30-80s for Data API) because it reflects
+// trades as soon as they're matched off-chain, before blockchain settlement.
+// Requires L2 authentication.
+func (c *ClobClient) GetCLOBTrades(ctx context.Context, params CLOBTradeParams) ([]CLOBTrade, error) {
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return nil, fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	values := url.Values{}
+	if params.Maker != "" {
+		values.Set("maker", params.Maker)
+	}
+	if params.Taker != "" {
+		values.Set("taker", params.Taker)
+	}
+	if params.Market != "" {
+		values.Set("market", params.Market)
+	}
+	if params.AssetID != "" {
+		values.Set("asset_id", params.AssetID)
+	}
+	if params.After > 0 {
+		values.Set("after", strconv.FormatInt(params.After, 10))
+	}
+	if params.Before > 0 {
+		values.Set("before", strconv.FormatInt(params.Before, 10))
+	}
+	if params.ID != "" {
+		values.Set("id", params.ID)
+	}
+
+	endpoint := c.baseURL + "/data/trades"
+	if len(values) > 0 {
+		endpoint += "?" + values.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	// Add L2 authentication headers
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("CLOB trades API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var trades []CLOBTrade
+	if err := json.NewDecoder(resp.Body).Decode(&trades); err != nil {
+		return nil, fmt.Errorf("decode trades: %w", err)
+	}
+
+	return trades, nil
+}
+
 // PlaceMarketOrder places a market order (FOK - Fill-Or-Kill)
 func (c *ClobClient) PlaceMarketOrder(ctx context.Context, tokenID string, side Side, amountUSDC float64, negRisk bool) (*OrderResponse, error) {
 	if c.apiCreds == nil {

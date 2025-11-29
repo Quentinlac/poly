@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,24 +16,25 @@ import (
 )
 
 // RealtimeDetector combines multiple data sources for fastest trade detection:
-// 1. Polygon blockchain WebSocket (FASTEST: ~1-2s from trade execution)
-// 2. Direct data-api polling (fallback: ~30-80s lag due to indexing)
-// 3. WebSocket for market activity (instant notification but no user addresses)
+// 1. CLOB API polling (PRIMARY: ~50-150ms latency - trades appear when matched off-chain)
+// 2. Polygon blockchain WebSocket (BACKUP: ~1-2s from trade execution)
+// 3. WebSocket for market activity (supplementary - instant notification but no user addresses)
 type RealtimeDetector struct {
 	apiClient   *api.Client
+	clobClient  *api.ClobClient      // For fast CLOB API trade detection (~50ms latency)
 	store       *storage.PostgresStore
 	wsClient    *api.WSClient
-	polygonWS   *api.PolygonWSClient // NEW: Blockchain WebSocket for instant detection
+	polygonWS   *api.PolygonWSClient // Blockchain WebSocket for backup detection
 
 	// Followed users
 	followedUsers   map[string]bool
 	followedUsersMu sync.RWMutex
 
-	// Last check timestamps per user
+	// Last check timestamps per user (using match_time from CLOB API)
 	lastCheck   map[string]time.Time
 	lastCheckMu sync.RWMutex
 
-	// Processed blockchain trades (to avoid duplicates)
+	// Processed trades (to avoid duplicates) - keyed by trade ID
 	processedTxs   map[string]bool
 	processedTxsMu sync.RWMutex
 
@@ -42,6 +44,9 @@ type RealtimeDetector struct {
 	// Metrics
 	metrics     *DetectorMetrics
 	metricsMu   sync.RWMutex
+
+	// Feature flag for CLOB detection (can fall back to Data API if needed)
+	useCLOBDetection bool
 
 	running bool
 	stopCh  chan struct{}
@@ -54,34 +59,42 @@ type DetectorMetrics struct {
 	AvgDetectionLatency time.Duration
 	FastestDetection    time.Duration
 	SlowestDetection    time.Duration
-	APIPolls            int64
+	CLOBPolls           int64 // CLOB API polls (primary, ~50ms latency)
+	DataAPIPolls        int64 // Data API polls (fallback, ~30-80s latency)
 	WebSocketEvents     int64
-	BlockchainEvents    int64 // NEW: Events from Polygon WebSocket
-	BlockchainMatches   int64 // NEW: Matched followed users on blockchain
+	BlockchainEvents    int64 // Events from Polygon WebSocket
+	BlockchainMatches   int64 // Matched followed users on blockchain
 	LastDetectionTime   time.Time
 }
 
 // NewRealtimeDetector creates a new real-time trade detector
-// enableBlockchainWS: if true, uses Polygon WebSocket for ~1s detection (heavy, use in worker only)
-func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
+// clobClient: required for fast CLOB API detection (~50ms latency)
+// enableBlockchainWS: if true, uses Polygon WebSocket for backup ~1s detection (heavy, use in worker only)
+func NewRealtimeDetector(apiClient *api.Client, clobClient *api.ClobClient, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
 	d := &RealtimeDetector{
-		apiClient:     apiClient,
-		store:         store,
-		followedUsers: make(map[string]bool),
-		lastCheck:     make(map[string]time.Time),
-		processedTxs:  make(map[string]bool),
-		onNewTrade:    onNewTrade,
-		metrics:       &DetectorMetrics{},
-		stopCh:        make(chan struct{}),
+		apiClient:        apiClient,
+		clobClient:       clobClient,
+		store:            store,
+		followedUsers:    make(map[string]bool),
+		lastCheck:        make(map[string]time.Time),
+		processedTxs:     make(map[string]bool),
+		onNewTrade:       onNewTrade,
+		metrics:          &DetectorMetrics{},
+		stopCh:           make(chan struct{}),
+		useCLOBDetection: clobClient != nil, // Enable CLOB detection if client is provided
 	}
 
-	// Create Polygon WebSocket client for real-time blockchain monitoring
+	// Create Polygon WebSocket client for backup blockchain monitoring
 	// Only enable in worker to avoid heavy processing in main API app
 	if enableBlockchainWS {
 		d.polygonWS = api.NewPolygonWSClient(d.handleBlockchainTrade)
-		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (~1s detection)")
+		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (backup ~1s detection)")
+	}
+
+	if d.useCLOBDetection {
+		log.Printf("[RealtimeDetector] CLOB API detection ENABLED (primary ~50ms latency)")
 	} else {
-		log.Printf("[RealtimeDetector] Blockchain WebSocket DISABLED (using API polling only)")
+		log.Printf("[RealtimeDetector] CLOB API detection DISABLED (using Data API fallback ~30-80s)")
 	}
 
 	return d
@@ -157,12 +170,13 @@ func (d *RealtimeDetector) GetMetrics() DetectorMetrics {
 	return *d.metrics
 }
 
-// fastPollLoop polls the data-api for followed users' trades at high frequency
+// fastPollLoop polls the CLOB API for followed users' trades at high frequency
 func (d *RealtimeDetector) fastPollLoop(ctx context.Context) {
 	defer d.wg.Done()
 
-	// Poll every 200ms for near real-time detection
-	ticker := time.NewTicker(200 * time.Millisecond)
+	// Poll every 100ms for real-time detection via CLOB API
+	// CLOB rate limit is 150 req/10s = 67ms minimum, we use 100ms for safety buffer
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -207,10 +221,6 @@ func (d *RealtimeDetector) pollFollowedUsers(ctx context.Context) {
 	}
 
 	wg.Wait()
-
-	d.metricsMu.Lock()
-	d.metrics.APIPolls++
-	d.metricsMu.Unlock()
 }
 
 // checkUserTrades checks for new trades from a specific user
@@ -224,16 +234,31 @@ func (d *RealtimeDetector) checkUserTrades(ctx context.Context, userAddr string)
 		lastCheck = time.Now().Add(-1 * time.Minute) // Start from 1 minute ago
 	}
 
-	// Fetch trades since last check using data-api (faster than subgraph)
-	trades, err := d.apiClient.GetActivity(ctx, api.TradeQuery{
-		User:  userAddr,
-		Limit: 50,
+	// Use CLOB API for fast detection (~50ms) or fall back to Data API (~30-80s)
+	if d.useCLOBDetection {
+		d.checkUserTradesCLOB(ctx, userAddr, lastCheck)
+	} else {
+		d.checkUserTradesDataAPI(ctx, userAddr, lastCheck)
+	}
+}
+
+// checkUserTradesCLOB fetches trades from CLOB API (primary method, ~50ms latency)
+func (d *RealtimeDetector) checkUserTradesCLOB(ctx context.Context, userAddr string, lastCheck time.Time) {
+	// Fetch trades since last check using CLOB API
+	trades, err := d.clobClient.GetCLOBTrades(ctx, api.CLOBTradeParams{
+		Maker: userAddr,
 		After: lastCheck.Unix(),
 	})
 	if err != nil {
-		// Don't log every error - too noisy at 200ms polling
+		// Don't log every error - too noisy at 100ms polling
+		// Fall back to Data API on persistent failures could be added here
 		return
 	}
+
+	// Update metrics
+	d.metricsMu.Lock()
+	d.metrics.CLOBPolls++
+	d.metricsMu.Unlock()
 
 	// Update last check time
 	d.lastCheckMu.Lock()
@@ -249,17 +274,29 @@ func (d *RealtimeDetector) checkUserTrades(ctx context.Context, userAddr string)
 		// Capture detection time immediately
 		detectedAt := time.Now()
 
-		// Convert to TradeDetail
-		detail := d.convertToTradeDetail(trade, userAddr)
-		detail.DetectedAt = detectedAt // Set when we detected this trade
+		// Convert CLOB trade to TradeDetail
+		detail := d.convertCLOBTradeToDetail(ctx, trade, userAddr)
+		detail.DetectedAt = detectedAt
 
-		// Check if we've already processed this trade
-		exists, _, _ := d.store.GetTokenIDFromCache(ctx, detail.ID, "processed")
-		if exists != "" {
+		// Check if we've already processed this trade (use trade ID)
+		d.processedTxsMu.Lock()
+		if d.processedTxs[trade.ID] {
+			d.processedTxsMu.Unlock()
 			continue // Already processed
 		}
+		d.processedTxs[trade.ID] = true
+		// Cleanup old entries (keep last 1000)
+		if len(d.processedTxs) > 1000 {
+			for k := range d.processedTxs {
+				delete(d.processedTxs, k)
+				if len(d.processedTxs) <= 500 {
+					break
+				}
+			}
+		}
+		d.processedTxsMu.Unlock()
 
-		// Calculate detection latency
+		// Calculate detection latency (from match_time)
 		latency := time.Since(detail.Timestamp)
 
 		// Update metrics
@@ -280,18 +317,89 @@ func (d *RealtimeDetector) checkUserTrades(ctx context.Context, userAddr string)
 		}
 		d.metricsMu.Unlock()
 
-		log.Printf("[RealtimeDetector] New trade detected: user=%s side=%s price=%.4f latency=%s",
-			utils.ShortAddress(userAddr), trade.Side, trade.Price.Float64(), latency.Round(time.Millisecond))
+		log.Printf("[RealtimeDetector] 🚀 CLOB trade detected: user=%s side=%s price=%s latency=%s",
+			utils.ShortAddress(userAddr), trade.Side, trade.Price, latency.Round(time.Millisecond))
 
 		// Save to user_trades for historical record
 		if err := d.store.SaveTrades(ctx, []models.TradeDetail{detail}, false); err != nil {
 			log.Printf("[RealtimeDetector] Warning: failed to save trade to user_trades: %v", err)
 		}
 
-		// Mark as detected (to avoid duplicates)
+		// Mark as detected in cache (for Data API deduplication)
 		d.store.CacheTokenID(ctx, detail.ID, "processed", "true", false)
 
 		// Notify callback
+		if d.onNewTrade != nil {
+			d.onNewTrade(detail)
+		}
+	}
+}
+
+// checkUserTradesDataAPI fetches trades from Data API (fallback method, ~30-80s latency)
+func (d *RealtimeDetector) checkUserTradesDataAPI(ctx context.Context, userAddr string, lastCheck time.Time) {
+	// Fetch trades since last check using data-api
+	trades, err := d.apiClient.GetActivity(ctx, api.TradeQuery{
+		User:  userAddr,
+		Limit: 50,
+		After: lastCheck.Unix(),
+	})
+	if err != nil {
+		return
+	}
+
+	// Update metrics
+	d.metricsMu.Lock()
+	d.metrics.DataAPIPolls++
+	d.metricsMu.Unlock()
+
+	// Update last check time
+	d.lastCheckMu.Lock()
+	d.lastCheck[userAddr] = time.Now()
+	d.lastCheckMu.Unlock()
+
+	if len(trades) == 0 {
+		return
+	}
+
+	// Process new trades
+	for _, trade := range trades {
+		detectedAt := time.Now()
+		detail := d.convertDataTradeToDetail(trade, userAddr)
+		detail.DetectedAt = detectedAt
+
+		// Check if we've already processed this trade
+		exists, _, _ := d.store.GetTokenIDFromCache(ctx, detail.ID, "processed")
+		if exists != "" {
+			continue
+		}
+
+		latency := time.Since(detail.Timestamp)
+
+		d.metricsMu.Lock()
+		d.metrics.TradesDetected++
+		d.metrics.LastDetectionTime = time.Now()
+		if d.metrics.FastestDetection == 0 || latency < d.metrics.FastestDetection {
+			d.metrics.FastestDetection = latency
+		}
+		if latency > d.metrics.SlowestDetection {
+			d.metrics.SlowestDetection = latency
+		}
+		if d.metrics.AvgDetectionLatency == 0 {
+			d.metrics.AvgDetectionLatency = latency
+		} else {
+			d.metrics.AvgDetectionLatency = (d.metrics.AvgDetectionLatency + latency) / 2
+		}
+		d.metricsMu.Unlock()
+
+		log.Printf("[RealtimeDetector] Data API trade detected: user=%s side=%s price=%.4f latency=%s",
+			utils.ShortAddress(userAddr), trade.Side, trade.Price.Float64(), latency.Round(time.Millisecond))
+
+		if err := d.store.SaveTrades(ctx, []models.TradeDetail{detail}, false); err != nil {
+			log.Printf("[RealtimeDetector] Warning: failed to save trade to user_trades: %v", err)
+		}
+
+		d.store.CacheTokenID(ctx, detail.ID, "processed", "true", false)
+
 		if d.onNewTrade != nil {
 			d.onNewTrade(detail)
 		}
@@ -475,8 +583,65 @@ func (d *RealtimeDetector) RemoveFollowedUser(userAddr string) {
 	d.followedUsersMu.Unlock()
 }
 
-// convertToTradeDetail converts an API trade to a TradeDetail
-func (d *RealtimeDetector) convertToTradeDetail(trade api.DataTrade, userAddr string) models.TradeDetail {
+// convertCLOBTradeToDetail converts a CLOB API trade to a TradeDetail
+// CLOB trades have different field names and string types that need parsing
+func (d *RealtimeDetector) convertCLOBTradeToDetail(ctx context.Context, trade api.CLOBTrade, userAddr string) models.TradeDetail {
+	// Parse numeric values from strings
+	size, _ := strconv.ParseFloat(trade.Size, 64)
+	price, _ := strconv.ParseFloat(trade.Price, 64)
+	usdcSize := size * price // Calculate USDC value
+
+	// Parse match_time timestamp
+	matchTime, _ := strconv.ParseInt(trade.MatchTime, 10, 64)
+	timestamp := time.Unix(matchTime, 0).UTC()
+
+	// Use trade ID as the unique identifier
+	tradeID := trade.ID
+	if tradeID == "" && trade.TransactionHash != "" {
+		tradeID = trade.TransactionHash
+	}
+
+	// Determine role (maker = placed limit order, taker = took from book)
+	role := "TAKER" // Default assumption for copy trading
+	if trade.MakerAddress == userAddr {
+		role = "MAKER"
+	}
+
+	// Try to get title/slug/outcome from token cache
+	title := ""
+	slug := ""
+	outcome := trade.Outcome // CLOB might provide this
+	if trade.AssetID != "" {
+		tokenInfo, err := d.store.GetTokenInfo(ctx, trade.AssetID)
+		if err == nil && tokenInfo != nil {
+			title = tokenInfo.Title
+			slug = tokenInfo.Slug
+			if outcome == "" {
+				outcome = tokenInfo.Outcome
+			}
+		}
+	}
+
+	return models.TradeDetail{
+		ID:              tradeID,
+		UserID:          utils.NormalizeAddress(userAddr),
+		MarketID:        trade.AssetID, // Token ID
+		Type:            "TRADE",
+		Side:            trade.Side,
+		Role:            role,
+		Size:            size,
+		UsdcSize:        usdcSize,
+		Price:           price,
+		Outcome:         outcome,
+		Title:           title,
+		Slug:            slug,
+		TransactionHash: trade.TransactionHash,
+		Timestamp:       timestamp,
+	}
+}
+
+// convertDataTradeToDetail converts a Data API trade to a TradeDetail
+func (d *RealtimeDetector) convertDataTradeToDetail(trade api.DataTrade, userAddr string) models.TradeDetail {
 	tradeID := trade.TransactionHash
 	if tradeID == "" {
 		tradeID = fmt.Sprintf("%s-%d-%s", trade.ProxyWallet, trade.Timestamp, trade.Asset)

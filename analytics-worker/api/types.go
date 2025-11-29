@@ -133,3 +133,50 @@ type OpenPosition struct {
 	EventSlug    string  `json:"eventSlug"`
 	ProxyWallet  string  `json:"proxyWallet"`
 }
+
+// CLOBTrade represents a trade from the CLOB /data/trades endpoint.
+// This endpoint has ~50ms latency vs 30-80s for the Data API.
+// Requires L2 authentication.
+type CLOBTrade struct {
+	ID              string            `json:"id"`
+	TakerOrderID    string            `json:"taker_order_id"`
+	Market          string            `json:"market"`       // condition_id
+	AssetID         string            `json:"asset_id"`     // token_id
+	Side            string            `json:"side"`         // BUY or SELL
+	Size            string            `json:"size"`         // string, needs parsing
+	Price           string            `json:"price"`        // string, needs parsing
+	FeeRateBps      string            `json:"fee_rate_bps"`
+	Status          string            `json:"status"`       // MATCHED, MINED, CONFIRMED
+	MatchTime       string            `json:"match_time"`   // Unix timestamp as string
+	LastUpdate      string            `json:"last_update"`
+	MakerAddress    string            `json:"maker_address"`
+	Owner           string            `json:"owner"`
+	TransactionHash string            `json:"transaction_hash"`
+	BucketIndex     int               `json:"bucket_index"`
+	Outcome         string            `json:"outcome"`
+	MakerOrders     []CLOBMakerOrder  `json:"maker_orders"`
+}
+
+// CLOBMakerOrder represents a maker order within a CLOB trade.
+type CLOBMakerOrder struct {
+	OrderID       string `json:"order_id"`
+	MakerAddress  string `json:"maker_address"`
+	Owner         string `json:"owner"`
+	MatchedAmount string `json:"matched_amount"`
+	Price         string `json:"price"`
+	AssetID       string `json:"asset_id"`
+	FeeRateBps    string `json:"fee_rate_bps"`
+	Side          string `json:"side"`
+	Outcome       string `json:"outcome"`
+}
+
+// CLOBTradeParams for filtering CLOB trades via /data/trades endpoint.
+type CLOBTradeParams struct {
+	Maker   string // Filter by maker address (the user we're following)
+	Taker   string // Filter by taker address
+	Market  string // Filter by market (condition_id)
+	AssetID string // Filter by token ID
+	After   int64  // Unix timestamp - trades after this
+	Before  int64  // Unix timestamp - trades before this
+	ID      string // Specific trade ID
+}
