@@ -285,7 +285,8 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 
 	// Start real-time detector for faster trade detection
 	// EnableBlockchainWS should only be true in the worker (heavy processing)
-	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade, ct.config.EnableBlockchainWS)
+	// Pass our address for blockchain confirmation tracking
+	ct.detector = NewRealtimeDetector(ct.client, ct.store, ct.handleRealtimeTrade, ct.config.EnableBlockchainWS, ct.myAddress)
 	if err := ct.detector.Start(ctx); err != nil {
 		log.Printf("[CopyTrader] Warning: realtime detector failed to start: %v", err)
 		// Continue without it - we'll fall back to polling

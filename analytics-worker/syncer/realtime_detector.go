@@ -72,12 +72,19 @@ type DetectorMetrics struct {
 
 // NewRealtimeDetector creates a new real-time trade detector
 // enableBlockchainWS: if true, uses Polygon WebSocket for ~1s detection (heavy, use in worker only)
-func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
+// myAddressOverride: if provided, use this address for blockchain confirmation tracking (overrides env var)
+func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool, myAddressOverride string) *RealtimeDetector {
 	// Get our own address for tracking blockchain confirmations
-	myAddress := strings.TrimSpace(os.Getenv("POLYMARKET_FUNDER_ADDRESS"))
+	// Priority: 1) myAddressOverride parameter, 2) POLYMARKET_FUNDER_ADDRESS env var
+	myAddress := strings.TrimSpace(myAddressOverride)
+	if myAddress == "" {
+		myAddress = strings.TrimSpace(os.Getenv("POLYMARKET_FUNDER_ADDRESS"))
+	}
 	if myAddress != "" {
 		myAddress = utils.NormalizeAddress(myAddress)
 		log.Printf("[RealtimeDetector] Will track blockchain confirmations for our address: %s", utils.ShortAddress(myAddress))
+	} else {
+		log.Printf("[RealtimeDetector] WARNING: No address configured for blockchain confirmation tracking")
 	}
 
 	d := &RealtimeDetector{
