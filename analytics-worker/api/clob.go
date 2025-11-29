@@ -715,10 +715,10 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	sizeInt := big.NewInt(sizeIn6Dec)
 
 	// USDC: calculate size * price, round to 4 decimals, convert to 6-decimal format
-	// Example: 1.56 * 0.006 = 0.00936 -> 0.0093 (truncate to 4 decimals) -> 9300 in 6-decimal
-	// Note: Polymarket truncates (floors) rather than rounds for USDC calculation
+	// Example: 1.69 * 0.59 = 0.9971 -> 9971 (in 4-dec) -> 997100 in 6-decimal
+	// Use +0.5 for rounding to avoid floating point truncation errors
 	usdcValue := size * price
-	usdcIn6Dec := (int64(usdcValue*10000) * 100) // Truncate to 4 decimals, convert to 6-decimal
+	usdcIn6Dec := (int64(usdcValue*10000+0.5) * 100) // Round to 4 decimals, convert to 6-decimal
 	usdcInt := big.NewInt(usdcIn6Dec)
 
 	if side == SideBuy {
