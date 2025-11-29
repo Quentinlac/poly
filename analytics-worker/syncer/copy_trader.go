@@ -217,6 +217,11 @@ type CopyTradeResponse struct {
 
 // executeViaMainApp sends trade to main app for execution (critical path)
 func (ct *CopyTrader) executeViaMainApp(ctx context.Context, trade models.TradeDetail, tokenID string, side string) (*CopyTradeResponse, error) {
+	httpStart := time.Now()
+	defer func() {
+		log.Printf("[CopyTrader] ⏱️ TIMING: mainAppHTTP=%dms", time.Since(httpStart).Milliseconds())
+	}()
+
 	req := CopyTradeRequest{
 		FollowingAddress: trade.UserID,
 		FollowingTradeID: trade.ID,
@@ -452,6 +457,8 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 }
 
 func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail) error {
+	processStart := time.Now()
+
 	// Skip non-TRADE types (REDEEM, SPLIT, MERGE)
 	if trade.Type != "" && trade.Type != "TRADE" {
 		log.Printf("[CopyTrader] Skipping non-trade: %s (type=%s)", trade.ID, trade.Type)
@@ -460,10 +467,13 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 
 	// Verify the token matches the intended outcome
 	// trade.MarketID is the token ID, but trade.Outcome might not match the actual token's outcome
+	tokenLookupStart := time.Now()
 	tokenID, actualOutcome, negRisk, err := ct.getVerifiedTokenID(ctx, trade)
+	log.Printf("[CopyTrader] ⏱️ TIMING: tokenLookup=%dms", time.Since(tokenLookupStart).Milliseconds())
 	if err != nil {
 		return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get token ID: %v", err), "")
 	}
+	_ = processStart // will use at end
 
 	// Update trade outcome if it was wrong
 	if actualOutcome != "" && actualOutcome != trade.Outcome {
