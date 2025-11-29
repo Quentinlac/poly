@@ -710,7 +710,8 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 
 	// Size: round to 2 decimals, then convert to 6-decimal format
 	// Example: 1.56 -> 1560000 (divisible by 10000 ✓)
-	sizeIn6Dec := int64(math.Round(size*100)) * 10000
+	// Use +0.5 and truncate for rounding (equivalent to math.Round)
+	sizeIn6Dec := int64(size*100+0.5) * 10000
 	sizeInt := big.NewInt(sizeIn6Dec)
 
 	// USDC: calculate size * price, round to 4 decimals, convert to 6-decimal format
