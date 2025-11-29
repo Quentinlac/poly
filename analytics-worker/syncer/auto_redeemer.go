@@ -34,7 +34,7 @@ const (
 	polygonChainID = 137
 
 	// Redeem check interval
-	redeemInterval = 15 * time.Minute
+	redeemInterval = 5 * time.Second
 )
 
 // Conditional Tokens ABI (only redeemPositions function)
