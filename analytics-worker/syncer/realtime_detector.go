@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,9 @@ type RealtimeDetector struct {
 	store       *storage.PostgresStore
 	wsClient    *api.WSClient
 	polygonWS   *api.PolygonWSClient // NEW: Blockchain WebSocket for instant detection
+
+	// Our own address (to track blockchain confirmations of our trades)
+	myAddress string
 
 	// Followed users
 	followedUsers   map[string]bool
@@ -69,9 +73,17 @@ type DetectorMetrics struct {
 // NewRealtimeDetector creates a new real-time trade detector
 // enableBlockchainWS: if true, uses Polygon WebSocket for ~1s detection (heavy, use in worker only)
 func NewRealtimeDetector(apiClient *api.Client, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
+	// Get our own address for tracking blockchain confirmations
+	myAddress := strings.TrimSpace(os.Getenv("POLYMARKET_FUNDER_ADDRESS"))
+	if myAddress != "" {
+		myAddress = utils.NormalizeAddress(myAddress)
+		log.Printf("[RealtimeDetector] Will track blockchain confirmations for our address: %s", utils.ShortAddress(myAddress))
+	}
+
 	d := &RealtimeDetector{
 		apiClient:     apiClient,
 		store:         store,
+		myAddress:     myAddress,
 		followedUsers: make(map[string]bool),
 		lastCheck:     make(map[string]time.Time),
 		processedTxs:  make(map[string]bool),
@@ -360,10 +372,22 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	// Determine which address is the followed user (maker or taker)
 	userAddr := ""
 	role := ""
+	isOurTrade := false
 	d.followedUsersMu.RLock()
 	makerNorm := utils.NormalizeAddress(event.Maker)
 	takerNorm := utils.NormalizeAddress(event.Taker)
-	if d.followedUsers[makerNorm] {
+
+	// Check if this is our own trade (for blockchain confirmation tracking)
+	if d.myAddress != "" && (makerNorm == d.myAddress || takerNorm == d.myAddress) {
+		isOurTrade = true
+		if makerNorm == d.myAddress {
+			userAddr = makerNorm
+			role = "MAKER"
+		} else {
+			userAddr = takerNorm
+			role = "TAKER"
+		}
+	} else if d.followedUsers[makerNorm] {
 		userAddr = makerNorm
 		role = "MAKER"
 	} else if d.followedUsers[takerNorm] {
@@ -374,6 +398,14 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 
 	if userAddr == "" {
 		return // Neither maker nor taker is followed (shouldn't happen)
+	}
+
+	if isOurTrade {
+		log.Printf("[RealtimeDetector] 📍 OUR TRADE CONFIRMED ON BLOCKCHAIN! role=%s block=%d tx=%s",
+			role, event.BlockNumber, event.TxHash[:16])
+		// Handle our own trade confirmation asynchronously
+		go d.handleOurBlockchainTrade(event, role, detectedAt)
+		return
 	}
 
 	log.Printf("[RealtimeDetector] 🚀 BLOCKCHAIN TRADE DETECTED! user=%s role=%s block=%d tx=%s detected=%s",
@@ -551,8 +583,14 @@ func (d *RealtimeDetector) refreshFollowedUsers(ctx context.Context) error {
 	d.followedUsersMu.Unlock()
 
 	// Update Polygon WebSocket with followed addresses for blockchain monitoring
+	// Also add our own address to track blockchain confirmations
 	if d.polygonWS != nil {
-		d.polygonWS.SetFollowedAddresses(users)
+		allAddrs := make([]string, 0, len(users)+1)
+		allAddrs = append(allAddrs, users...)
+		if d.myAddress != "" {
+			allAddrs = append(allAddrs, d.myAddress)
+		}
+		d.polygonWS.SetFollowedAddresses(allAddrs)
 	}
 
 	return nil
@@ -698,4 +736,63 @@ func (d *RealtimeDetector) fetchAndCacheTokenInfo(tokenID string) {
 	}
 
 	log.Printf("[RealtimeDetector] Cached token info: %s - %s", token.Question, token.Outcome)
+}
+
+// handleOurBlockchainTrade updates copy_trade_log with blockchain confirmation timestamp
+func (d *RealtimeDetector) handleOurBlockchainTrade(event api.PolygonTradeEvent, role string, detectedAt time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Determine token ID and side based on role
+	var tokenID string
+	var side string
+	zeroAsset := "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+	if event.MakerAssetID == zeroAsset {
+		// Maker gave USDC → Maker BOUGHT, Taker SOLD
+		tokenID = event.TakerAssetID
+		if role == "MAKER" {
+			side = "BUY"
+		} else {
+			side = "SELL"
+		}
+	} else {
+		// Maker gave tokens → Maker SOLD, Taker BOUGHT
+		tokenID = event.MakerAssetID
+		if role == "MAKER" {
+			side = "SELL"
+		} else {
+			side = "BUY"
+		}
+	}
+
+	// Convert hex token ID to decimal string
+	if len(tokenID) >= 2 && tokenID[:2] == "0x" {
+		hexVal := strings.TrimPrefix(tokenID, "0x")
+		hexVal = strings.TrimLeft(hexVal, "0")
+		if hexVal == "" {
+			hexVal = "0"
+		}
+		bigInt := new(big.Int)
+		bigInt.SetString(hexVal, 16)
+		tokenID = bigInt.String()
+	}
+
+	// Get actual block timestamp for more accurate timing
+	blockTime, err := getBlockTimestamp(event.BlockNumber)
+	if err != nil {
+		// Fall back to detection time if we can't get block time
+		blockTime = detectedAt
+		log.Printf("[RealtimeDetector] Using detection time as blockchain time (failed to get block: %v)", err)
+	}
+
+	// Update the copy_trade_log with blockchain confirmation time
+	if err := d.store.UpdateBlockchainConfirmedAt(ctx, tokenID, side, blockTime, event.TxHash); err != nil {
+		log.Printf("[RealtimeDetector] Failed to update blockchain_confirmed_at: %v", err)
+		return
+	}
+
+	// Calculate and log the settlement latency
+	log.Printf("[RealtimeDetector] ⏱️ OUR TRADE: side=%s token=%s block_time=%s tx=%s",
+		side, tokenID[:20], blockTime.Format("15:04:05"), event.TxHash[:16])
 }

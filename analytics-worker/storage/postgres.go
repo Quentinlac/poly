@@ -1800,6 +1800,40 @@ func (s *PostgresStore) GetCopyTradeLogs(ctx context.Context, limit int) ([]Copy
 	return logs, rows.Err()
 }
 
+// UpdateBlockchainConfirmedAt updates the blockchain confirmation timestamp for a copy trade.
+// It matches by token_id and finds the most recent executed trade within a time window.
+func (s *PostgresStore) UpdateBlockchainConfirmedAt(ctx context.Context, tokenID string, side string, blockchainTime time.Time, txHash string) error {
+	// Find the most recent executed copy trade for this token that doesn't have blockchain_confirmed_at yet
+	// Match within a 5-minute window to handle timing differences
+	result, err := s.pool.Exec(ctx, `
+		UPDATE copy_trade_log
+		SET blockchain_confirmed_at = $1
+		WHERE id = (
+			SELECT id FROM copy_trade_log
+			WHERE token_id = $2
+			AND status = 'executed'
+			AND blockchain_confirmed_at IS NULL
+			AND (
+				($3 = 'BUY' AND following_shares < 0) OR
+				($3 = 'SELL' AND following_shares > 0)
+			)
+			AND follower_time IS NOT NULL
+			AND follower_time > $1 - INTERVAL '5 minutes'
+			AND follower_time < $1 + INTERVAL '2 minutes'
+			ORDER BY follower_time DESC
+			LIMIT 1
+		)
+	`, blockchainTime, tokenID, side)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() > 0 {
+		log.Printf("[Storage] ✓ Updated blockchain_confirmed_at for token=%s side=%s tx=%s", tokenID[:20], side, txHash[:16])
+	}
+	return nil
+}
+
 // ============================================================================
 // BATCH OPERATIONS FOR SPEED OPTIMIZATION
 // ============================================================================
