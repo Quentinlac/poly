@@ -966,6 +966,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	debugLog["orderResponse"] = map[string]interface{}{
 		"success":  resp.Success,
 		"orderID":  resp.OrderID,
+		"status":   resp.Status, // matched, live, delayed, unmatched - CRITICAL for timing analysis
 		"errorMsg": resp.ErrorMsg,
 	}
 
@@ -976,8 +977,8 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
-	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
-		resp.OrderID, totalSize, avgPrice, totalCost)
+	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
+		resp.OrderID, resp.Status, totalSize, avgPrice, totalCost)
 
 	debugLog["decision"] = "executed successfully"
 
@@ -1173,8 +1174,8 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "", storage.StrategyBot, nil, nil, timestamps)
 		}
 
-		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
-			resp.OrderID, totalSold, avgPrice, totalUSDC)
+		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
+			resp.OrderID, resp.Status, totalSold, avgPrice, totalUSDC)
 
 		// Clear position if we sold everything
 		if remainingSize < 0.01 {
