@@ -124,6 +124,33 @@ func main() {
 		}
 	}
 
+	// Start P&L refresh goroutine (every 15 min, offset by 7 min to avoid trading peaks)
+	pnlStop := make(chan struct{})
+	go func() {
+		// Wait 7 minutes before first run (offset from trading activity)
+		log.Println("[Worker] P&L refresh scheduled: first run in 7 minutes, then every 15 minutes")
+		select {
+		case <-time.After(7 * time.Minute):
+		case <-pnlStop:
+			return
+		}
+
+		// Run immediately after initial delay
+		runPnLRefresh(store)
+
+		// Then run every 15 minutes
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				runPnLRefresh(store)
+			case <-pnlStop:
+				return
+			}
+		}
+	}()
+
 	// Setup signal handling for graceful shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -133,6 +160,20 @@ func main() {
 	// Wait for shutdown signal
 	<-stop
 	log.Println("[Worker] Shutting down...")
+	close(pnlStop)
+}
+
+// runPnLRefresh refreshes the copy_trade_pnl table
+func runPnLRefresh(store *storage.PostgresStore) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	count, err := store.RefreshCopyTradePnL(ctx)
+	if err != nil {
+		log.Printf("[Worker] P&L refresh error: %v", err)
+	} else {
+		log.Printf("[Worker] P&L refresh complete: %d markets updated", count)
+	}
 }
 
 // getEnvFloat retrieves a float from environment or returns default

@@ -2132,3 +2132,110 @@ func (s *PostgresStore) GetLatestBalance(ctx context.Context, walletAddress stri
 	}
 	return &r, nil
 }
+
+// RefreshCopyTradePnL updates the copy_trade_pnl table with latest data from copy_trade_log
+// This aggregates all trades by token_id and following_address, then updates redemption data
+func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) {
+	// Step 1: Upsert aggregated trade data from copy_trade_log
+	result, err := s.pool.Exec(ctx, `
+		INSERT INTO copy_trade_pnl (
+			token_id, market_title, outcome, following_address,
+			following_shares_bought, following_shares_sold, following_shares_remaining,
+			following_usdc_spent, following_usdc_received, following_avg_buy_price, following_avg_sell_price,
+			follower_shares_bought, follower_shares_sold, follower_shares_remaining,
+			follower_usdc_spent, follower_usdc_received, follower_avg_buy_price, follower_avg_sell_price,
+			first_trade_at, last_trade_at
+		)
+		SELECT
+			token_id,
+			MAX(market_title) as market_title,
+			MAX(outcome) as outcome,
+			following_address,
+			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END), 0),
+			COALESCE(SUM(following_shares), 0),
+			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) * following_price ELSE 0 END), 0),
+			CASE WHEN SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END) /
+					  SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END)
+				 ELSE 0 END,
+			CASE WHEN SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) * following_price ELSE 0 END) /
+					  SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END)
+				 ELSE 0 END,
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'executed' THEN follower_shares ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares * follower_price ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END), 0),
+			CASE WHEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares * follower_price ELSE 0 END) /
+					  SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END)
+				 ELSE 0 END,
+			CASE WHEN SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END) /
+					  SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END)
+				 ELSE 0 END,
+			MIN(following_time),
+			MAX(following_time)
+		FROM copy_trade_log
+		WHERE token_id IS NOT NULL
+		GROUP BY token_id, following_address
+		ON CONFLICT (token_id, following_address) DO UPDATE SET
+			following_shares_bought = EXCLUDED.following_shares_bought,
+			following_shares_sold = EXCLUDED.following_shares_sold,
+			following_shares_remaining = EXCLUDED.following_shares_remaining,
+			following_usdc_spent = EXCLUDED.following_usdc_spent,
+			following_usdc_received = EXCLUDED.following_usdc_received,
+			following_avg_buy_price = EXCLUDED.following_avg_buy_price,
+			following_avg_sell_price = EXCLUDED.following_avg_sell_price,
+			follower_shares_bought = EXCLUDED.follower_shares_bought,
+			follower_shares_sold = EXCLUDED.follower_shares_sold,
+			follower_shares_remaining = EXCLUDED.follower_shares_remaining,
+			follower_usdc_spent = EXCLUDED.follower_usdc_spent,
+			follower_usdc_received = EXCLUDED.follower_usdc_received,
+			follower_avg_buy_price = EXCLUDED.follower_avg_buy_price,
+			follower_avg_sell_price = EXCLUDED.follower_avg_sell_price,
+			first_trade_at = EXCLUDED.first_trade_at,
+			last_trade_at = EXCLUDED.last_trade_at,
+			updated_at = NOW()
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("upsert copy_trade_pnl: %w", err)
+	}
+	upsertCount := result.RowsAffected()
+
+	// Step 2: Update redemption data from user_trades for resolved markets
+	_, err = s.pool.Exec(ctx, `
+		WITH redeems AS (
+			SELECT
+				market_id as token_id,
+				user_id,
+				outcome,
+				SUM(usdc_size) as redeem_amount,
+				MAX(timestamp) as redeem_time
+			FROM user_trades
+			WHERE type = 'REDEEM'
+			GROUP BY market_id, user_id, outcome
+		)
+		UPDATE copy_trade_pnl p
+		SET
+			market_resolved = TRUE,
+			winning_outcome = r.outcome,
+			following_redeem_amount = r.redeem_amount,
+			resolved_at = r.redeem_time,
+			following_net_pnl = p.following_usdc_received + r.redeem_amount - p.following_usdc_spent,
+			updated_at = NOW()
+		FROM redeems r
+		WHERE p.token_id = r.token_id
+		  AND p.following_address = r.user_id
+		  AND p.outcome = r.outcome
+		  AND (p.market_resolved = FALSE OR p.following_redeem_amount != r.redeem_amount)
+	`)
+	if err != nil {
+		return upsertCount, fmt.Errorf("update redemptions: %w", err)
+	}
+
+	return upsertCount, nil
+}
