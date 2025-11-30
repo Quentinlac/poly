@@ -926,8 +926,10 @@ func (s *PostgresStore) GetTokenByConditionAndOutcome(ctx context.Context, condi
 
 // BackfillTradeMarketInfo updates trades that have empty title/slug/outcome
 // by looking up their market_id in the token_map_cache.
+// Only processes up to 100 trades per call to avoid blocking other queries.
 // Returns the number of trades updated.
 func (s *PostgresStore) BackfillTradeMarketInfo(ctx context.Context) (int64, error) {
+	// Use a subquery with LIMIT to avoid full table lock
 	result, err := s.pool.Exec(ctx, `
 		UPDATE user_trades t
 		SET
@@ -935,8 +937,14 @@ func (s *PostgresStore) BackfillTradeMarketInfo(ctx context.Context) (int64, err
 			slug = c.slug,
 			outcome = c.outcome
 		FROM token_map_cache c
-		WHERE t.market_id = c.token_id
-		  AND (t.title IS NULL OR t.title = '')
+		WHERE t.id IN (
+			SELECT ut.id
+			FROM user_trades ut
+			WHERE (ut.title IS NULL OR ut.title = '')
+			  AND ut.market_id IS NOT NULL
+			LIMIT 100
+		)
+		  AND t.market_id = c.token_id
 		  AND c.title IS NOT NULL AND c.title != ''
 	`)
 	if err != nil {
