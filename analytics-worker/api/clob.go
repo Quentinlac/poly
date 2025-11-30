@@ -942,8 +942,21 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// Use +0.5 for rounding to avoid floating point truncation errors
 	usdcValue := size * price
 
-	// Polymarket requires minimum $1 for marketable BUY orders
-	// If rounding caused us to drop below $1, bump up the size
+	// Polymarket requires minimum token sizes (varies by market, using 5 as safe default)
+	// This must be checked BEFORE the $1 USDC minimum to avoid conflicts
+	const minTokenSize = 5.0
+	if size < minTokenSize {
+		log.Printf("[CLOB] Bumping size from %.4f to %.4f tokens to meet minimum token size", size, minTokenSize)
+		size = minTokenSize
+		// Recalculate sizeInt with new size
+		sizeIn6Dec = int64(size*100+0.5) * 10000
+		sizeInt = big.NewInt(sizeIn6Dec)
+	}
+
+	// Recalculate USDC value with potentially bumped size
+	usdcValue = size * price
+
+	// Polymarket also requires minimum $1 for marketable BUY orders
 	const minOrderUSDC = 1.0
 	if side == SideBuy && usdcValue < minOrderUSDC && price > 0 {
 		// Calculate minimum size needed to reach $1
@@ -958,17 +971,6 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 			sizeIn6Dec = int64(size*100+0.5) * 10000
 			sizeInt = big.NewInt(sizeIn6Dec)
 		}
-	}
-
-	// Polymarket requires minimum 5 tokens for SELL orders
-	const minSellSize = 5.0
-	if side == SideSell && size < minSellSize {
-		log.Printf("[CLOB] Bumping SELL size from %.4f to %.4f to meet minimum", size, minSellSize)
-		size = minSellSize
-		usdcValue = size * price
-		// Recalculate sizeInt with new size
-		sizeIn6Dec = int64(size*100+0.5) * 10000
-		sizeInt = big.NewInt(sizeIn6Dec)
 	}
 
 	usdcIn6Dec := (int64(usdcValue*10000+0.5) * 100) // Round to 4 decimals, convert to 6-decimal
