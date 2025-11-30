@@ -766,6 +766,11 @@ func (d *RealtimeDetector) convertCLOBTradeToDetail(ctx context.Context, trade a
 			if outcome == "" {
 				outcome = tokenInfo.Outcome
 			}
+		} else {
+			// Not in cache - fetch SYNCHRONOUSLY from Gamma API (short timeout)
+			// This ensures title/outcome are populated for copy_trade_log
+			log.Printf("[RealtimeDetector] CLOB: Token info not in cache for %s, fetching from Gamma API", trade.AssetID[:20])
+			title, outcome = d.fetchTokenInfoSync(trade.AssetID)
 		}
 	}
 
@@ -868,8 +873,8 @@ func (d *RealtimeDetector) fetchAndCacheTokenInfo(tokenID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Fetch from Gamma API directly
-	url := fmt.Sprintf("https://gamma-api.polymarket.com/tokens?token_ids=%s", tokenID)
+	// Fetch from Gamma API /markets endpoint (the /tokens endpoint doesn't exist)
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/markets?clob_token_ids=%s", tokenID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Printf("[RealtimeDetector] Failed to create request: %v", err)
@@ -889,32 +894,47 @@ func (d *RealtimeDetector) fetchAndCacheTokenInfo(tokenID string) {
 		return
 	}
 
-	var tokens []struct {
-		TokenID     string `json:"token_id"`
-		ConditionID string `json:"condition_id"`
-		Outcome     string `json:"outcome"`
-		Question    string `json:"question"`
-		Slug        string `json:"market_slug"`
+	var markets []struct {
+		Question     string `json:"question"`
+		ConditionID  string `json:"conditionId"`
+		Slug         string `json:"slug"`
+		Outcomes     string `json:"outcomes"`     // JSON string: ["Up", "Down"]
+		ClobTokenIds string `json:"clobTokenIds"` // JSON string: ["token1", "token2"]
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
 		log.Printf("[RealtimeDetector] Failed to decode Gamma response: %v", err)
 		return
 	}
 
-	if len(tokens) == 0 {
-		log.Printf("[RealtimeDetector] No token found in Gamma for ID: %s", tokenID)
+	if len(markets) == 0 {
+		log.Printf("[RealtimeDetector] No market found in Gamma for token: %s", tokenID[:20])
 		return
 	}
 
-	token := tokens[0]
+	market := markets[0]
+
+	// Parse the JSON string arrays to determine outcome for this token
+	var outcomes []string
+	var tokenIds []string
+	json.Unmarshal([]byte(market.Outcomes), &outcomes)
+	json.Unmarshal([]byte(market.ClobTokenIds), &tokenIds)
+
+	// Find which outcome corresponds to our token ID
+	var outcome string
+	for i, tid := range tokenIds {
+		if tid == tokenID && i < len(outcomes) {
+			outcome = outcomes[i]
+			break
+		}
+	}
 
 	// Cache it for future trades
-	if err := d.store.SaveTokenInfo(ctx, tokenID, token.ConditionID, token.Outcome, token.Question, token.Slug); err != nil {
+	if err := d.store.SaveTokenInfo(ctx, tokenID, market.ConditionID, outcome, market.Question, market.Slug); err != nil {
 		log.Printf("[RealtimeDetector] Failed to cache token info: %v", err)
 		return
 	}
 
-	log.Printf("[RealtimeDetector] Cached token info: %s - %s", token.Question, token.Outcome)
+	log.Printf("[RealtimeDetector] Cached token info: %s - %s", market.Question, outcome)
 }
 
 // fetchTokenInfoSync fetches token info synchronously with a short timeout.
@@ -924,8 +944,8 @@ func (d *RealtimeDetector) fetchTokenInfoSync(tokenID string) (title, outcome st
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	// Fetch from Gamma API directly with short timeout
-	url := fmt.Sprintf("https://gamma-api.polymarket.com/tokens?token_ids=%s", tokenID)
+	// Fetch from Gamma API /markets endpoint (the /tokens endpoint doesn't exist)
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/markets?clob_token_ids=%s", tokenID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to create request: %v", err)
@@ -945,35 +965,51 @@ func (d *RealtimeDetector) fetchTokenInfoSync(tokenID string) (title, outcome st
 		return "", ""
 	}
 
-	var tokens []struct {
-		TokenID     string `json:"token_id"`
-		ConditionID string `json:"condition_id"`
-		Outcome     string `json:"outcome"`
-		Question    string `json:"question"`
-		Slug        string `json:"market_slug"`
+	var markets []struct {
+		Question     string `json:"question"`
+		ConditionID  string `json:"conditionId"`
+		Slug         string `json:"slug"`
+		Outcomes     string `json:"outcomes"`     // JSON string: ["Up", "Down"]
+		ClobTokenIds string `json:"clobTokenIds"` // JSON string: ["token1", "token2"]
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
 		log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to decode: %v", err)
 		return "", ""
 	}
 
-	if len(tokens) == 0 {
-		log.Printf("[RealtimeDetector] fetchTokenInfoSync: no token found for ID: %s", tokenID)
+	if len(markets) == 0 {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: no market found for token: %s", tokenID[:20])
 		return "", ""
 	}
 
-	token := tokens[0]
+	market := markets[0]
+
+	// Parse the JSON string arrays to determine outcome for this token
+	var outcomes []string
+	var tokenIds []string
+	json.Unmarshal([]byte(market.Outcomes), &outcomes)
+	json.Unmarshal([]byte(market.ClobTokenIds), &tokenIds)
+
+	// Find which outcome corresponds to our token ID
+	for i, tid := range tokenIds {
+		if tid == tokenID && i < len(outcomes) {
+			outcome = outcomes[i]
+			break
+		}
+	}
+
+	title = market.Question
 
 	// Cache it for future trades (async - don't block)
 	go func() {
 		bgCtx := context.Background()
-		if err := d.store.SaveTokenInfo(bgCtx, tokenID, token.ConditionID, token.Outcome, token.Question, token.Slug); err != nil {
+		if err := d.store.SaveTokenInfo(bgCtx, tokenID, market.ConditionID, outcome, title, market.Slug); err != nil {
 			log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to cache: %v", err)
 		}
 	}()
 
-	log.Printf("[RealtimeDetector] fetchTokenInfoSync: got %s - %s", token.Question, token.Outcome)
-	return token.Question, token.Outcome
+	log.Printf("[RealtimeDetector] fetchTokenInfoSync: got %s - %s", title, outcome)
+	return title, outcome
 }
 
 // handleOurBlockchainTrade updates copy_trade_log with blockchain confirmation timestamp
