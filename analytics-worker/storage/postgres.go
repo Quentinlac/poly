@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -2286,4 +2288,131 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 	}
 
 	return upsertCount, nil
+}
+
+// CheckMarketResolutions queries Gamma API for unresolved markets and updates their status
+// This determines the winning outcome and calculates theoretical P&L
+func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error) {
+	// Get unresolved markets (older than 30 min to avoid checking active markets)
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT token_id
+		FROM copy_trade_pnl
+		WHERE market_resolved = FALSE
+		  AND last_trade_at < NOW() - INTERVAL '30 minutes'
+		LIMIT 50
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("query unresolved markets: %w", err)
+	}
+	defer rows.Close()
+
+	var tokenIDs []string
+	for rows.Next() {
+		var tokenID string
+		if err := rows.Scan(&tokenID); err != nil {
+			continue
+		}
+		tokenIDs = append(tokenIDs, tokenID)
+	}
+
+	if len(tokenIDs) == 0 {
+		return 0, nil
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resolved := 0
+
+	for _, tokenID := range tokenIDs {
+		// Check context cancellation
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Query Gamma API for this token
+		url := "https://gamma-api.polymarket.com/markets?clob_token_ids=" + tokenID
+		resp, err := client.Get(url)
+		if err != nil {
+			log.Printf("[pnl] failed to query Gamma API for token %s: %v", tokenID[:20], err)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		var markets []struct {
+			Closed        bool   `json:"closed"`
+			Outcomes      string `json:"outcomes"`
+			OutcomePrices string `json:"outcomePrices"`
+		}
+		if err := json.Unmarshal(body, &markets); err != nil || len(markets) == 0 {
+			continue
+		}
+
+		market := markets[0]
+		if !market.Closed {
+			continue // Market not closed yet
+		}
+
+		// Parse outcomes and prices to find winner
+		var outcomes []string
+		var prices []string
+		json.Unmarshal([]byte(market.Outcomes), &outcomes)
+		json.Unmarshal([]byte(market.OutcomePrices), &prices)
+
+		if len(outcomes) == 0 || len(prices) == 0 {
+			continue
+		}
+
+		// Find winning outcome (price = "1" or close to it)
+		var winningOutcome string
+		for i, price := range prices {
+			if price == "1" || strings.HasPrefix(price, "0.99") {
+				if i < len(outcomes) {
+					winningOutcome = outcomes[i]
+				}
+				break
+			}
+		}
+
+		if winningOutcome == "" {
+			continue // Can't determine winner
+		}
+
+		// Update all rows with this token_id
+		// Calculate P&L: if our outcome matches winner, remaining shares * $1
+		result, err := s.pool.Exec(ctx, `
+			UPDATE copy_trade_pnl
+			SET
+				market_resolved = TRUE,
+				winning_outcome = $2,
+				-- Following user P&L: if their outcome won, remaining shares are worth $1 each
+				following_net_pnl = following_usdc_received - following_usdc_spent +
+					CASE WHEN outcome = $2 THEN GREATEST(following_shares_remaining, 0) ELSE 0 END,
+				-- Follower P&L: same logic
+				follower_net_pnl = follower_usdc_received - follower_usdc_spent +
+					CASE WHEN outcome = $2 THEN GREATEST(follower_shares_remaining, 0) ELSE 0 END,
+				resolved_at = NOW(),
+				updated_at = NOW()
+			WHERE token_id = $1
+			  AND market_resolved = FALSE
+		`, tokenID, winningOutcome)
+
+		if err != nil {
+			log.Printf("[pnl] failed to update resolution for token %s: %v", tokenID[:20], err)
+			continue
+		}
+
+		if result.RowsAffected() > 0 {
+			resolved += int(result.RowsAffected())
+			log.Printf("[pnl] resolved market %s: winner=%s", tokenID[:20], winningOutcome)
+		}
+
+		// Small delay to avoid hammering API
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return resolved, nil
 }

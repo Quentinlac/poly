@@ -163,16 +163,25 @@ func main() {
 	close(pnlStop)
 }
 
-// runPnLRefresh refreshes the copy_trade_pnl table
+// runPnLRefresh refreshes the copy_trade_pnl table and checks market resolutions
 func runPnLRefresh(store *storage.PostgresStore) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	// Step 1: Refresh P&L data from copy_trade_log
 	count, err := store.RefreshCopyTradePnL(ctx)
 	if err != nil {
 		log.Printf("[Worker] P&L refresh error: %v", err)
 	} else {
 		log.Printf("[Worker] P&L refresh complete: %d markets updated", count)
+	}
+
+	// Step 2: Check market resolutions via Gamma API
+	resolved, err := store.CheckMarketResolutions(ctx)
+	if err != nil {
+		log.Printf("[Worker] Resolution check error: %v", err)
+	} else if resolved > 0 {
+		log.Printf("[Worker] Resolved %d markets via Gamma API", resolved)
 	}
 }
 
