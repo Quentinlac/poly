@@ -1260,6 +1260,7 @@ type CopyTradeRecord struct {
 	Status          string
 	ErrorReason     string
 	OrderID         string
+	DetectionSource string // How the trade was detected: clob, polygon_ws, data_api
 }
 
 // SaveCopyTrade saves a copy trade record
@@ -1275,16 +1276,22 @@ func (s *PostgresStore) SaveCopyTrade(ctx context.Context, trade interface{}) er
 		executedAt = time.Now()
 	}
 
+	// Default to "clob" if not specified
+	detectionSource := t.DetectionSource
+	if detectionSource == "" {
+		detectionSource = "clob"
+	}
+
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO copy_trades (
 			original_trade_id, original_trader, market_id, token_id, outcome, title,
 			side, intended_usdc, actual_usdc, price_paid, size_bought,
-			status, error_reason, order_id, created_at, executed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), $15)
+			status, error_reason, order_id, created_at, executed_at, detection_source
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), $15, $16)
 	`,
 		t.OriginalTradeID, t.OriginalTrader, t.MarketID, t.TokenID, t.Outcome, t.Title,
 		t.Side, t.IntendedUSDC, t.ActualUSDC, t.PricePaid, t.SizeBought,
-		t.Status, t.ErrorReason, t.OrderID, executedAt,
+		t.Status, t.ErrorReason, t.OrderID, executedAt, detectionSource,
 	)
 
 	return err
@@ -2183,6 +2190,7 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			MAX(following_time)
 		FROM copy_trade_log
 		WHERE token_id IS NOT NULL
+		  AND status = 'executed'
 		GROUP BY token_id, following_address
 		ON CONFLICT (token_id, following_address) DO UPDATE SET
 			following_shares_bought = EXCLUDED.following_shares_bought,
@@ -2473,40 +2481,66 @@ func (s *PostgresStore) EnsureBinancePriceTable(ctx context.Context) error {
 	return nil
 }
 
-// SaveBinancePrices saves a batch of klines to the database
+// SaveBinancePrices saves a batch of klines to the database using efficient bulk insert.
+// Uses multi-row INSERT with ON CONFLICT for upsert behavior.
+// Processes in chunks of 1000 rows to balance memory and performance.
 func (s *PostgresStore) SaveBinancePrices(ctx context.Context, symbol string, klines []BinanceKline) error {
 	if len(klines) == 0 {
 		return nil
 	}
 
-	batch := &pgx.Batch{}
+	const chunkSize = 1000 // Rows per INSERT statement
 
-	for _, k := range klines {
-		ts := time.UnixMilli(k.OpenTime).UTC()
-		batch.Queue(`
-			INSERT INTO binance_prices (symbol, timestamp, open_price, high_price, low_price, close_price, volume, quote_volume, num_trades)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (symbol, timestamp) DO UPDATE SET
-				open_price = EXCLUDED.open_price,
-				high_price = EXCLUDED.high_price,
-				low_price = EXCLUDED.low_price,
-				close_price = EXCLUDED.close_price,
-				volume = EXCLUDED.volume,
-				quote_volume = EXCLUDED.quote_volume,
-				num_trades = EXCLUDED.num_trades
-		`, symbol, ts, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteAssetVolume, k.NumTrades)
-	}
+	for i := 0; i < len(klines); i += chunkSize {
+		end := i + chunkSize
+		if end > len(klines) {
+			end = len(klines)
+		}
+		chunk := klines[i:end]
 
-	results := s.pool.SendBatch(ctx, batch)
-	defer results.Close()
-
-	for i := 0; i < len(klines); i++ {
-		if _, err := results.Exec(); err != nil {
-			return fmt.Errorf("exec batch item %d: %w", i, err)
+		if err := s.insertBinancePriceChunk(ctx, symbol, chunk); err != nil {
+			return fmt.Errorf("insert chunk %d-%d: %w", i, end, err)
 		}
 	}
 
 	return nil
+}
+
+// insertBinancePriceChunk inserts a chunk using multi-row INSERT (much faster than individual inserts)
+func (s *PostgresStore) insertBinancePriceChunk(ctx context.Context, symbol string, klines []BinanceKline) error {
+	if len(klines) == 0 {
+		return nil
+	}
+
+	// Build multi-row INSERT: INSERT INTO ... VALUES (...), (...), (...) ON CONFLICT DO UPDATE
+	// This is 10-50x faster than individual INSERTs
+	args := make([]interface{}, 0, len(klines)*9)
+	valueStrings := make([]string, 0, len(klines))
+
+	for i, k := range klines {
+		ts := time.UnixMilli(k.OpenTime).UTC()
+		base := i * 9
+		valueStrings = append(valueStrings,
+			fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
+		args = append(args, symbol, ts, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteAssetVolume, k.NumTrades)
+	}
+
+	query := `
+		INSERT INTO binance_prices (symbol, timestamp, open_price, high_price, low_price, close_price, volume, quote_volume, num_trades)
+		VALUES ` + strings.Join(valueStrings, ", ") + `
+		ON CONFLICT (symbol, timestamp) DO UPDATE SET
+			open_price = EXCLUDED.open_price,
+			high_price = EXCLUDED.high_price,
+			low_price = EXCLUDED.low_price,
+			close_price = EXCLUDED.close_price,
+			volume = EXCLUDED.volume,
+			quote_volume = EXCLUDED.quote_volume,
+			num_trades = EXCLUDED.num_trades
+	`
+
+	_, err := s.pool.Exec(ctx, query, args...)
+	return err
 }
 
 // GetLatestBinancePrice returns the most recent price timestamp for a symbol
