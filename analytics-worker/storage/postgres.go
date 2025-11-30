@@ -2237,5 +2237,53 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 		return upsertCount, fmt.Errorf("update redemptions: %w", err)
 	}
 
+	// Step 3: Calculate slippage per market
+	// BUY slippage = (follower_price - following_price) * follower_shares (positive = we paid more)
+	// SELL slippage = (following_price - follower_price) * |follower_shares| (positive = we got less)
+	_, err = s.pool.Exec(ctx, `
+		WITH slippage AS (
+			SELECT
+				token_id,
+				following_address,
+				-- BUY slippage (positive shares = buy, filter bad prices)
+				COALESCE(SUM(CASE
+					WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
+					THEN (follower_price - following_price) * follower_shares
+					ELSE 0 END), 0) as buy_slip_usd,
+				-- SELL slippage (negative shares = sell, filter bad prices)
+				COALESCE(SUM(CASE
+					WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
+					THEN (following_price - follower_price) * ABS(follower_shares)
+					ELSE 0 END), 0) as sell_slip_usd,
+				-- For percentage: weighted avg prices
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
+					THEN follower_shares ELSE 0 END), 0) as buy_shares,
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
+					THEN following_shares * following_price ELSE 0 END), 0) as foll_buy_cost,
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
+					THEN ABS(follower_shares) ELSE 0 END), 0) as sell_shares,
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
+					THEN ABS(following_shares) * following_price ELSE 0 END), 0) as foll_sell_value
+			FROM copy_trade_log
+			WHERE token_id IS NOT NULL
+			GROUP BY token_id, following_address
+		)
+		UPDATE copy_trade_pnl p
+		SET
+			buy_slippage_usd = s.buy_slip_usd,
+			sell_slippage_usd = s.sell_slip_usd,
+			-- Buy slippage % = slip_usd / following_cost (if we have cost)
+			buy_slippage_pct = CASE WHEN s.foll_buy_cost > 0 THEN s.buy_slip_usd / s.foll_buy_cost ELSE 0 END,
+			-- Sell slippage % = slip_usd / following_value (if we have value)
+			sell_slippage_pct = CASE WHEN s.foll_sell_value > 0 THEN s.sell_slip_usd / s.foll_sell_value ELSE 0 END,
+			total_slippage_usd = s.buy_slip_usd + s.sell_slip_usd
+		FROM slippage s
+		WHERE p.token_id = s.token_id
+		  AND p.following_address = s.following_address
+	`)
+	if err != nil {
+		return upsertCount, fmt.Errorf("update slippage: %w", err)
+	}
+
 	return upsertCount, nil
 }
