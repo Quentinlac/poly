@@ -924,6 +924,27 @@ func (s *PostgresStore) GetTokenByConditionAndOutcome(ctx context.Context, condi
 	return &info, nil
 }
 
+// BackfillTradeMarketInfo updates trades that have empty title/slug/outcome
+// by looking up their market_id in the token_map_cache.
+// Returns the number of trades updated.
+func (s *PostgresStore) BackfillTradeMarketInfo(ctx context.Context) (int64, error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE user_trades t
+		SET
+			title = c.title,
+			slug = c.slug,
+			outcome = c.outcome
+		FROM token_map_cache c
+		WHERE t.market_id = c.token_id
+		  AND (t.title IS NULL OR t.title = '')
+		  AND c.title IS NOT NULL AND c.title != ''
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("backfill trades: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
 // SaveTokenInfo saves a single token's information to the cache
 func (s *PostgresStore) SaveTokenInfo(ctx context.Context, tokenID, conditionID, outcome, title, slug string) error {
 	_, err := s.pool.Exec(ctx, `
