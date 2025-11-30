@@ -2162,31 +2162,46 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			MAX(market_title) as market_title,
 			MAX(outcome) as outcome,
 			following_address,
-			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END), 0),
+			-- Note: negative shares = BUY (spent USDC), positive shares = SELL (received USDC)
+			-- following_shares_bought (negative shares means bought)
 			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END), 0),
+			-- following_shares_sold (positive shares means sold)
+			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END), 0),
+			-- following_shares_remaining (negative = holding, positive = oversold)
 			COALESCE(SUM(following_shares), 0),
-			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END), 0),
+			-- following_usdc_spent (when buying: negative shares * price)
 			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) * following_price ELSE 0 END), 0),
-			CASE WHEN SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END) > 0
-				 THEN SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END) /
-					  SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END)
-				 ELSE 0 END,
+			-- following_usdc_received (when selling: positive shares * price)
+			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END), 0),
+			-- following_avg_buy_price
 			CASE WHEN SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END) > 0
 				 THEN SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) * following_price ELSE 0 END) /
 					  SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END)
 				 ELSE 0 END,
-			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status = 'executed' THEN follower_shares ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares * follower_price ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END), 0),
-			CASE WHEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END) > 0
-				 THEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares * follower_price ELSE 0 END) /
-					  SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN follower_shares ELSE 0 END)
+			-- following_avg_sell_price
+			CASE WHEN SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN following_shares > 0 THEN following_shares * following_price ELSE 0 END) /
+					  SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END)
 				 ELSE 0 END,
+			-- follower_shares_bought (when following bought, we bought: negative following_shares)
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END), 0),
+			-- follower_shares_sold (when following sold, we sold: positive following_shares)
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) ELSE 0 END), 0),
+			-- follower_shares_remaining
+			COALESCE(SUM(CASE WHEN status = 'executed' THEN follower_shares ELSE 0 END), 0),
+			-- follower_usdc_spent (when buying)
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END), 0),
+			-- follower_usdc_received (when selling)
+			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) * follower_price ELSE 0 END), 0),
+			-- follower_avg_buy_price
 			CASE WHEN SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END) > 0
 				 THEN SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END) /
 					  SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END)
+				 ELSE 0 END,
+			-- follower_avg_sell_price
+			CASE WHEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) ELSE 0 END) > 0
+				 THEN SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) * follower_price ELSE 0 END) /
+					  SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) ELSE 0 END)
 				 ELSE 0 END,
 			MIN(following_time),
 			MAX(following_time)
