@@ -537,14 +537,22 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 
 	log.Printf("[CopyTrader] ⏱️ TIMING: preExecution=%dms", time.Since(processStart).Milliseconds())
 
-	// Get user settings (fast DB lookup)
+	// Get user settings - first try cached settings (faster, no DB query), then fall back to DB
 	// IMPORTANT: Users without explicit settings are DISABLED by default
 	strategyType := storage.StrategyHuman
-	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
-	if err != nil || userSettings == nil {
-		// No settings found - default to DISABLED (don't copy unknown users)
-		log.Printf("[CopyTrader] Skipping: user %s has no copy settings (disabled by default)", trade.UserID)
-		return nil
+	var userSettings *storage.UserCopySettings
+	if ct.detector != nil {
+		userSettings = ct.detector.GetCachedUserSettings(trade.UserID)
+	}
+	if userSettings == nil {
+		// Fall back to DB query if not in cache
+		var err error
+		userSettings, err = ct.store.GetUserCopySettings(ctx, trade.UserID)
+		if err != nil || userSettings == nil {
+			// No settings found - default to DISABLED (don't copy unknown users)
+			log.Printf("[CopyTrader] Skipping: user %s has no copy settings (disabled by default)", trade.UserID)
+			return nil
+		}
 	}
 	if !userSettings.Enabled {
 		log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
@@ -553,13 +561,14 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	strategyType = userSettings.StrategyType
 
 	// Route based on strategy type and side
+	// Strategy 3 (BTC 15m) uses the same execution as Strategy 2 (Bot)
 	if trade.Side == "BUY" {
-		if strategyType == storage.StrategyBot {
+		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
 			return ct.executeBotBuy(ctx, trade, tokenID, negRisk, userSettings)
 		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
-		if strategyType == storage.StrategyBot {
+		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
 			return ct.executeBotSell(ctx, trade, tokenID, negRisk, userSettings)
 		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
