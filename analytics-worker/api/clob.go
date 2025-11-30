@@ -501,6 +501,163 @@ func (c *ClobClient) GetMarket(ctx context.Context, conditionID string) (*Market
 	return &market, nil
 }
 
+// BalanceAllowance represents the balance and allowance for an account
+type BalanceAllowance struct {
+	Balance   string `json:"balance"`
+	Allowance string `json:"allowance"`
+}
+
+// AssetType represents the type of asset
+type AssetType string
+
+const (
+	AssetTypeCollateral  AssetType = "COLLATERAL"  // USDC
+	AssetTypeConditional AssetType = "CONDITIONAL" // Outcome tokens
+)
+
+// GetBalanceAllowance fetches the balance and allowance for the authenticated user
+// assetType: COLLATERAL (USDC) or CONDITIONAL (outcome tokens)
+// tokenID: optional, required for CONDITIONAL asset type
+func (c *ClobClient) GetBalanceAllowance(ctx context.Context, assetType AssetType, tokenID string) (*BalanceAllowance, error) {
+	endpoint := c.baseURL + "/balance-allowance"
+
+	// Build query params
+	params := url.Values{}
+	params.Set("asset_type", string(assetType))
+	if tokenID != "" {
+		params.Set("token_id", tokenID)
+	}
+	params.Set("signature_type", strconv.Itoa(c.signatureType))
+
+	fullURL := endpoint + "?" + params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add browser-like headers
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", "https://polymarket.com")
+	req.Header.Set("Referer", "https://polymarket.com/")
+
+	// Add L2 authentication headers
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get balance allowance failed: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result BalanceAllowance
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode balance allowance: %w", err)
+	}
+
+	return &result, nil
+}
+
+// GetUSDCBalance returns the USDC balance in human-readable format (float64)
+func (c *ClobClient) GetUSDCBalance(ctx context.Context) (float64, error) {
+	ba, err := c.GetBalanceAllowance(ctx, AssetTypeCollateral, "")
+	if err != nil {
+		return 0, err
+	}
+
+	// Balance is in 6-decimal USDC format (e.g., "1000000" = $1.00)
+	balanceInt, err := strconv.ParseInt(ba.Balance, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse balance: %w", err)
+	}
+
+	return float64(balanceInt) / 1e6, nil
+}
+
+// USDC contract address on Polygon
+const USDCContractPolygon = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+// GetOnChainUSDCBalance queries the USDC balance directly from Polygon blockchain
+// This doesn't require authentication - can query any address
+func GetOnChainUSDCBalance(ctx context.Context, walletAddress string) (float64, error) {
+	// Normalize address
+	walletAddress = strings.ToLower(strings.TrimSpace(walletAddress))
+	if !strings.HasPrefix(walletAddress, "0x") {
+		walletAddress = "0x" + walletAddress
+	}
+
+	// Pad address to 32 bytes for balanceOf(address) call
+	// Remove 0x prefix and pad to 64 chars (32 bytes)
+	paddedAddr := strings.TrimPrefix(walletAddress, "0x")
+	paddedAddr = fmt.Sprintf("%064s", paddedAddr)
+
+	// balanceOf(address) function selector: 0x70a08231
+	data := "0x70a08231" + paddedAddr
+
+	// JSON-RPC request
+	reqBody := fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"method": "eth_call",
+		"params": [{
+			"to": "%s",
+			"data": "%s"
+		}, "latest"],
+		"id": 1
+	}`, USDCContractPolygon, data)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://polygon-rpc.com", strings.NewReader(reqBody))
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("rpc request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp struct {
+		Result string `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+
+	if rpcResp.Error != nil {
+		return 0, fmt.Errorf("rpc error: %s", rpcResp.Error.Message)
+	}
+
+	// Parse hex result to big.Int
+	result := strings.TrimPrefix(rpcResp.Result, "0x")
+	if result == "" || result == "0" {
+		return 0, nil
+	}
+
+	balance := new(big.Int)
+	balance.SetString(result, 16)
+
+	// USDC has 6 decimals
+	balanceFloat := new(big.Float).SetInt(balance)
+	divisor := new(big.Float).SetFloat64(1e6)
+	balanceFloat.Quo(balanceFloat, divisor)
+
+	result64, _ := balanceFloat.Float64()
+	return result64, nil
+}
+
 // GammaTokenInfo holds the parsed token info from Gamma API
 type GammaTokenInfo struct {
 	TokenID     string

@@ -2042,3 +2042,64 @@ func (s *PostgresStore) GetFollowedUserAddresses(ctx context.Context) ([]string,
 
 	return addresses, rows.Err()
 }
+
+// BalanceRecord represents a single balance history entry
+type BalanceRecord struct {
+	WalletAddress string
+	USDCBalance   float64
+	RecordedAt    time.Time
+}
+
+// SaveBalanceHistory saves a balance snapshot to the database
+func (s *PostgresStore) SaveBalanceHistory(ctx context.Context, walletAddress string, usdcBalance float64) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO balance_history (wallet_address, usdc_balance)
+		VALUES ($1, $2)
+	`, walletAddress, usdcBalance)
+	return err
+}
+
+// GetBalanceHistory retrieves recent balance history for a wallet
+func (s *PostgresStore) GetBalanceHistory(ctx context.Context, walletAddress string, limit int) ([]BalanceRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT wallet_address, usdc_balance, recorded_at
+		FROM balance_history
+		WHERE wallet_address = $1
+		ORDER BY recorded_at DESC
+		LIMIT $2
+	`, walletAddress, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []BalanceRecord
+	for rows.Next() {
+		var r BalanceRecord
+		if err := rows.Scan(&r.WalletAddress, &r.USDCBalance, &r.RecordedAt); err != nil {
+			continue
+		}
+		records = append(records, r)
+	}
+
+	return records, rows.Err()
+}
+
+// GetLatestBalance retrieves the most recent balance for a wallet
+func (s *PostgresStore) GetLatestBalance(ctx context.Context, walletAddress string) (*BalanceRecord, error) {
+	var r BalanceRecord
+	err := s.pool.QueryRow(ctx, `
+		SELECT wallet_address, usdc_balance, recorded_at
+		FROM balance_history
+		WHERE wallet_address = $1
+		ORDER BY recorded_at DESC
+		LIMIT 1
+	`, walletAddress).Scan(&r.WalletAddress, &r.USDCBalance, &r.RecordedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}

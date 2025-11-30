@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -100,6 +101,14 @@ func main() {
 	} else {
 		log.Println("[Worker] Copy trader DISABLED (COPY_TRADER_ENABLED != true)")
 		log.Println("[Worker] This is correct for analytics-worker to avoid duplicate orders")
+	}
+
+	// Start balance tracker if a wallet address is configured
+	if walletAddr := os.Getenv("POLYMARKET_FUNDER_ADDRESS"); walletAddr != "" {
+		balanceTracker := syncer.NewBalanceTracker(store, walletAddr, 2*time.Second)
+		balanceTracker.Start()
+		defer balanceTracker.Stop()
+		log.Printf("[Worker] Balance tracker started for %s (checking every 2s)", walletAddr)
 	}
 
 	// Start auto-redeemer (always enabled - automatically redeems resolved positions)
