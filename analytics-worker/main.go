@@ -124,6 +124,30 @@ func main() {
 		}
 	}
 
+	// Start Binance price syncer (fetches BTC/USDT 1-second klines)
+	// Enabled by default - set BINANCE_PRICE_SYNCER_ENABLED=false to disable
+	binanceSyncerEnabled := os.Getenv("BINANCE_PRICE_SYNCER_ENABLED")
+	if binanceSyncerEnabled != "false" && binanceSyncerEnabled != "0" {
+		lookbackDays := getEnvFloat("BINANCE_LOOKBACK_DAYS", 14)
+		updateHours := getEnvFloat("BINANCE_UPDATE_HOURS", 1)
+
+		binanceSyncer := syncer.NewBinancePriceSyncer(store, syncer.BinancePriceSyncerConfig{
+			Symbol:          "BTCUSDT",
+			InitialLookback: time.Duration(lookbackDays*24) * time.Hour,
+			UpdateInterval:  time.Duration(updateHours) * time.Hour,
+		})
+
+		if err := binanceSyncer.Start(ctx); err != nil {
+			log.Printf("[Worker] Warning: Failed to start Binance price syncer: %v", err)
+		} else {
+			defer binanceSyncer.Stop()
+			log.Printf("[Worker] Binance price syncer started (lookback: %.0f days, update: every %.0f hours)",
+				lookbackDays, updateHours)
+		}
+	} else {
+		log.Println("[Worker] Binance price syncer DISABLED (BINANCE_PRICE_SYNCER_ENABLED=false)")
+	}
+
 	// Start P&L refresh goroutine (every 15 min, offset by 7 min to avoid trading peaks)
 	pnlStop := make(chan struct{})
 	go func() {

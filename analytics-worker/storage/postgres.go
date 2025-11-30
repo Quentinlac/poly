@@ -2416,3 +2416,174 @@ func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error)
 
 	return resolved, nil
 }
+
+// ============================================================================
+// Binance Price Data Storage
+// ============================================================================
+
+// BinancePrice represents a single price data point
+type BinancePrice struct {
+	Timestamp        time.Time
+	Open             float64
+	High             float64
+	Low              float64
+	Close            float64
+	Volume           float64
+	QuoteAssetVolume float64
+	NumTrades        int64
+}
+
+// BinanceKline matches api.BinanceKline for storage
+type BinanceKline struct {
+	OpenTime         int64
+	Open             float64
+	High             float64
+	Low              float64
+	Close            float64
+	Volume           float64
+	CloseTime        int64
+	QuoteAssetVolume float64
+	NumTrades        int64
+}
+
+// EnsureBinancePriceTable creates the binance_prices table if it doesn't exist
+func (s *PostgresStore) EnsureBinancePriceTable(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS binance_prices (
+			symbol VARCHAR(20) NOT NULL,
+			timestamp TIMESTAMPTZ NOT NULL,
+			open_price DECIMAL(20, 8) NOT NULL,
+			high_price DECIMAL(20, 8) NOT NULL,
+			low_price DECIMAL(20, 8) NOT NULL,
+			close_price DECIMAL(20, 8) NOT NULL,
+			volume DECIMAL(30, 8) NOT NULL,
+			quote_volume DECIMAL(30, 8) NOT NULL,
+			num_trades BIGINT NOT NULL,
+			PRIMARY KEY (symbol, timestamp)
+		);
+
+		-- Index for time-based queries
+		CREATE INDEX IF NOT EXISTS idx_binance_prices_symbol_time
+			ON binance_prices (symbol, timestamp DESC);
+	`)
+	if err != nil {
+		return fmt.Errorf("create binance_prices table: %w", err)
+	}
+	log.Printf("[Storage] Ensured binance_prices table exists")
+	return nil
+}
+
+// SaveBinancePrices saves a batch of klines to the database
+func (s *PostgresStore) SaveBinancePrices(ctx context.Context, symbol string, klines []BinanceKline) error {
+	if len(klines) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+
+	for _, k := range klines {
+		ts := time.UnixMilli(k.OpenTime).UTC()
+		batch.Queue(`
+			INSERT INTO binance_prices (symbol, timestamp, open_price, high_price, low_price, close_price, volume, quote_volume, num_trades)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (symbol, timestamp) DO UPDATE SET
+				open_price = EXCLUDED.open_price,
+				high_price = EXCLUDED.high_price,
+				low_price = EXCLUDED.low_price,
+				close_price = EXCLUDED.close_price,
+				volume = EXCLUDED.volume,
+				quote_volume = EXCLUDED.quote_volume,
+				num_trades = EXCLUDED.num_trades
+		`, symbol, ts, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteAssetVolume, k.NumTrades)
+	}
+
+	results := s.pool.SendBatch(ctx, batch)
+	defer results.Close()
+
+	for i := 0; i < len(klines); i++ {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("exec batch item %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// GetLatestBinancePrice returns the most recent price timestamp for a symbol
+func (s *PostgresStore) GetLatestBinancePrice(ctx context.Context, symbol string) (time.Time, error) {
+	var ts time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT timestamp FROM binance_prices
+		WHERE symbol = $1
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`, symbol).Scan(&ts)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return ts, nil
+}
+
+// GetOldestBinancePrice returns the oldest price timestamp for a symbol
+func (s *PostgresStore) GetOldestBinancePrice(ctx context.Context, symbol string) (time.Time, error) {
+	var ts time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT timestamp FROM binance_prices
+		WHERE symbol = $1
+		ORDER BY timestamp ASC
+		LIMIT 1
+	`, symbol).Scan(&ts)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return ts, nil
+}
+
+// GetBinancePriceCount returns the total number of price records for a symbol
+func (s *PostgresStore) GetBinancePriceCount(ctx context.Context, symbol string) (int64, error) {
+	var count int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM binance_prices WHERE symbol = $1
+	`, symbol).Scan(&count)
+	return count, err
+}
+
+// GetBinancePriceAt returns the price at or just before a specific timestamp
+func (s *PostgresStore) GetBinancePriceAt(ctx context.Context, symbol string, timestamp time.Time) (float64, error) {
+	var price float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT close_price FROM binance_prices
+		WHERE symbol = $1 AND timestamp <= $2
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`, symbol, timestamp.UTC()).Scan(&price)
+	if err != nil {
+		return 0, fmt.Errorf("get price at %s: %w", timestamp, err)
+	}
+	return price, nil
+}
+
+// GetBinancePriceRange returns all prices in a time range
+func (s *PostgresStore) GetBinancePriceRange(ctx context.Context, symbol string, startTime, endTime time.Time) ([]BinancePrice, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT timestamp, open_price, high_price, low_price, close_price, volume, quote_volume, num_trades
+		FROM binance_prices
+		WHERE symbol = $1 AND timestamp >= $2 AND timestamp <= $3
+		ORDER BY timestamp ASC
+	`, symbol, startTime.UTC(), endTime.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prices []BinancePrice
+	for rows.Next() {
+		var p BinancePrice
+		if err := rows.Scan(&p.Timestamp, &p.Open, &p.High, &p.Low, &p.Close, &p.Volume, &p.QuoteAssetVolume, &p.NumTrades); err != nil {
+			continue
+		}
+		prices = append(prices, p)
+	}
+
+	return prices, rows.Err()
+}
