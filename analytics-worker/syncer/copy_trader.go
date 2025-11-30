@@ -483,6 +483,16 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	}
 	ct.inFlightTradesMu.Unlock()
 
+	// Skip trades that are too old (e.g., server restart catch-up)
+	// These are stale - markets have moved, prices changed, no point copying
+	const maxTradeAge = 5 * time.Minute
+	tradeAge := time.Since(trade.Timestamp)
+	if tradeAge > maxTradeAge {
+		log.Printf("[CopyTrader] Skipping stale trade %s (%.1f min old, max=%.1f min)",
+			trade.ID[:16], tradeAge.Minutes(), maxTradeAge.Minutes())
+		return nil
+	}
+
 	// Skip non-TRADE types (REDEEM, SPLIT, MERGE)
 	if trade.Type != "" && trade.Type != "TRADE" {
 		log.Printf("[CopyTrader] Skipping non-trade: %s (type=%s)", trade.ID, trade.Type)
