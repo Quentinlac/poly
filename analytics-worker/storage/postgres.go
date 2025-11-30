@@ -51,8 +51,8 @@ func NewPostgres() (*PostgresStore, error) {
 	config.HealthCheckPeriod = 30 * time.Second
 
 	// Add query timeout to prevent slow queries from hanging
-	config.ConnConfig.RuntimeParams["statement_timeout"] = "30000"      // 30 seconds max per query
-	config.ConnConfig.RuntimeParams["lock_timeout"] = "10000"           // 10 seconds max for locks
+	config.ConnConfig.RuntimeParams["statement_timeout"] = "30000"                   // 30 seconds max per query
+	config.ConnConfig.RuntimeParams["lock_timeout"] = "10000"                        // 10 seconds max for locks
 	config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "60000" // 60 seconds
 
 	// Create pool
@@ -1735,9 +1735,9 @@ type CopyTradeLogEntry struct {
 	FollowerShares *float64 // negative = buy, positive = sell
 	FollowerPrice  *float64
 	// Trade info
-	MarketTitle  string
-	Outcome      string
-	TokenID      string
+	MarketTitle string
+	Outcome     string
+	TokenID     string
 	// Status
 	Status       string // 'success', 'failed', 'skipped'
 	FailedReason string
@@ -1747,10 +1747,10 @@ type CopyTradeLogEntry struct {
 	// Timing breakdown - duration of each step in milliseconds
 	TimingBreakdown map[string]interface{}
 	// Full timing timestamps for latency analysis
-	DetectedAt           *time.Time // When RealtimeDetector first saw the trade
-	ProcessingStartedAt  *time.Time // When executeBotBuy/Sell started
-	OrderPlacedAt        *time.Time // When we sent order to Polymarket
-	OrderConfirmedAt     *time.Time // When Polymarket confirmed (follower_time)
+	DetectedAt          *time.Time // When RealtimeDetector first saw the trade
+	ProcessingStartedAt *time.Time // When executeBotBuy/Sell started
+	OrderPlacedAt       *time.Time // When we sent order to Polymarket
+	OrderConfirmedAt    *time.Time // When Polymarket confirmed (follower_time)
 }
 
 // SaveCopyTradeLog saves a detailed copy trade log entry
@@ -2224,7 +2224,7 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			following_avg_sell_price = EXCLUDED.following_avg_sell_price,
 			follower_shares_bought = EXCLUDED.follower_shares_bought,
 			follower_shares_sold = EXCLUDED.follower_shares_sold,
-			follower_shares_remaining = EXCLUDED.follower_shares_remaining,
+			follower_shares_remaining = GREATEST(EXCLUDED.follower_shares_remaining, 0),
 			follower_usdc_spent = EXCLUDED.follower_usdc_spent,
 			follower_usdc_received = EXCLUDED.follower_usdc_received,
 			follower_avg_buy_price = EXCLUDED.follower_avg_buy_price,
@@ -2258,6 +2258,9 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			following_redeem_amount = r.redeem_amount,
 			resolved_at = r.redeem_time,
 			following_net_pnl = p.following_usdc_received + r.redeem_amount - p.following_usdc_spent,
+			-- Follower P&L: if followed user redeemed, this outcome won, so our shares are worth $1
+			follower_net_pnl = p.follower_usdc_received - p.follower_usdc_spent + 
+				CASE WHEN p.outcome = r.outcome THEN GREATEST(p.follower_shares_remaining, 0) ELSE 0 END,
 			updated_at = NOW()
 		FROM redeems r
 		WHERE p.token_id = r.token_id

@@ -17,18 +17,26 @@ import (
 
 // RealtimeDetector combines multiple data sources for fastest trade detection:
 // 1. CLOB API polling (PRIMARY: ~50-150ms latency - trades appear when matched off-chain)
-// 2. Polygon blockchain WebSocket (BACKUP: ~1-2s from trade execution)
-// 3. WebSocket for market activity (supplementary - instant notification but no user addresses)
+// 2. Polygon blockchain WebSocket (BACKUP: ~10-20s from trade execution)
+// 3. LiveData WebSocket for BTC 15m markets (Strategy 3: ~650ms latency)
 type RealtimeDetector struct {
-	apiClient   *api.Client
-	clobClient  *api.ClobClient      // For fast CLOB API trade detection (~50ms latency)
-	store       *storage.PostgresStore
-	wsClient    *api.WSClient
-	polygonWS   *api.PolygonWSClient // Blockchain WebSocket for backup detection
+	apiClient  *api.Client
+	clobClient *api.ClobClient      // For fast CLOB API trade detection (~50ms latency)
+	store      *storage.PostgresStore
+	polygonWS  *api.PolygonWSClient // Blockchain WebSocket for backup detection
+	liveDataWS *api.LiveDataWSClient // LiveData WebSocket for BTC 15m (Strategy 3)
 
-	// Followed users
+	// Followed users (Strategy 1 & 2 - polled)
 	followedUsers   map[string]bool
 	followedUsersMu sync.RWMutex
+
+	// BTC 15m users (Strategy 3 - WebSocket only)
+	btc15mUsers   map[string]bool
+	btc15mUsersMu sync.RWMutex
+
+	// User settings cache (refreshed every 30s to avoid DB queries during execution)
+	userSettingsCache   map[string]*storage.UserCopySettings
+	userSettingsCacheMu sync.RWMutex
 
 	// Last check timestamps per user (using match_time from CLOB API)
 	lastCheck   map[string]time.Time
@@ -61,9 +69,10 @@ type DetectorMetrics struct {
 	SlowestDetection    time.Duration
 	CLOBPolls           int64 // CLOB API polls (primary, ~50ms latency)
 	DataAPIPolls        int64 // Data API polls (fallback, ~30-80s latency)
-	WebSocketEvents     int64
 	BlockchainEvents    int64 // Events from Polygon WebSocket
 	BlockchainMatches   int64 // Matched followed users on blockchain
+	LiveDataWSEvents    int64 // Events from LiveData WebSocket (BTC 15m Strategy 3)
+	LiveDataWSMatches   int64 // Matched followed users on LiveData WS
 	LastDetectionTime   time.Time
 }
 
@@ -72,24 +81,30 @@ type DetectorMetrics struct {
 // enableBlockchainWS: if true, uses Polygon WebSocket for backup ~1s detection (heavy, use in worker only)
 func NewRealtimeDetector(apiClient *api.Client, clobClient *api.ClobClient, store *storage.PostgresStore, onNewTrade func(trade models.TradeDetail), enableBlockchainWS bool) *RealtimeDetector {
 	d := &RealtimeDetector{
-		apiClient:        apiClient,
-		clobClient:       clobClient,
-		store:            store,
-		followedUsers:    make(map[string]bool),
-		lastCheck:        make(map[string]time.Time),
-		processedTxs:     make(map[string]bool),
-		onNewTrade:       onNewTrade,
-		metrics:          &DetectorMetrics{},
-		stopCh:           make(chan struct{}),
-		useCLOBDetection: clobClient != nil, // Enable CLOB detection if client is provided
+		apiClient:         apiClient,
+		clobClient:        clobClient,
+		store:             store,
+		followedUsers:     make(map[string]bool),
+		btc15mUsers:       make(map[string]bool),
+		userSettingsCache: make(map[string]*storage.UserCopySettings),
+		lastCheck:         make(map[string]time.Time),
+		processedTxs:      make(map[string]bool),
+		onNewTrade:        onNewTrade,
+		metrics:           &DetectorMetrics{},
+		stopCh:            make(chan struct{}),
+		useCLOBDetection:  clobClient != nil, // Enable CLOB detection if client is provided
 	}
 
 	// Create Polygon WebSocket client for backup blockchain monitoring
 	// Only enable in worker to avoid heavy processing in main API app
 	if enableBlockchainWS {
 		d.polygonWS = api.NewPolygonWSClient(d.handleBlockchainTrade)
-		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (backup ~1s detection)")
+		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (backup ~10-20s detection)")
 	}
+
+	// Create LiveData WebSocket client for BTC 15m markets (Strategy 3)
+	d.liveDataWS = api.NewLiveDataWSClient(d.handleLiveDataTrade)
+	log.Printf("[RealtimeDetector] LiveData WebSocket ENABLED (Strategy 3: ~650ms latency)")
 
 	if d.useCLOBDetection {
 		log.Printf("[RealtimeDetector] CLOB API detection ENABLED (primary ~50ms latency)")
@@ -106,26 +121,34 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 		return fmt.Errorf("detector already running")
 	}
 
-	// Load followed users
+	// Load followed users (including Strategy 3 users)
 	if err := d.refreshFollowedUsers(ctx); err != nil {
 		log.Printf("[RealtimeDetector] Warning: failed to load followed users: %v", err)
 	}
 
-	// Start Polygon WebSocket for FASTEST detection (~1-2s)
+	// Start Polygon WebSocket for backup detection (~10-20s)
 	if d.polygonWS != nil {
 		if err := d.polygonWS.Start(ctx); err != nil {
 			log.Printf("[RealtimeDetector] Warning: Polygon WebSocket failed to start: %v", err)
 			// Continue without blockchain monitoring - we'll rely on API polling
 		} else {
-			log.Printf("[RealtimeDetector] ✓ Polygon blockchain WebSocket started (instant detection)")
+			log.Printf("[RealtimeDetector] ✓ Polygon blockchain WebSocket started (backup detection)")
 		}
 	}
 
-	// Start Polymarket WebSocket client for market events (supplementary)
-	d.wsClient = api.NewWSClient(d.handleWSTradeEvent)
-	if err := d.wsClient.Start(ctx); err != nil {
-		log.Printf("[RealtimeDetector] Warning: Polymarket WebSocket failed to start: %v", err)
-		// Continue without WebSocket - we'll rely on polling
+	// Start LiveData WebSocket for BTC 15m markets (Strategy 3)
+	if d.liveDataWS != nil {
+		if err := d.liveDataWS.Start(ctx); err != nil {
+			log.Printf("[RealtimeDetector] Warning: LiveData WebSocket failed to start: %v", err)
+		} else {
+			// Subscribe to current and next BTC 15m market slugs
+			current, next := api.GetBTC15mSlugs()
+			if err := d.liveDataWS.UpdateSubscriptions([]string{current, next}); err != nil {
+				log.Printf("[RealtimeDetector] Warning: LiveData WebSocket subscription failed: %v", err)
+			} else {
+				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (BTC 15m: %s, %s)", current, next)
+			}
+		}
 	}
 
 	d.running = true
@@ -138,7 +161,11 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 	d.wg.Add(1)
 	go d.userRefreshLoop(ctx)
 
-	log.Printf("[RealtimeDetector] Started with %d followed users", len(d.followedUsers))
+	// Start slug rotation loop for BTC 15m markets (every 1 minute check)
+	d.wg.Add(1)
+	go d.slugRotationLoop(ctx)
+
+	log.Printf("[RealtimeDetector] Started with %d polled users, %d BTC 15m users", len(d.followedUsers), len(d.btc15mUsers))
 	return nil
 }
 
@@ -155,8 +182,8 @@ func (d *RealtimeDetector) Stop() {
 		d.polygonWS.Stop()
 	}
 
-	if d.wsClient != nil {
-		d.wsClient.Stop()
+	if d.liveDataWS != nil {
+		d.liveDataWS.Stop()
 	}
 
 	d.wg.Wait()
@@ -406,20 +433,8 @@ func (d *RealtimeDetector) checkUserTradesDataAPI(ctx context.Context, userAddr 
 	}
 }
 
-// handleWSTradeEvent is called when WebSocket detects a trade
-func (d *RealtimeDetector) handleWSTradeEvent(event api.WSTradeEvent) {
-	d.metricsMu.Lock()
-	d.metrics.WebSocketEvents++
-	d.metricsMu.Unlock()
-
-	// WebSocket events tell us a trade happened on a market
-	// This can trigger immediate polling of followed users who have positions in that market
-	log.Printf("[RealtimeDetector] WebSocket trade event: asset=%s price=%.4f",
-		event.AssetID[:16], event.Price)
-}
-
 // handleBlockchainTrade is called when Polygon WebSocket detects a followed user's trade
-// This is the FASTEST detection method - ~1-2 seconds from trade execution
+// This is the BACKUP detection method - ~10-20 seconds from trade execution
 func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	detectedAt := time.Now()
 
@@ -468,7 +483,7 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		return // Neither maker nor taker is followed (shouldn't happen)
 	}
 
-	log.Printf("[RealtimeDetector] 🚀 BLOCKCHAIN TRADE DETECTED in ~1s! user=%s role=%s tx=%s",
+	log.Printf("[RealtimeDetector] 🚀 BLOCKCHAIN TRADE DETECTED: user=%s role=%s tx=%s",
 		utils.ShortAddress(userAddr), role, event.TxHash[:16])
 
 	// Determine token ID and side based on role
@@ -548,26 +563,215 @@ func (d *RealtimeDetector) userRefreshLoop(ctx context.Context) {
 	}
 }
 
-// refreshFollowedUsers reloads the list of users to monitor
+// slugRotationLoop updates BTC 15m market subscriptions every minute
+func (d *RealtimeDetector) slugRotationLoop(ctx context.Context) {
+	defer d.wg.Done()
+
+	// Check every minute for slug changes
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	var lastCurrent, lastNext string
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stopCh:
+			return
+		case <-ticker.C:
+			if d.liveDataWS == nil {
+				continue
+			}
+
+			current, next := api.GetBTC15mSlugs()
+
+			// Only update if slugs changed
+			if current != lastCurrent || next != lastNext {
+				log.Printf("[RealtimeDetector] BTC 15m slug rotation: %s → %s", current, next)
+				if err := d.liveDataWS.UpdateSubscriptions([]string{current, next}); err != nil {
+					log.Printf("[RealtimeDetector] Warning: slug rotation failed: %v", err)
+				}
+				lastCurrent = current
+				lastNext = next
+			}
+		}
+	}
+}
+
+// handleLiveDataTrade is called when LiveData WebSocket detects a trade on BTC 15m markets
+// This is the PRIMARY detection method for Strategy 3 users (~650ms latency)
+func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
+	detectedAt := time.Now()
+
+	// Update metrics for all events
+	d.metricsMu.Lock()
+	d.metrics.LiveDataWSEvents++
+	d.metricsMu.Unlock()
+
+	// Check if the trader (proxyWallet) is a followed BTC 15m user
+	d.btc15mUsersMu.RLock()
+	isFollowed := d.btc15mUsers[utils.NormalizeAddress(event.ProxyWallet)]
+	d.btc15mUsersMu.RUnlock()
+
+	if !isFollowed {
+		return // Not a followed user
+	}
+
+	// Check if we've already processed this trade
+	d.processedTxsMu.Lock()
+	if d.processedTxs[event.TransactionHash] {
+		d.processedTxsMu.Unlock()
+		return // Already processed
+	}
+	d.processedTxs[event.TransactionHash] = true
+	// Cleanup old entries (keep last 1000)
+	if len(d.processedTxs) > 1000 {
+		for k := range d.processedTxs {
+			delete(d.processedTxs, k)
+			if len(d.processedTxs) <= 500 {
+				break
+			}
+		}
+	}
+	d.processedTxsMu.Unlock()
+
+	// Calculate detection latency
+	tradeTime := time.Unix(event.Timestamp, 0)
+	latency := detectedAt.Sub(tradeTime)
+
+	// Update metrics
+	d.metricsMu.Lock()
+	d.metrics.LiveDataWSMatches++
+	d.metrics.TradesDetected++
+	d.metrics.LastDetectionTime = detectedAt
+	if d.metrics.FastestDetection == 0 || latency < d.metrics.FastestDetection {
+		d.metrics.FastestDetection = latency
+	}
+	if latency > d.metrics.SlowestDetection {
+		d.metrics.SlowestDetection = latency
+	}
+	if d.metrics.AvgDetectionLatency == 0 {
+		d.metrics.AvgDetectionLatency = latency
+	} else {
+		d.metrics.AvgDetectionLatency = (d.metrics.AvgDetectionLatency + latency) / 2
+	}
+	d.metricsMu.Unlock()
+
+	log.Printf("[RealtimeDetector] 🚀 LIVE DATA TRADE DETECTED: user=%s side=%s size=%.2f price=%.4f outcome=%s latency=%s",
+		event.Name, event.Side, event.Size, event.Price, event.Outcome, latency.Round(time.Millisecond))
+
+	// Convert to TradeDetail
+	usdcSize := event.Size * event.Price
+	detail := models.TradeDetail{
+		ID:              event.TransactionHash,
+		UserID:          utils.NormalizeAddress(event.ProxyWallet),
+		MarketID:        event.ConditionID, // Use conditionId as market identifier
+		Type:            "TRADE",
+		Side:            event.Side,
+		Size:            event.Size,
+		UsdcSize:        usdcSize,
+		Price:           event.Price,
+		Outcome:         event.Outcome,
+		Slug:            event.EventSlug,
+		TransactionHash: event.TransactionHash,
+		Name:            event.Name,
+		Pseudonym:       event.Pseudonym,
+		Timestamp:       tradeTime,
+		DetectedAt:      detectedAt,
+		DetectionSource: "live_ws", // Detected via LiveData WebSocket
+	}
+
+	// Save to user_trades for historical record
+	ctx := context.Background()
+	if err := d.store.SaveTrades(ctx, []models.TradeDetail{detail}, false); err != nil {
+		log.Printf("[RealtimeDetector] Warning: failed to save LiveData trade: %v", err)
+	}
+
+	// Mark as processed
+	d.store.CacheTokenID(ctx, detail.ID, "processed", "true", false)
+
+	// Notify callback - copy trader will handle the rest
+	if d.onNewTrade != nil {
+		d.onNewTrade(detail)
+	}
+}
+
+// refreshFollowedUsers reloads the list of users to monitor and their settings
 func (d *RealtimeDetector) refreshFollowedUsers(ctx context.Context) error {
-	users, err := d.store.GetFollowedUserAddresses(ctx)
+	// Get all followed user addresses
+	allUsers, err := d.store.GetFollowedUserAddresses(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Get Strategy 3 (BTC 15m) users separately
+	btc15mUsers, err := d.store.GetFollowedUsersByStrategy(ctx, storage.StrategyBTC15m)
+	if err != nil {
+		log.Printf("[RealtimeDetector] Warning: failed to get BTC 15m users: %v", err)
+		btc15mUsers = []string{}
+	}
+
+	// Build set of BTC 15m users for quick lookup
+	btc15mSet := make(map[string]bool, len(btc15mUsers))
+	for _, user := range btc15mUsers {
+		btc15mSet[utils.NormalizeAddress(user)] = true
+	}
+
+	// Load settings for all followed users into cache (avoid DB queries during execution)
+	newSettingsCache := make(map[string]*storage.UserCopySettings, len(allUsers))
+	for _, user := range allUsers {
+		normalized := utils.NormalizeAddress(user)
+		settings, err := d.store.GetUserCopySettings(ctx, user)
+		if err != nil {
+			log.Printf("[RealtimeDetector] Warning: failed to get settings for %s: %v", normalized[:10], err)
+			continue
+		}
+		if settings != nil {
+			newSettingsCache[normalized] = settings
+		}
+	}
+
+	// Update settings cache
+	d.userSettingsCacheMu.Lock()
+	d.userSettingsCache = newSettingsCache
+	d.userSettingsCacheMu.Unlock()
+
+	// Update BTC 15m users (Strategy 3)
+	d.btc15mUsersMu.Lock()
+	d.btc15mUsers = btc15mSet
+	d.btc15mUsersMu.Unlock()
+
+	// Build followed users list, EXCLUDING Strategy 3 users (they use WebSocket only)
 	d.followedUsersMu.Lock()
-	d.followedUsers = make(map[string]bool, len(users))
-	for _, user := range users {
-		d.followedUsers[utils.NormalizeAddress(user)] = true
+	d.followedUsers = make(map[string]bool, len(allUsers))
+	for _, user := range allUsers {
+		normalized := utils.NormalizeAddress(user)
+		if !btc15mSet[normalized] {
+			d.followedUsers[normalized] = true
+		}
 	}
 	d.followedUsersMu.Unlock()
 
 	// Update Polygon WebSocket with followed addresses for blockchain monitoring
+	// Include all users (both polled and BTC 15m) for backup detection
 	if d.polygonWS != nil {
-		d.polygonWS.SetFollowedAddresses(users)
+		d.polygonWS.SetFollowedAddresses(allUsers)
+	}
+
+	if len(btc15mUsers) > 0 {
+		log.Printf("[RealtimeDetector] Refreshed: %d polled, %d BTC 15m, %d settings cached",
+			len(d.followedUsers), len(btc15mUsers), len(newSettingsCache))
 	}
 
 	return nil
+}
+
+// GetCachedUserSettings returns cached user settings (nil if not found)
+func (d *RealtimeDetector) GetCachedUserSettings(userAddr string) *storage.UserCopySettings {
+	d.userSettingsCacheMu.RLock()
+	defer d.userSettingsCacheMu.RUnlock()
+	return d.userSettingsCache[utils.NormalizeAddress(userAddr)]
 }
 
 // AddFollowedUser adds a user to the monitored list

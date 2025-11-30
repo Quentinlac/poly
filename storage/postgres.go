@@ -1367,8 +1367,9 @@ func (s *PostgresStore) GetAllMyPositions(ctx context.Context) ([]CopyTradePosit
 
 // Strategy types for copy trading
 const (
-	StrategyHuman = 1 // Human following - market orders with slippage
-	StrategyBot   = 2 // Bot following - limit orders matching exact prices
+	StrategyHuman   = 1 // Human following - market orders with slippage
+	StrategyBot     = 2 // Bot following - limit orders matching exact prices
+	StrategyBTC15m  = 3 // BTC 15m markets - WebSocket detection via ws-live-data.polymarket.com
 )
 
 // UserCopySettings represents per-user copy trading settings
@@ -1419,6 +1420,30 @@ func (s *PostgresStore) SetUserCopySettings(ctx context.Context, settings UserCo
 			updated_at = NOW()
 	`, strings.ToLower(settings.UserAddress), settings.Multiplier, settings.Enabled, settings.MinUSDC, strategyType, settings.MaxUSD)
 	return err
+}
+
+// GetFollowedUsersByStrategy returns followed user addresses filtered by strategy type
+func (s *PostgresStore) GetFollowedUsersByStrategy(ctx context.Context, strategyType int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT fu.user_address
+		FROM followed_users fu
+		JOIN user_copy_settings ucs ON LOWER(fu.user_address) = LOWER(ucs.user_address)
+		WHERE ucs.enabled = true AND ucs.strategy_type = $1
+	`, strategyType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		users = append(users, addr)
+	}
+	return users, rows.Err()
 }
 
 // ============================================================================

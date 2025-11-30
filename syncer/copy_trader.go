@@ -379,9 +379,21 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	}
 
 	// Get user settings to determine strategy type
+	// First try cached settings (faster, no DB query), then fall back to DB
 	strategyType := storage.StrategyHuman // Default to human
-	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
-	if err == nil && userSettings != nil {
+	var userSettings *storage.UserCopySettings
+	if ct.detector != nil {
+		userSettings = ct.detector.GetCachedUserSettings(trade.UserID)
+	}
+	if userSettings == nil {
+		// Fall back to DB query if not in cache
+		var err error
+		userSettings, err = ct.store.GetUserCopySettings(ctx, trade.UserID)
+		if err != nil {
+			log.Printf("[CopyTrader] Warning: failed to get user settings: %v", err)
+		}
+	}
+	if userSettings != nil {
 		if !userSettings.Enabled {
 			log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
 			return nil
@@ -390,13 +402,14 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	}
 
 	// Route based on strategy type and side
+	// Strategy 3 (BTC 15m) uses the same execution as Strategy 2 (Bot)
 	if trade.Side == "BUY" {
-		if strategyType == storage.StrategyBot {
+		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
 			return ct.executeBotBuy(ctx, trade, tokenID, negRisk, userSettings)
 		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
-		if strategyType == storage.StrategyBot {
+		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
 			return ct.executeBotSell(ctx, trade, tokenID, negRisk, userSettings)
 		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
@@ -500,12 +513,23 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 
 func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
 	// Get per-user settings or use defaults
+	// First try cached settings (faster, no DB query), then fall back to DB
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
 	var maxUSD *float64
 
-	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
-	if err == nil && userSettings != nil {
+	var userSettings *storage.UserCopySettings
+	if ct.detector != nil {
+		userSettings = ct.detector.GetCachedUserSettings(trade.UserID)
+	}
+	if userSettings == nil {
+		var err error
+		userSettings, err = ct.store.GetUserCopySettings(ctx, trade.UserID)
+		if err != nil {
+			log.Printf("[CopyTrader] Warning: failed to get user settings in executeBuy: %v", err)
+		}
+	}
+	if userSettings != nil {
 		if !userSettings.Enabled {
 			log.Printf("[CopyTrader] BUY skipped: user %s has copy trading disabled", trade.UserID)
 			return nil
