@@ -403,6 +403,11 @@ func (ct *CopyTrader) run(ctx context.Context) {
 }
 
 func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
+	// DISABLED: This backup polling mechanism is no longer needed.
+	// Trades are now detected in real-time via blockchain WebSocket (~300ms latency).
+	// This query was scanning 221k+ rows every 2 seconds, causing DB bottleneck.
+	return nil
+
 	// Get followed user addresses for filtered query
 	followedUsers, _ := ct.store.GetFollowedUserAddresses(ctx)
 
