@@ -2167,8 +2167,9 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END), 0),
 			-- following_shares_sold (positive shares means sold)
 			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END), 0),
-			-- following_shares_remaining (positive = holding shares, negative = oversold)
-			COALESCE(-SUM(following_shares), 0),
+			-- following_shares_remaining = bought - sold (can be negative if they sold pre-existing shares)
+			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) ELSE 0 END), 0) -
+			COALESCE(SUM(CASE WHEN following_shares > 0 THEN following_shares ELSE 0 END), 0),
 			-- following_usdc_spent (when buying: negative shares * price)
 			COALESCE(SUM(CASE WHEN following_shares < 0 THEN ABS(following_shares) * following_price ELSE 0 END), 0),
 			-- following_usdc_received (when selling: positive shares * price)
@@ -2187,8 +2188,12 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END), 0),
 			-- follower_shares_sold (when following sold, we sold: positive following_shares)
 			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) ELSE 0 END), 0),
-			-- follower_shares_remaining (positive = holding shares, negative = oversold)
-			COALESCE(-SUM(CASE WHEN status = 'executed' THEN follower_shares ELSE 0 END), 0),
+			-- follower_shares_remaining = bought - sold, capped at 0 (we can't go negative)
+			GREATEST(
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) ELSE 0 END), 0) -
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 THEN ABS(follower_shares) ELSE 0 END), 0),
+				0
+			),
 			-- follower_usdc_spent (when buying)
 			COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 THEN ABS(follower_shares) * follower_price ELSE 0 END), 0),
 			-- follower_usdc_received (when selling)
