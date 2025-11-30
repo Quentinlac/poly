@@ -641,17 +641,26 @@ func (c *ClobClient) GetCLOBTrades(ctx context.Context, params CLOBTradeParams) 
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("CLOB trades API error %d: %s", resp.StatusCode, string(body))
 	}
 
-	var trades []CLOBTrade
-	if err := json.NewDecoder(resp.Body).Decode(&trades); err != nil {
-		return nil, fmt.Errorf("decode trades: %w", err)
+	// Response is wrapped in {"data": [...], "next_cursor": ..., "limit": ..., "count": ...}
+	var response struct {
+		Data []CLOBTrade `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		// Fallback: try direct array (in case API changes)
+		var trades []CLOBTrade
+		if err2 := json.Unmarshal(body, &trades); err2 != nil {
+			return nil, fmt.Errorf("decode trades: %w (also tried array: %w)", err, err2)
+		}
+		return trades, nil
 	}
 
-	return trades, nil
+	return response.Data, nil
 }
 
 // PlaceMarketOrder places a market order (FOK - Fill-Or-Kill)

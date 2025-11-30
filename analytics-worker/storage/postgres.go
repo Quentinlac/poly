@@ -1960,31 +1960,33 @@ func (s *PostgresStore) SaveTradesBatch(ctx context.Context, trades []models.Tra
 }
 
 // GetUnprocessedTradesBatch returns unprocessed trades with optimized query
-// Uses index hints and limit for faster retrieval
+// Uses LEFT JOIN instead of NOT EXISTS for better performance
 func (s *PostgresStore) GetUnprocessedTradesBatch(ctx context.Context, limit int, userAddresses []string) ([]models.TradeDetail, error) {
 	var rows pgx.Rows
 	var err error
 
 	if len(userAddresses) > 0 {
-		// Filter by specific users (followed traders)
+		// Filter by specific users (followed traders) - uses LEFT JOIN for performance
 		rows, err = s.pool.Query(ctx, `
 			SELECT ut.id, ut.user_id, ut.market_id, ut.subject, ut.type, ut.side, ut.is_maker,
 				   ut.size, ut.usdc_size, ut.price, ut.outcome, ut.timestamp, ut.title,
 				   ut.slug, ut.transaction_hash, ut.name, ut.pseudonym
 			FROM user_trades ut
+			LEFT JOIN processed_trades pt ON pt.trade_id = ut.id
 			WHERE ut.user_id = ANY($1)
-			  AND NOT EXISTS (SELECT 1 FROM processed_trades pt WHERE pt.trade_id = ut.id)
+			  AND pt.trade_id IS NULL
 			ORDER BY ut.timestamp ASC
 			LIMIT $2
 		`, userAddresses, limit)
 	} else {
-		// Get all unprocessed trades
+		// Get all unprocessed trades - uses LEFT JOIN for performance
 		rows, err = s.pool.Query(ctx, `
 			SELECT ut.id, ut.user_id, ut.market_id, ut.subject, ut.type, ut.side, ut.is_maker,
 				   ut.size, ut.usdc_size, ut.price, ut.outcome, ut.timestamp, ut.title,
 				   ut.slug, ut.transaction_hash, ut.name, ut.pseudonym
 			FROM user_trades ut
-			WHERE NOT EXISTS (SELECT 1 FROM processed_trades pt WHERE pt.trade_id = ut.id)
+			LEFT JOIN processed_trades pt ON pt.trade_id = ut.id
+			WHERE pt.trade_id IS NULL
 			ORDER BY ut.timestamp ASC
 			LIMIT $1
 		`, limit)

@@ -205,33 +205,15 @@ func (s *BinancePriceSyncer) fetchAndStore(ctx context.Context, startTime, endTi
 		}
 	}
 
-	// Store in batches
-	const batchSize = 10000
-	totalStored := 0
-
-	for i := 0; i < len(storageKlines); i += batchSize {
-		end := i + batchSize
-		if end > len(storageKlines) {
-			end = len(storageKlines)
-		}
-
-		batch := storageKlines[i:end]
-		if err := s.store.SaveBinancePrices(ctx, s.symbol, batch); err != nil {
-			return fmt.Errorf("save batch %d-%d: %w", i, end, err)
-		}
-		totalStored += len(batch)
-
-		// Log progress for large syncs
-		if len(storageKlines) > batchSize {
-			log.Printf("[BinancePriceSyncer] Stored %d/%d klines (%.1f%%)",
-				totalStored, len(storageKlines), float64(totalStored)/float64(len(storageKlines))*100)
-		}
+	// Store all klines (storage layer handles chunking efficiently)
+	if err := s.store.SaveBinancePrices(ctx, s.symbol, storageKlines); err != nil {
+		return fmt.Errorf("save klines: %w", err)
 	}
 
 	duration := time.Since(startTotal)
 	log.Printf("[BinancePriceSyncer] Stored %d klines for %s in %s (%.0f klines/sec)",
-		totalStored, s.symbol, duration.Round(time.Millisecond),
-		float64(totalStored)/duration.Seconds())
+		len(storageKlines), s.symbol, duration.Round(time.Millisecond),
+		float64(len(storageKlines))/duration.Seconds())
 
 	return nil
 }

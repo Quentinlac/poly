@@ -384,7 +384,8 @@ CREATE TABLE IF NOT EXISTS copy_trades (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     executed_at TIMESTAMPTZ,
     order_id VARCHAR(255),
-    tx_hash VARCHAR(100)
+    tx_hash VARCHAR(100),
+    detection_source VARCHAR(20) DEFAULT 'clob'  -- clob, polygon_ws, data_api
 );
 
 CREATE INDEX IF NOT EXISTS idx_copy_trades_status ON copy_trades(status);

@@ -517,6 +517,7 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		TransactionHash: event.TxHash,
 		Timestamp:       event.Timestamp,
 		DetectedAt:      detectedAt,
+		DetectionSource: "polygon_ws", // Detected via Polygon blockchain WebSocket
 		// Size, Price will be determined by copy_trader from orderbook
 	}
 
@@ -637,6 +638,7 @@ func (d *RealtimeDetector) convertCLOBTradeToDetail(ctx context.Context, trade a
 		Slug:            slug,
 		TransactionHash: trade.TransactionHash,
 		Timestamp:       timestamp,
+		DetectionSource: "clob", // Detected via CLOB API
 	}
 }
 
@@ -674,5 +676,6 @@ func (d *RealtimeDetector) convertDataTradeToDetail(trade api.DataTrade, userAdd
 		Name:            trade.Name,
 		Pseudonym:       trade.Pseudonym,
 		Timestamp:       time.Unix(trade.Timestamp, 0).UTC(),
+		DetectionSource: "data_api", // Detected via Data API (fallback)
 	}
 }

@@ -75,6 +75,7 @@ type CopyTrade struct {
 	ExecutedAt      *time.Time
 	OrderID         string
 	TxHash          string
+	DetectionSource string // How the trade was detected: clob, polygon_ws, data_api
 }
 
 // MyPosition represents our position in a market
@@ -1333,6 +1334,7 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		Status:          status,
 		ErrorReason:     errReason,
 		OrderID:         orderID,
+		DetectionSource: trade.DetectionSource,
 	}
 
 	if err := ct.store.SaveCopyTrade(ctx, copyTrade); err != nil {
