@@ -533,15 +533,19 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	log.Printf("[CopyTrader] ⏱️ TIMING: preExecution=%dms", time.Since(processStart).Milliseconds())
 
 	// Get user settings (fast DB lookup)
+	// IMPORTANT: Users without explicit settings are DISABLED by default
 	strategyType := storage.StrategyHuman
 	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
-	if err == nil && userSettings != nil {
-		if !userSettings.Enabled {
-			log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
-			return nil
-		}
-		strategyType = userSettings.StrategyType
+	if err != nil || userSettings == nil {
+		// No settings found - default to DISABLED (don't copy unknown users)
+		log.Printf("[CopyTrader] Skipping: user %s has no copy settings (disabled by default)", trade.UserID)
+		return nil
 	}
+	if !userSettings.Enabled {
+		log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
+		return nil
+	}
+	strategyType = userSettings.StrategyType
 
 	// Route based on strategy type and side
 	if trade.Side == "BUY" {
