@@ -623,9 +623,10 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 		outcome = tokenInfo.Outcome
 		log.Printf("[RealtimeDetector] Token info from cache: title=%s outcome=%s", title, outcome)
 	} else {
-		// Not in cache - fetch async from Gamma API (don't block critical path)
-		log.Printf("[RealtimeDetector] Token info not in cache, fetching async from Gamma API")
-		go d.fetchAndCacheTokenInfo(tokenID)
+		// Not in cache - fetch SYNCHRONOUSLY from Gamma API (short timeout)
+		// This ensures title/outcome are populated for copy_trade_log
+		log.Printf("[RealtimeDetector] Token info not in cache, fetching sync from Gamma API")
+		title, outcome = d.fetchTokenInfoSync(tokenID)
 	}
 
 	// Convert to TradeDetail with all the data from blockchain
@@ -914,6 +915,65 @@ func (d *RealtimeDetector) fetchAndCacheTokenInfo(tokenID string) {
 	}
 
 	log.Printf("[RealtimeDetector] Cached token info: %s - %s", token.Question, token.Outcome)
+}
+
+// fetchTokenInfoSync fetches token info synchronously with a short timeout.
+// Returns title and outcome, or empty strings if fetch fails.
+// This ensures copy_trade_log entries always have market title/outcome populated.
+func (d *RealtimeDetector) fetchTokenInfoSync(tokenID string) (title, outcome string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Fetch from Gamma API directly with short timeout
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/tokens?token_ids=%s", tokenID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to create request: %v", err)
+		return "", ""
+	}
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: API request failed: %v", err)
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: Gamma API returned %d", resp.StatusCode)
+		return "", ""
+	}
+
+	var tokens []struct {
+		TokenID     string `json:"token_id"`
+		ConditionID string `json:"condition_id"`
+		Outcome     string `json:"outcome"`
+		Question    string `json:"question"`
+		Slug        string `json:"market_slug"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to decode: %v", err)
+		return "", ""
+	}
+
+	if len(tokens) == 0 {
+		log.Printf("[RealtimeDetector] fetchTokenInfoSync: no token found for ID: %s", tokenID)
+		return "", ""
+	}
+
+	token := tokens[0]
+
+	// Cache it for future trades (async - don't block)
+	go func() {
+		bgCtx := context.Background()
+		if err := d.store.SaveTokenInfo(bgCtx, tokenID, token.ConditionID, token.Outcome, token.Question, token.Slug); err != nil {
+			log.Printf("[RealtimeDetector] fetchTokenInfoSync: failed to cache: %v", err)
+		}
+	}()
+
+	log.Printf("[RealtimeDetector] fetchTokenInfoSync: got %s - %s", token.Question, token.Outcome)
+	return token.Question, token.Outcome
 }
 
 // handleOurBlockchainTrade updates copy_trade_log with blockchain confirmation timestamp
