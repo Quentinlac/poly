@@ -1236,9 +1236,21 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	// In production, this should be replaced with actual limit order placement
 	orderPlacedAt := time.Now()
 	timestamps.OrderPlacedAt = &orderPlacedAt
-	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, sellSize*order3Price, negRisk)
+	sellUSDC := sellSize * order3Price
+	log.Printf("[CopyTrader-Bot] SELL: Placing market sell for %.4f tokens at ~$%.4f (total ~$%.2f)",
+		sellSize, order3Price, sellUSDC)
+	resp, err := ct.clobClient.PlaceMarketOrder(ctx, tokenID, api.SideSell, sellUSDC, negRisk)
 	orderConfirmedAt := time.Now()
-	if err == nil && resp.Success {
+
+	// Capture detailed error info
+	var failReason string
+	if err != nil {
+		failReason = fmt.Sprintf("market sell failed: %v", err)
+		log.Printf("[CopyTrader-Bot] SELL: Order error: %v", err)
+	} else if !resp.Success {
+		failReason = fmt.Sprintf("market sell rejected: %s", resp.ErrorMsg)
+		log.Printf("[CopyTrader-Bot] SELL: Order rejected: %s", resp.ErrorMsg)
+	} else {
 		timestamps.OrderConfirmedAt = &orderConfirmedAt
 		orderIDs = append(orderIDs, resp.OrderID)
 		// Estimate fill
@@ -1247,6 +1259,9 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 			fmt.Sscanf(book.Bids[0].Price, "%f", &bestBid)
 			totalFilled = sellSize
 			totalValue = sellSize * bestBid
+			log.Printf("[CopyTrader-Bot] SELL: Order successful, estimated fill %.4f @ $%.4f", totalFilled, bestBid)
+		} else {
+			failReason = "no bids available after order"
 		}
 	}
 
@@ -1256,9 +1271,12 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, totalValue, avgPrice, totalFilled, "executed", "", strings.Join(orderIDs, ","), storage.StrategyBot, nil, nil, timestamps)
 	}
 
-	// Failed to sell
-	log.Printf("[CopyTrader-Bot] SELL: failed to fill any orders")
-	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", "no fills achieved", "", storage.StrategyBot, nil, nil, timestamps)
+	// Failed to sell - include detailed reason
+	if failReason == "" {
+		failReason = "no fills achieved (unknown reason)"
+	}
+	log.Printf("[CopyTrader-Bot] SELL: failed - %s", failReason)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", failReason, "", storage.StrategyBot, nil, nil, timestamps)
 }
 
 // CopyTradeTimestamps holds timing information for a copy trade
