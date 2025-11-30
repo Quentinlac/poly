@@ -82,46 +82,6 @@ func (w *IncrementalWorker) Start() {
 			}
 		}
 	}()
-
-	// Start periodic backfill goroutine to fix trades with missing market info
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
-
-		// Run every 60 seconds
-		backfillTicker := time.NewTicker(60 * time.Second)
-		defer backfillTicker.Stop()
-
-		for {
-			select {
-			case <-w.stop:
-				return
-			case <-backfillTicker.C:
-				w.runBackfill()
-			}
-		}
-	}()
-}
-
-// runBackfill updates trades that have empty title/slug/outcome from the token cache
-func (w *IncrementalWorker) runBackfill() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	pgStore, ok := w.store.(*storage.PostgresStore)
-	if !ok {
-		return
-	}
-
-	updated, err := pgStore.BackfillTradeMarketInfo(ctx)
-	if err != nil {
-		log.Printf("[incremental] backfill error: %v", err)
-		return
-	}
-
-	if updated > 0 {
-		log.Printf("[incremental] backfilled %d trades with market info", updated)
-	}
 }
 
 // Stop gracefully shuts down the worker.
