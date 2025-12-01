@@ -1576,6 +1576,7 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		FollowerTime:     followerTime,
 		FollowerShares:   followerShares,
 		FollowerPrice:    followerPrice,
+		FollowerOrderID:  orderID,
 		MarketTitle:      trade.Title,
 		Outcome:          trade.Outcome,
 		TokenID:          tokenID,

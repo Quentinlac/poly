@@ -1755,9 +1755,10 @@ type CopyTradeLogEntry struct {
 	FollowingShares  float64 // negative = buy, positive = sell
 	FollowingPrice   float64
 	// Follower (us) info
-	FollowerTime   *time.Time
-	FollowerShares *float64 // negative = buy, positive = sell
-	FollowerPrice  *float64
+	FollowerTime    *time.Time
+	FollowerShares  *float64 // negative = buy, positive = sell
+	FollowerPrice   *float64
+	FollowerOrderID string // Our order ID from CLOB API
 	// Trade info
 	MarketTitle string
 	Outcome     string
@@ -1802,14 +1803,14 @@ func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLog
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO copy_trade_log (
 			following_address, following_trade_id, following_time, following_shares, following_price,
-			follower_time, follower_shares, follower_price,
+			follower_time, follower_shares, follower_price, follower_tx_hash,
 			market_title, outcome, token_id,
 			status, failed_reason, strategy_type, detection_source, debug_log, timing_breakdown,
 			detected_at, processing_started_at, order_placed_at, order_confirmed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`,
 		entry.FollowingAddress, entry.FollowingTradeID, entry.FollowingTime, entry.FollowingShares, entry.FollowingPrice,
-		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice,
+		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice, entry.FollowerOrderID,
 		entry.MarketTitle, entry.Outcome, entry.TokenID,
 		entry.Status, entry.FailedReason, entry.StrategyType, entry.DetectionSource, debugLogJSON, timingJSON,
 		entry.DetectedAt, entry.ProcessingStartedAt, entry.OrderPlacedAt, entry.OrderConfirmedAt,
