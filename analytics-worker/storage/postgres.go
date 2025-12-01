@@ -1765,7 +1765,8 @@ type CopyTradeLogEntry struct {
 	// Status
 	Status       string // 'success', 'failed', 'skipped'
 	FailedReason string
-	StrategyType int
+	StrategyType    int
+	DetectionSource string // How the trade was detected: clob, mempool, live_ws, polygon_ws, data_api
 	// Debug log - JSON with order book, calculations, API calls
 	DebugLog map[string]interface{}
 	// Timing breakdown - duration of each step in milliseconds
@@ -1803,14 +1804,14 @@ func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLog
 			following_address, following_trade_id, following_time, following_shares, following_price,
 			follower_time, follower_shares, follower_price,
 			market_title, outcome, token_id,
-			status, failed_reason, strategy_type, debug_log, timing_breakdown,
+			status, failed_reason, strategy_type, detection_source, debug_log, timing_breakdown,
 			detected_at, processing_started_at, order_placed_at, order_confirmed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 	`,
 		entry.FollowingAddress, entry.FollowingTradeID, entry.FollowingTime, entry.FollowingShares, entry.FollowingPrice,
 		entry.FollowerTime, entry.FollowerShares, entry.FollowerPrice,
 		entry.MarketTitle, entry.Outcome, entry.TokenID,
-		entry.Status, entry.FailedReason, entry.StrategyType, debugLogJSON, timingJSON,
+		entry.Status, entry.FailedReason, entry.StrategyType, entry.DetectionSource, debugLogJSON, timingJSON,
 		entry.DetectedAt, entry.ProcessingStartedAt, entry.OrderPlacedAt, entry.OrderConfirmedAt,
 	)
 	return err
