@@ -906,6 +906,23 @@ func (s *Service) importSingleUser(ctx context.Context, addr string) ImportUserR
 		result.ErrorMsg = fmt.Sprintf("trades saved but positions fetch failed: %v", posErr)
 	}
 
+	// Create default copy settings for the new user (disabled by default)
+	maxUSD := 100.0
+	defaultSettings := storage.UserCopySettings{
+		UserAddress:  normalized,
+		Enabled:      false,        // Disabled by default - user must explicitly enable
+		Multiplier:   0.05,         // Default 1/20th
+		MinUSDC:      1.0,          // Minimum $1 per trade
+		MaxUSD:       &maxUSD,      // Maximum $100 per trade
+		StrategyType: storage.StrategyHuman, // Default to human strategy (type 1)
+	}
+	if err := s.store.SetUserCopySettings(ctx, defaultSettings); err != nil {
+		log.Printf("[Import] Warning: failed to create default copy settings for %s: %v", normalized[:8], err)
+		// Don't fail the import for this - just log warning
+	} else {
+		log.Printf("[Import] Created default copy settings for %s (disabled, multiplier=0.05, min=$1, max=$100, strategy=human)", normalized[:8])
+	}
+
 	result.Success = true
 	result.TradeCount = len(trades)
 	result.DurationSec = time.Since(start).Seconds()
