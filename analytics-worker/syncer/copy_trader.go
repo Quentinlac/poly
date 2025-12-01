@@ -524,7 +524,9 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	// FAST PATH: For blockchain-detected trades, we already have the token ID
 	// Skip all the Gamma/CLOB lookups - they just slow us down
 	// NOTE: LiveData WebSocket trades have conditionID, not tokenID - need to look it up
-	isBlockchainTrade := trade.TransactionHash != "" && trade.DetectedAt != (time.Time{}) && trade.DetectionSource != "live_ws"
+	// NOTE: Mempool trades have UNRELIABLE decoded tokenID/side - MUST verify!
+	isBlockchainTrade := trade.TransactionHash != "" && trade.DetectedAt != (time.Time{}) &&
+		trade.DetectionSource != "live_ws" && trade.DetectionSource != "mempool"
 
 	var tokenID string
 	var negRisk bool
@@ -534,6 +536,36 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		tokenID = trade.MarketID
 		negRisk = false // Default, will be overridden by order book if needed
 		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, skipping API lookups, tokenID=%s", tokenID)
+	} else if trade.DetectionSource == "mempool" {
+		// Mempool trades: decoded tokenID/side from calldata is UNRELIABLE!
+		// Must look up token info to get correct outcome (Up/Down)
+		log.Printf("[CopyTrader] ⚡ Mempool trade: verifying tokenID=%s (decoded side=%s)", trade.MarketID, trade.Outcome)
+
+		// Look up the token info from cache to get the REAL outcome
+		tokenInfo, err := ct.store.GetTokenInfo(ctx, trade.MarketID)
+		if err == nil && tokenInfo != nil {
+			tokenID = trade.MarketID
+			// CRITICAL: Use the ACTUAL outcome from token cache, NOT the decoded "BUY"/"SELL"
+			if tokenInfo.Outcome != "" && tokenInfo.Outcome != trade.Outcome {
+				log.Printf("[CopyTrader] ⚠️ Mempool: Correcting outcome from '%s' to '%s'", trade.Outcome, tokenInfo.Outcome)
+				trade.Outcome = tokenInfo.Outcome
+			}
+			log.Printf("[CopyTrader] ⚡ Mempool: verified tokenID=%s, outcome=%s", tokenID, trade.Outcome)
+		} else {
+			// Token not in cache - fetch from Gamma API
+			log.Printf("[CopyTrader] ⚡ Mempool: token not in cache, fetching from Gamma API...")
+			gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, trade.MarketID)
+			if err != nil {
+				// If we can't verify, skip this trade - safety first
+				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: failed to verify tokenID %s: %v", trade.MarketID, err), "")
+			}
+			tokenID = trade.MarketID
+			trade.Outcome = gammaInfo.Outcome
+			negRisk = gammaInfo.NegRisk
+			// Cache for next time
+			ct.store.SaveTokenInfo(ctx, trade.MarketID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
+			log.Printf("[CopyTrader] ⚡ Mempool: verified from Gamma - tokenID=%s, outcome=%s", tokenID, trade.Outcome)
+		}
 	} else if trade.DetectionSource == "live_ws" {
 		// LiveData WebSocket: MarketID is conditionID, need to look up tokenID
 		log.Printf("[CopyTrader] ⚡ LiveData WS trade: looking up tokenID from conditionID=%s outcome=%s", trade.MarketID, trade.Outcome)
