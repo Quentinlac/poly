@@ -768,20 +768,13 @@ func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
 	d.processedTxs[txHash] = true
 	d.processedTxsMu.Unlock()
 
-	// NOTE: We no longer execute immediately from mempool because the decoded tokenId
-	// is often wrong (decoder picks up wrong field). Instead, we record the mempool
-	// detection time and let LiveData provide the correct tokenId when it arrives.
-	// This still gives us the timing advantage (~4s faster detection_source=mempool)
-	// while using the correct market data from LiveData.
-	if event.Decoded && event.TokenID != "" && event.Side != "" {
-		log.Printf("[MempoolWS] 🔍 PRE-DETECTED from mempool: from=%s side=%s size=%.4f price=%.4f tx=%s (waiting for LiveData)",
-			utils.ShortAddress(event.From), event.Side, event.Size, event.Price, txHash[:16])
-	}
+	// For Strategy 3 (BTC 15m candle) users, we need to look up the current active market
+	// since the tokenId decoded from mempool may be wrong (different field in calldata)
+	// The market follows pattern: btc-updown-15m-{timestamp} where timestamp rounds to 15min
 
-	// Fallback: Record pre-detection for when LiveData arrives
+	// Record pre-detection time for metrics
 	d.mempoolPreDetectionsMu.Lock()
 	d.mempoolPreDetections[txHash] = detectedAt
-	// Cleanup old entries (keep last 100)
 	if len(d.mempoolPreDetections) > 100 {
 		cutoff := time.Now().Add(-5 * time.Minute)
 		for k, t := range d.mempoolPreDetections {
@@ -792,12 +785,36 @@ func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
 	}
 	d.mempoolPreDetectionsMu.Unlock()
 
-	// Unmark as processed so LiveData can handle it
-	d.processedTxsMu.Lock()
-	delete(d.processedTxs, txHash)
-	d.processedTxsMu.Unlock()
+	// If we have decoded trade details, execute immediately
+	if event.Decoded && event.TokenID != "" && event.Side != "" {
+		log.Printf("[MempoolWS] 🚀 EXECUTING from mempool: from=%s side=%s size=%.4f price=%.4f tx=%s",
+			utils.ShortAddress(event.From), event.Side, event.Size, event.Price, txHash[:16])
 
-	log.Printf("[MempoolWS] ⏳ PENDING (not decoded): from=%s contract=%s tx=%s - waiting for LiveData",
+		// Create trade detail from mempool data
+		detail := models.TradeDetail{
+			ID:              txHash,
+			UserID:          utils.NormalizeAddress(event.From),
+			MarketID:        event.TokenID, // May be wrong format, copy_trader will look it up
+			Type:            "TRADE",
+			Side:            event.Side,
+			Size:            event.Size,
+			UsdcSize:        event.Size * event.Price,
+			Price:           event.Price,
+			Outcome:         event.Side, // Will be corrected by copy_trader
+			TransactionHash: txHash,
+			Timestamp:       time.Now(),
+			DetectedAt:      detectedAt,
+			DetectionSource: "mempool",
+		}
+
+		// Execute copy trade
+		if d.onNewTrade != nil {
+			d.onNewTrade(detail)
+		}
+		return
+	}
+
+	log.Printf("[MempoolWS] ⏳ PENDING (not decoded): from=%s contract=%s tx=%s",
 		utils.ShortAddress(event.From), event.ContractName, txHash[:16])
 }
 

@@ -501,6 +501,66 @@ func (c *ClobClient) GetMarket(ctx context.Context, conditionID string) (*Market
 	return &market, nil
 }
 
+// GetMarketBySlug fetches market info from Gamma API using the market slug
+// This is used for BTC 15m candle markets where we need to look up by slug pattern
+func (c *ClobClient) GetMarketBySlug(ctx context.Context, slug string) (*MarketInfo, error) {
+	url := "https://gamma-api.polymarket.com/markets?slug=" + slug
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gamma API failed: %d %s", resp.StatusCode, string(body))
+	}
+
+	// Gamma API returns an array of markets
+	var markets []struct {
+		ConditionID string `json:"condition_id"`
+		Description string `json:"description"`
+		Slug        string `json:"market_slug"`
+		NegRisk     bool   `json:"neg_risk"`
+		Tokens      []struct {
+			TokenID string `json:"token_id"`
+			Outcome string `json:"outcome"`
+		} `json:"tokens"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
+		return nil, fmt.Errorf("failed to decode gamma response: %w", err)
+	}
+
+	if len(markets) == 0 {
+		return nil, fmt.Errorf("no market found for slug %s", slug)
+	}
+
+	// Convert to MarketInfo format
+	m := markets[0]
+	market := &MarketInfo{
+		ConditionID: m.ConditionID,
+		Description: m.Description,
+		MarketSlug:  m.Slug,
+		NegRisk:     m.NegRisk,
+		Tokens:      make([]ClobTokenInfo, len(m.Tokens)),
+	}
+	for i, t := range m.Tokens {
+		market.Tokens[i] = ClobTokenInfo{
+			TokenID: t.TokenID,
+			Outcome: t.Outcome,
+		}
+	}
+
+	return market, nil
+}
+
 // BalanceAllowance represents the balance and allowance for an account
 type BalanceAllowance struct {
 	Balance   string `json:"balance"`

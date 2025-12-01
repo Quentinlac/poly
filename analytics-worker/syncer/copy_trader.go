@@ -691,6 +691,17 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 	log.Printf("[CopyTrader] DEBUG getTokenID: Gamma API failed (%v), trying CLOB API...", err)
 	market, err := ct.clobClient.GetMarket(ctx, trade.MarketID)
 	if err != nil {
+		// All APIs failed - check if this is a BTC 15m candle market (Strategy 3)
+		// Mempool decoder often returns invalid hex tokenId for these markets
+		if strings.HasPrefix(trade.MarketID, "0x") {
+			log.Printf("[CopyTrader] DEBUG getTokenID: Detected hex format marketID, trying BTC 15m fallback...")
+			tokenID, outcome, negRisk, btcErr := ct.lookupCurrentBTC15mMarket(ctx, trade.Outcome)
+			if btcErr == nil && tokenID != "" {
+				log.Printf("[CopyTrader] DEBUG getTokenID: BTC 15m fallback SUCCESS - tokenID=%s, outcome=%s", tokenID, outcome)
+				return tokenID, outcome, negRisk, nil
+			}
+			log.Printf("[CopyTrader] DEBUG getTokenID: BTC 15m fallback failed: %v", btcErr)
+		}
 		// Both APIs failed - use trade.MarketID directly with unknown outcome
 		log.Printf("[CopyTrader] DEBUG getTokenID: CLOB API also failed (%v), using trade.MarketID directly", err)
 		return trade.MarketID, trade.Outcome, false, nil
@@ -711,6 +722,49 @@ func (ct *CopyTrader) getVerifiedTokenID(ctx context.Context, trade models.Trade
 	// Fallback: use MarketID as token ID
 	log.Printf("[CopyTrader] DEBUG getTokenID: NO MATCH in tokens, falling back to trade.MarketID")
 	return trade.MarketID, trade.Outcome, false, nil
+}
+
+// lookupCurrentBTC15mMarket looks up the current active BTC 15m candle market
+// This is used as a fallback when the mempool-decoded tokenId can't be looked up
+// Returns: tokenID, outcome, negRisk, error
+func (ct *CopyTrader) lookupCurrentBTC15mMarket(ctx context.Context, outcome string) (string, string, bool, error) {
+	// Calculate the current 15-minute candle timestamp
+	now := time.Now().Unix()
+	candleInterval := int64(15 * 60) // 15 minutes in seconds
+	candleStart := (now / candleInterval) * candleInterval
+
+	// Build the market slug pattern
+	slug := fmt.Sprintf("btc-updown-15m-%d", candleStart)
+	log.Printf("[CopyTrader] BTC 15m fallback: looking up slug=%s for outcome=%s", slug, outcome)
+
+	// Try Gamma API to get market by slug
+	market, err := ct.clobClient.GetMarketBySlug(ctx, slug)
+	if err != nil {
+		// Try previous candle (in case we're at the boundary)
+		prevSlug := fmt.Sprintf("btc-updown-15m-%d", candleStart-candleInterval)
+		log.Printf("[CopyTrader] BTC 15m fallback: current candle failed, trying previous: %s", prevSlug)
+		market, err = ct.clobClient.GetMarketBySlug(ctx, prevSlug)
+		if err != nil {
+			return "", "", false, fmt.Errorf("BTC 15m market lookup failed for both %s and %s: %v", slug, prevSlug, err)
+		}
+	}
+
+	if market == nil {
+		return "", "", false, fmt.Errorf("BTC 15m market not found for slug %s", slug)
+	}
+
+	// Find the token matching the requested outcome
+	normalizedOutcome := strings.Title(strings.ToLower(outcome))
+	for _, token := range market.Tokens {
+		if strings.EqualFold(token.Outcome, outcome) || strings.EqualFold(token.Outcome, normalizedOutcome) {
+			log.Printf("[CopyTrader] BTC 15m fallback: found token %s for outcome %s", token.TokenID, token.Outcome)
+			// Cache it for next time
+			ct.store.SaveTokenInfo(ctx, token.TokenID, market.ConditionID, token.Outcome, market.Description, slug)
+			return token.TokenID, token.Outcome, market.NegRisk, nil
+		}
+	}
+
+	return "", "", false, fmt.Errorf("no token found for outcome %s in market %s", outcome, slug)
 }
 
 func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool) error {
