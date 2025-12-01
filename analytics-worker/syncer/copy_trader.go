@@ -495,6 +495,16 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	}
 	ct.inFlightTradesMu.Unlock()
 
+	// DATABASE-LEVEL DEDUP: Check if this trade was already executed (prevents duplicates across pods)
+	alreadyExecuted, err := ct.store.IsTradeAlreadyExecuted(ctx, trade.ID)
+	if err != nil {
+		log.Printf("[CopyTrader] Warning: failed to check for duplicate trade %s: %v", trade.ID[:16], err)
+		// Continue anyway - better to risk a duplicate than miss a trade
+	} else if alreadyExecuted {
+		log.Printf("[CopyTrader] Skipping trade %s (already executed in DB)", trade.ID[:16])
+		return nil
+	}
+
 	// Skip trades that are too old (e.g., server restart catch-up)
 	// These are stale - markets have moved, prices changed, no point copying
 	const maxTradeAge = 5 * time.Minute

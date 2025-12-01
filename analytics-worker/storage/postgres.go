@@ -1817,6 +1817,19 @@ func (s *PostgresStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLog
 	return err
 }
 
+// IsTradeAlreadyExecuted checks if a trade was already executed (prevents duplicates across pods)
+func (s *PostgresStore) IsTradeAlreadyExecuted(ctx context.Context, followingTradeID string) (bool, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM copy_trade_log
+		WHERE following_trade_id = $1 AND status = 'executed'
+	`, followingTradeID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // GetCopyTradeLogs retrieves recent copy trade logs
 func (s *PostgresStore) GetCopyTradeLogs(ctx context.Context, limit int) ([]CopyTradeLogEntry, error) {
 	if limit <= 0 {

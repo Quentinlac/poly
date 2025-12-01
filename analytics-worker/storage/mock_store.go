@@ -447,6 +447,20 @@ func (m *MockStore) SaveCopyTradeLog(ctx context.Context, entry CopyTradeLogEntr
 	return nil
 }
 
+func (m *MockStore) IsTradeAlreadyExecuted(ctx context.Context, followingTradeID string) (bool, error) {
+	if err := m.trackCall("IsTradeAlreadyExecuted"); err != nil {
+		return false, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, log := range m.CopyTradeLogs {
+		if log.FollowingTradeID == followingTradeID && log.Status == "executed" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *MockStore) GetMyPosition(ctx context.Context, marketID, outcome string) (CopyTradePosition, error) {
 	if err := m.trackCall("GetMyPosition"); err != nil {
 		return CopyTradePosition{}, err
