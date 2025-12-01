@@ -926,24 +926,127 @@ func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Si
 		}
 	}
 
-	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signed order: %w", err)
+	// Try FOK first with stricter precision (immediate execution)
+	// FOK BUY orders require: maker (USDC) = 2 decimals, taker (tokens) = 4 decimals
+	// We need to adjust size so that size*price rounds cleanly to 2 decimals
+	fokSize := size
+	fokUsdc := fokSize * price
+	// Round USDC to 2 decimals
+	fokUsdcRounded := float64(int(fokUsdc*100+0.5)) / 100
+	// Calculate adjusted size that produces exact 2-decimal USDC
+	if fokUsdcRounded > 0 && price > 0 {
+		fokSize = fokUsdcRounded / price
+		// Round fokSize to 4 decimals (FOK taker amount precision)
+		fokSize = float64(int(fokSize*10000+0.5)) / 10000
 	}
 
-	// Try FOK first (immediate execution)
-	resp, err := c.postOrder(ctx, order, OrderTypeFOK)
-	if err == nil && resp.Success {
-		return resp, nil
+	order, err := c.createSignedOrderFOK(tokenID, side, fokSize, price, negRisk)
+	if err != nil {
+		log.Printf("[CLOB] FOK order creation failed: %v, trying GTC", err)
+	} else {
+		resp, err := c.postOrder(ctx, order, OrderTypeFOK)
+		if err == nil && resp.Success {
+			log.Printf("[CLOB] FOK order succeeded! (size=%.4f, price=%.4f)", fokSize, price)
+			return resp, nil
+		}
+		log.Printf("[CLOB] FOK failed (err=%v, success=%v), falling back to GTC", err, resp != nil && resp.Success)
 	}
 
 	// FOK failed - try GTC (more flexible, better fill rate)
-	log.Printf("[CLOB] FOK failed (err=%v, success=%v), falling back to GTC", err, resp != nil && resp.Success)
 	order2, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GTC order: %w", err)
 	}
 	return c.postOrder(ctx, order2, OrderTypeGTC)
+}
+
+// createSignedOrderFOK creates an order with FOK-compatible precision
+// FOK requires: maker amount (USDC for buy) = 2 decimals, taker amount (tokens) = 4 decimals
+func (c *ClobClient) createSignedOrderFOK(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
+	// Round price to tick size (0.01 for most markets)
+	tickSize := 0.01
+	price = float64(int(price/tickSize+0.5)) * tickSize
+
+	// For FOK: size can have up to 4 decimals
+	size = float64(int(size*10000+0.5)) / 10000
+
+	// Enforce minimum order size
+	if size < 0.01 {
+		size = 0.01
+	}
+
+	// Polymarket requires minimum token sizes
+	const minTokenSize = 5.0
+	if size < minTokenSize {
+		size = minTokenSize
+	}
+
+	// Calculate USDC value and round to 2 decimals (FOK requirement for buy orders)
+	usdcValue := size * price
+	usdcValue = float64(int(usdcValue*100+0.5)) / 100
+
+	// Enforce $1 minimum for buy orders
+	const minOrderUSDC = 1.0
+	if side == SideBuy && usdcValue < minOrderUSDC && price > 0 {
+		usdcValue = minOrderUSDC
+		// Recalculate size from the rounded USDC value
+		size = usdcValue / price
+		size = float64(int(size*10000+0.5)) / 10000
+	}
+
+	// Convert to 6-decimal format
+	// Tokens: size * 10^6, but since size is in 4 decimals, we do size * 10000 * 100
+	sizeIn6Dec := int64(size*10000+0.5) * 100
+	sizeInt := big.NewInt(sizeIn6Dec)
+
+	// USDC: already 2 decimals, convert to 6 decimal (multiply by 10000)
+	usdcIn6Dec := int64(usdcValue*100+0.5) * 10000
+	usdcInt := big.NewInt(usdcIn6Dec)
+
+	var makerAmount, takerAmount *big.Int
+	sideInt := 0
+	sideStr := "BUY"
+
+	if side == SideBuy {
+		makerAmount = usdcInt
+		takerAmount = sizeInt
+		sideInt = 0
+		sideStr = "BUY"
+	} else {
+		makerAmount = sizeInt
+		takerAmount = usdcInt
+		sideInt = 1
+		sideStr = "SELL"
+	}
+
+	// Create order with expiration
+	expiration := time.Now().Add(5 * time.Minute).Unix()
+	nonce := time.Now().UnixNano()
+
+	order := &Order{
+		Salt:          nonce,
+		Maker:         c.funder.Hex(),
+		Signer:        c.funder.Hex(),
+		Taker:         "0x0000000000000000000000000000000000000000",
+		TokenID:       tokenID,
+		MakerAmount:   makerAmount.String(),
+		TakerAmount:   takerAmount.String(),
+		Expiration:    fmt.Sprintf("%d", expiration),
+		Nonce:         fmt.Sprintf("%d", nonce),
+		FeeRateBps:    "0",
+		Side:          sideStr,
+		SignatureType: c.signatureType,
+		SideInt:       sideInt,
+	}
+
+	// Sign the order using EIP-712
+	sig, err := c.signOrder(order, negRisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign order: %w", err)
+	}
+	order.Signature = sig
+
+	return order, nil
 }
 
 func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
