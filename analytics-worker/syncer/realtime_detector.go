@@ -1072,6 +1072,13 @@ func (d *RealtimeDetector) GetCachedUserSettings(userAddr string) *storage.UserC
 	return d.userSettingsCache[utils.NormalizeAddress(userAddr)]
 }
 
+// SetCachedUserSettings adds/updates user settings in the cache
+func (d *RealtimeDetector) SetCachedUserSettings(userAddr string, settings *storage.UserCopySettings) {
+	d.userSettingsCacheMu.Lock()
+	defer d.userSettingsCacheMu.Unlock()
+	d.userSettingsCache[utils.NormalizeAddress(userAddr)] = settings
+}
+
 // AddFollowedUser adds a user to the monitored list
 func (d *RealtimeDetector) AddFollowedUser(userAddr string) {
 	d.followedUsersMu.Lock()

@@ -24,7 +24,8 @@ const (
 	mempoolWSURLBackup = "wss://polygon.drpc.org"
 
 	// HTTP RPC for fetching full transaction data
-	polygonHTTPRPC       = "https://polygon-rpc.com"
+	// IMPORTANT: Must use SAME provider as WebSocket to find pending TXs!
+	polygonHTTPRPC       = "https://polygon-bor-rpc.publicnode.com"
 	polygonHTTPRPCBackup = "https://polygon.drpc.org"
 )
 
@@ -540,7 +541,7 @@ func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 
 	event := MempoolTradeEvent{
 		TxHash:       txHash,
-		From:         tx.From,
+		From:         fromAddr, // User's proxy wallet (NOT tx.From which is the operator)
 		To:           tx.To,
 		ContractName: contractName,
 		Input:        tx.Input,

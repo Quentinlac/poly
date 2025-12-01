@@ -18,6 +18,12 @@ import (
 	"polymarket-analyzer/storage"
 )
 
+// orderBookResult holds the result of an async order book fetch
+type orderBookResult struct {
+	book *api.OrderBook
+	err  error
+}
+
 // CopyTrader monitors trades and copies them
 type CopyTrader struct {
 	store      *storage.PostgresStore
@@ -580,6 +586,14 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 
 	log.Printf("[CopyTrader] ⏱️ TIMING: preExecution=%dms", time.Since(processStart).Milliseconds())
 
+	// OPTIMIZATION: Start order book fetch NOW while we check settings
+	// This runs in parallel - saves ~50-200ms on the critical path
+	orderBookCh := make(chan orderBookResult, 1)
+	go func() {
+		book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+		orderBookCh <- orderBookResult{book, err}
+	}()
+
 	// Get user settings - first try cached settings (faster, no DB query), then fall back to DB
 	// IMPORTANT: Users without explicit settings are DISABLED by default
 	strategyType := storage.StrategyHuman
@@ -607,12 +621,12 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	// Strategy 3 (BTC 15m) uses the same execution as Strategy 2 (Bot)
 	if trade.Side == "BUY" {
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotBuy(ctx, trade, tokenID, negRisk, userSettings)
+			return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh)
 		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotSell(ctx, trade, tokenID, negRisk, userSettings)
+			return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh)
 		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
 	}
@@ -778,11 +792,24 @@ func (ct *CopyTrader) executeBuy(ctx context.Context, trade models.TradeDetail, 
 	}
 
 	// Get per-user settings or use defaults
+	// First check cache (fast), then DB (slow), and update cache if found
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
 
-	userSettings, err := ct.store.GetUserCopySettings(ctx, trade.UserID)
-	if err == nil && userSettings != nil {
+	var userSettings *storage.UserCopySettings
+	if ct.detector != nil {
+		userSettings = ct.detector.GetCachedUserSettings(trade.UserID)
+	}
+	if userSettings == nil {
+		// Cache miss - query DB
+		var err error
+		userSettings, err = ct.store.GetUserCopySettings(ctx, trade.UserID)
+		if err == nil && userSettings != nil && ct.detector != nil {
+			// Add to cache for next time
+			ct.detector.SetCachedUserSettings(trade.UserID, userSettings)
+		}
+	}
+	if userSettings != nil {
 		if !userSettings.Enabled {
 			log.Printf("[CopyTrader] BUY skipped: user %s has copy trading disabled", trade.UserID)
 			return nil
@@ -851,6 +878,12 @@ func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail,
 // executeBotBuy implements the bot following strategy for buys.
 // It tries to buy at the copied user's exact price, then sweeps asks up to +10%.
 func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
+	return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, nil)
+}
+
+// executeBotBuyWithBook is the same as executeBotBuy but accepts a pre-fetched order book channel
+// for parallel execution optimization
+func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult) error {
 	// Initialize timing tracking
 	startTime := time.Now()
 	timing := map[string]interface{}{}
@@ -924,10 +957,21 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	ct.clobClient.AddTokenToCache(tokenID)
 	timing["3_token_cache_ms"] = float64(time.Since(cacheStart).Microseconds()) / 1000
 
-	// Step 4: Get order book (API call - usually slowest)
+	// Step 4: Get order book (use pre-fetched if available, otherwise fetch now)
 	orderBookStart := time.Now()
-	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
-	timing["4_get_orderbook_ms"] = float64(time.Since(orderBookStart).Microseconds()) / 1000
+	var book *api.OrderBook
+	var err error
+	if orderBookCh != nil {
+		// Use pre-fetched order book from parallel execution
+		result := <-orderBookCh
+		book, err = result.book, result.err
+		timing["4_get_orderbook_ms"] = float64(time.Since(orderBookStart).Microseconds()) / 1000
+		timing["4_orderbook_prefetched"] = true
+	} else {
+		// Fetch fresh order book
+		book, err = ct.clobClient.GetOrderBook(ctx, tokenID)
+		timing["4_get_orderbook_ms"] = float64(time.Since(orderBookStart).Microseconds()) / 1000
+	}
 	if err != nil {
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
 		debugLog["orderBook"] = map[string]interface{}{"error": err.Error()}
@@ -1183,6 +1227,12 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 // It tries to sell at the copied user's exact price, then sweeps bids down to -10%.
 // If still not filled, creates limit orders at -3% and -5%, waits 3 min, then market sells remainder.
 func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
+	return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, nil)
+}
+
+// executeBotSellWithBook is the same as executeBotSell but accepts a pre-fetched order book channel
+// for parallel execution optimization
+func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult) error {
 	// Initialize timestamps for latency tracking
 	startTime := time.Now()
 	timestamps := &CopyTradeTimestamps{
@@ -1261,14 +1311,23 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	// Add token to cache
 	ct.clobClient.AddTokenToCache(tokenID)
 
-	// Get order book
-	book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
-	if err != nil {
-		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
+	// Get order book (use pre-fetched if available, otherwise fetch now)
+	var book *api.OrderBook
+	var bookErr error
+	if orderBookCh != nil {
+		// Use pre-fetched order book from parallel execution
+		result := <-orderBookCh
+		book, bookErr = result.book, result.err
+	} else {
+		// Fetch fresh order book
+		book, bookErr = ct.clobClient.GetOrderBook(ctx, tokenID)
+	}
+	if bookErr != nil {
+		if strings.Contains(bookErr.Error(), "404") || strings.Contains(bookErr.Error(), "No orderbook exists") {
 			log.Printf("[CopyTrader-Bot] SELL: market closed/resolved, skipping")
 			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped", "market closed/resolved", "", userSettings.StrategyType, nil, nil, timestamps)
 		}
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", err), "", userSettings.StrategyType, nil, nil, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order book error: %v", bookErr), "", userSettings.StrategyType, nil, nil, timestamps)
 	}
 
 	if len(book.Bids) == 0 {
