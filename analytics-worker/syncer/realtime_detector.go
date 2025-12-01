@@ -23,14 +23,16 @@ import (
 // RealtimeDetector combines multiple data sources for fastest trade detection:
 // 1. CLOB API polling (PRIMARY: ~50-150ms latency - trades appear when matched off-chain)
 // 2. Polygon blockchain WebSocket (BACKUP: ~10-20s from trade execution)
-// 3. LiveData WebSocket for BTC 15m markets (Strategy 3: ~650ms latency)
+// 3. Polygon Mempool monitoring for Strategy 3 users (~2-3s latency from user click)
+// 4. LiveData WebSocket for BTC 15m markets (FALLBACK for Strategy 3: ~6s latency)
 type RealtimeDetector struct {
 	apiClient   *api.Client
 	clobClient  *api.ClobClient       // For fast CLOB API trade detection (~50ms latency)
 	store       *storage.PostgresStore
 	wsClient    *api.WSClient
 	polygonWS   *api.PolygonWSClient  // Blockchain WebSocket for backup detection
-	liveDataWS  *api.LiveDataWSClient // LiveData WebSocket for BTC 15m (Strategy 3)
+	mempoolWS   *api.MempoolWSClient  // Mempool monitoring for Strategy 3 (~2-3s from click)
+	liveDataWS  *api.LiveDataWSClient // LiveData WebSocket for BTC 15m (Strategy 3 fallback)
 
 	// Our own address (to track blockchain confirmations of our trades)
 	myAddress string
@@ -54,6 +56,10 @@ type RealtimeDetector struct {
 	// Processed trades (to avoid duplicates) - keyed by trade ID
 	processedTxs   map[string]bool
 	processedTxsMu sync.RWMutex
+
+	// Mempool pre-detections (txHash -> detected time) for measuring time saved vs LiveData
+	mempoolPreDetections   map[string]time.Time
+	mempoolPreDetectionsMu sync.RWMutex
 
 	// Trade callback
 	onNewTrade func(trade models.TradeDetail)
@@ -81,7 +87,9 @@ type DetectorMetrics struct {
 	WebSocketEvents     int64
 	BlockchainEvents    int64 // Events from Polygon WebSocket
 	BlockchainMatches   int64 // Matched followed users on blockchain
-	LiveDataWSEvents    int64 // Events from LiveData WebSocket (BTC 15m Strategy 3)
+	MempoolEvents       int64 // Pending transactions seen in mempool
+	MempoolMatches      int64 // Matched followed users in mempool (Strategy 3)
+	LiveDataWSEvents    int64 // Events from LiveData WebSocket (BTC 15m Strategy 3 fallback)
 	LiveDataWSMatches   int64 // Matched followed users on LiveData WS
 	LastDetectionTime   time.Time
 }
@@ -105,19 +113,20 @@ func NewRealtimeDetector(apiClient *api.Client, clobClient *api.ClobClient, stor
 	}
 
 	d := &RealtimeDetector{
-		apiClient:         apiClient,
-		clobClient:        clobClient,
-		store:             store,
-		myAddress:         myAddress,
-		followedUsers:     make(map[string]bool),
-		btc15mUsers:       make(map[string]bool),
-		userSettingsCache: make(map[string]*storage.UserCopySettings),
-		lastCheck:         make(map[string]time.Time),
-		processedTxs:      make(map[string]bool),
-		onNewTrade:        onNewTrade,
-		metrics:           &DetectorMetrics{},
-		stopCh:            make(chan struct{}),
-		useCLOBDetection:  clobClient != nil, // Enable CLOB detection if client is provided
+		apiClient:            apiClient,
+		clobClient:           clobClient,
+		store:                store,
+		myAddress:            myAddress,
+		followedUsers:        make(map[string]bool),
+		btc15mUsers:          make(map[string]bool),
+		userSettingsCache:    make(map[string]*storage.UserCopySettings),
+		lastCheck:            make(map[string]time.Time),
+		processedTxs:         make(map[string]bool),
+		mempoolPreDetections: make(map[string]time.Time),
+		onNewTrade:           onNewTrade,
+		metrics:              &DetectorMetrics{},
+		stopCh:               make(chan struct{}),
+		useCLOBDetection:     clobClient != nil, // Enable CLOB detection if client is provided
 	}
 
 	// Create Polygon WebSocket client for backup blockchain monitoring
@@ -127,9 +136,13 @@ func NewRealtimeDetector(apiClient *api.Client, clobClient *api.ClobClient, stor
 		log.Printf("[RealtimeDetector] Blockchain WebSocket ENABLED (backup ~10-20s detection)")
 	}
 
-	// Create LiveData WebSocket client for BTC 15m markets (Strategy 3)
+	// Create Mempool WebSocket client for Strategy 3 (fastest detection ~2-3s from user click)
+	d.mempoolWS = api.NewMempoolWSClient(d.handleMempoolTrade)
+	log.Printf("[RealtimeDetector] Mempool WebSocket ENABLED (Strategy 3: ~2-3s from user click)")
+
+	// Create LiveData WebSocket client for BTC 15m markets (Strategy 3 fallback ~6s)
 	d.liveDataWS = api.NewLiveDataWSClient(d.handleLiveDataTrade)
-	log.Printf("[RealtimeDetector] LiveData WebSocket ENABLED (Strategy 3: ~650ms latency)")
+	log.Printf("[RealtimeDetector] LiveData WebSocket ENABLED (Strategy 3 fallback: ~6s latency)")
 
 	if d.useCLOBDetection {
 		log.Printf("[RealtimeDetector] CLOB API detection ENABLED (primary ~50ms latency)")
@@ -161,7 +174,29 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start LiveData WebSocket for Strategy 3 users
+	// Start Mempool WebSocket for Strategy 3 users (PRIMARY - fastest ~2-3s from click)
+	if d.mempoolWS != nil {
+		// Set the addresses to monitor
+		btc15mAddrs := make([]string, 0, len(d.btc15mUsers))
+		d.btc15mUsersMu.RLock()
+		for addr := range d.btc15mUsers {
+			btc15mAddrs = append(btc15mAddrs, addr)
+		}
+		d.btc15mUsersMu.RUnlock()
+
+		if len(btc15mAddrs) > 0 {
+			d.mempoolWS.SetFollowedAddresses(btc15mAddrs)
+			if err := d.mempoolWS.Start(ctx); err != nil {
+				log.Printf("[RealtimeDetector] Warning: Mempool WebSocket failed to start: %v", err)
+			} else {
+				log.Printf("[RealtimeDetector] ✓ Mempool WebSocket started (Strategy 3: %d users, ~2-3s detection)", len(btc15mAddrs))
+			}
+		} else {
+			log.Printf("[RealtimeDetector] Mempool WebSocket NOT started (no Strategy 3 users)")
+		}
+	}
+
+	// Start LiveData WebSocket for Strategy 3 users (FALLBACK - ~6s from click)
 	// Subscribe to ALL trades and filter locally by proxyWallet
 	if d.liveDataWS != nil {
 		if err := d.liveDataWS.Start(ctx); err != nil {
@@ -170,7 +205,7 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 			if err := d.liveDataWS.SubscribeToAllTrades(); err != nil {
 				log.Printf("[RealtimeDetector] Warning: LiveData WebSocket subscription failed: %v", err)
 			} else {
-				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (all trades, filter locally)")
+				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (Strategy 3 fallback)")
 			}
 		}
 	}
@@ -220,6 +255,10 @@ func (d *RealtimeDetector) Stop() {
 
 	if d.polygonWS != nil {
 		d.polygonWS.Stop()
+	}
+
+	if d.mempoolWS != nil {
+		d.mempoolWS.Stop()
 	}
 
 	if d.liveDataWS != nil {
@@ -702,6 +741,99 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	}
 }
 
+// handleMempoolTrade is called when a pending transaction is detected in mempool
+// This is the FASTEST detection method for Strategy 3 users (~2-3s from user click)
+// If trade details are decoded, execute copy trade immediately
+// Otherwise, record pre-detection and wait for LiveData to provide details
+func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
+	detectedAt := time.Now()
+
+	// Update metrics
+	d.metricsMu.Lock()
+	d.metrics.MempoolEvents++
+	d.metrics.MempoolMatches++
+	d.metricsMu.Unlock()
+
+	// Normalize the tx hash for consistent lookup
+	txHash := strings.ToLower(event.TxHash)
+
+	// Check if we already processed this trade
+	d.processedTxsMu.Lock()
+	if d.processedTxs[txHash] {
+		d.processedTxsMu.Unlock()
+		log.Printf("[MempoolWS] Trade %s already processed, skipping", txHash[:16])
+		return
+	}
+	// Mark as processed immediately to prevent duplicate execution
+	d.processedTxs[txHash] = true
+	d.processedTxsMu.Unlock()
+
+	// If we have decoded trade details, execute immediately!
+	if event.Decoded && event.TokenID != "" && event.Side != "" {
+		log.Printf("[MempoolWS] 🚀 EXECUTING FROM MEMPOOL! from=%s side=%s size=%.4f price=%.4f tx=%s",
+			utils.ShortAddress(event.From), event.Side, event.Size, event.Price, txHash[:16])
+
+		// Create TradeDetail from decoded mempool data
+		usdcSize := event.Size * event.Price
+		detail := models.TradeDetail{
+			ID:              txHash,
+			UserID:          utils.NormalizeAddress(event.From),
+			MarketID:        event.TokenID, // Token ID from decoded input
+			Type:            "TRADE",
+			Side:            event.Side,
+			Size:            event.Size,
+			UsdcSize:        usdcSize,
+			Price:           event.Price,
+			TransactionHash: txHash,
+			Timestamp:       detectedAt, // Use detection time as trade time
+			DetectedAt:      detectedAt,
+			DetectionSource: "mempool", // Detected via mempool (~3s faster than LiveData)
+		}
+
+		// Update metrics
+		d.metricsMu.Lock()
+		d.metrics.TradesDetected++
+		d.metrics.LastDetectionTime = detectedAt
+		d.metricsMu.Unlock()
+
+		// Save trade asynchronously
+		go func() {
+			bgCtx := context.Background()
+			if err := d.store.SaveTrades(bgCtx, []models.TradeDetail{detail}, false); err != nil {
+				log.Printf("[MempoolWS] Warning: failed to save mempool trade: %v", err)
+			}
+		}()
+
+		// Execute copy trade immediately!
+		if d.onNewTrade != nil {
+			d.onNewTrade(detail)
+		}
+		return
+	}
+
+	// Fallback: Record pre-detection for when LiveData arrives
+	d.mempoolPreDetectionsMu.Lock()
+	d.mempoolPreDetections[txHash] = detectedAt
+	// Cleanup old entries (keep last 100)
+	if len(d.mempoolPreDetections) > 100 {
+		cutoff := time.Now().Add(-5 * time.Minute)
+		for k, t := range d.mempoolPreDetections {
+			if t.Before(cutoff) {
+				delete(d.mempoolPreDetections, k)
+			}
+		}
+	}
+	d.mempoolPreDetectionsMu.Unlock()
+
+	// Unmark as processed so LiveData can handle it
+	d.processedTxsMu.Lock()
+	delete(d.processedTxs, txHash)
+	d.processedTxsMu.Unlock()
+
+	log.Printf("[MempoolWS] ⏳ PENDING (not decoded): from=%s contract=%s tx=%s - waiting for LiveData",
+		utils.ShortAddress(event.From), event.ContractName, txHash[:16])
+}
+
 // userRefreshLoop periodically refreshes the list of followed users
 func (d *RealtimeDetector) userRefreshLoop(ctx context.Context) {
 	defer d.wg.Done()
@@ -806,6 +938,25 @@ func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 	log.Printf("[RealtimeDetector] 🚀 LIVE DATA TRADE DETECTED: user=%s side=%s size=%.2f price=%.4f outcome=%s latency=%s",
 		event.Name, event.Side, event.Size, event.Price, event.Outcome, latency.Round(time.Millisecond))
 
+	// Check if we had a mempool pre-detection for this trade
+	txHashLower := strings.ToLower(event.TransactionHash)
+	d.mempoolPreDetectionsMu.RLock()
+	mempoolTime, wasPreDetected := d.mempoolPreDetections[txHashLower]
+	d.mempoolPreDetectionsMu.RUnlock()
+
+	detectionSource := "live_ws"
+	if wasPreDetected {
+		timeSaved := detectedAt.Sub(mempoolTime)
+		log.Printf("[RealtimeDetector] ⚡ MEMPOOL PRE-DETECTION! tx=%s detected %s earlier via mempool",
+			txHashLower[:16], timeSaved.Round(time.Millisecond))
+		detectionSource = "mempool" // Credit to mempool for the detection
+
+		// Clean up the pre-detection entry
+		d.mempoolPreDetectionsMu.Lock()
+		delete(d.mempoolPreDetections, txHashLower)
+		d.mempoolPreDetectionsMu.Unlock()
+	}
+
 	// Convert to TradeDetail
 	usdcSize := event.Size * event.Price
 	detail := models.TradeDetail{
@@ -824,7 +975,7 @@ func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 		Pseudonym:       event.Pseudonym,
 		Timestamp:       tradeTime,
 		DetectedAt:      detectedAt,
-		DetectionSource: "live_ws", // Detected via LiveData WebSocket
+		DetectionSource: detectionSource, // "mempool" if pre-detected, otherwise "live_ws"
 	}
 
 	// Save to user_trades for historical record
@@ -886,6 +1037,11 @@ func (d *RealtimeDetector) refreshFollowedUsers(ctx context.Context) error {
 	d.btc15mUsersMu.Lock()
 	d.btc15mUsers = btc15mSet
 	d.btc15mUsersMu.Unlock()
+
+	// Update mempool monitoring addresses for Strategy 3 users
+	if d.mempoolWS != nil && len(btc15mUsers) > 0 {
+		d.mempoolWS.SetFollowedAddresses(btc15mUsers)
+	}
 
 	// Build followed users list, EXCLUDING Strategy 3 users (they use WebSocket only)
 	d.followedUsersMu.Lock()
