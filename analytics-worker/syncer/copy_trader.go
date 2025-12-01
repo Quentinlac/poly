@@ -552,6 +552,13 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 			tokenID = foundToken
 			negRisk = market.NegRisk
 			log.Printf("[CopyTrader] ⚡ LiveData WS: found tokenID=%s from CLOB API (negRisk=%v)", tokenID, negRisk)
+
+			// Cache all tokens from this market for future lookups
+			for _, token := range market.Tokens {
+				if err := ct.store.SaveTokenInfo(ctx, token.TokenID, market.ConditionID, token.Outcome, market.Description, market.MarketSlug); err != nil {
+					log.Printf("[CopyTrader] Warning: failed to cache token %s: %v", token.TokenID, err)
+				}
+			}
 		}
 	} else {
 		// Slow path: legacy trades need verification
