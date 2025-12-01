@@ -1436,27 +1436,27 @@ func (s *Service) FetchIncrementalTrades(ctx context.Context, userID string, sin
 				newTokens, err := s.subgraphClient.BuildTokenMap(ctx, missingTokenIDs)
 				if err != nil {
 					log.Printf("[Service] Warning: failed to build token map: %v", err)
-				} else {
+				}
+				// Add any tokens that were fetched (even if there was a partial error)
+				if len(newTokens) > 0 {
 					for id, info := range newTokens {
 						tokenMap[id] = info
 					}
-					// Save to cache in background
-					go func(tokens map[string]api.TokenInfo) {
-						cacheTokens := make(map[string]storage.TokenInfo)
-						for id, info := range tokens {
-							cacheTokens[id] = storage.TokenInfo{
-								TokenID:     info.TokenID,
-								ConditionID: info.ConditionID,
-								Outcome:     info.Outcome,
-								Title:       info.Title,
-								Slug:        info.Slug,
-								EventSlug:   info.EventSlug,
-							}
+					// Save to cache SYNCHRONOUSLY to ensure it's available for next lookup
+					cacheTokens := make(map[string]storage.TokenInfo)
+					for id, info := range newTokens {
+						cacheTokens[id] = storage.TokenInfo{
+							TokenID:     info.TokenID,
+							ConditionID: info.ConditionID,
+							Outcome:     info.Outcome,
+							Title:       info.Title,
+							Slug:        info.Slug,
+							EventSlug:   info.EventSlug,
 						}
-						if err := s.store.SaveTokenCache(context.Background(), cacheTokens); err != nil {
-							log.Printf("[Service] Warning: failed to cache tokens: %v", err)
-						}
-					}(newTokens)
+					}
+					if err := s.store.SaveTokenCache(ctx, cacheTokens); err != nil {
+						log.Printf("[Service] Warning: failed to cache tokens: %v", err)
+					}
 				}
 			}
 
