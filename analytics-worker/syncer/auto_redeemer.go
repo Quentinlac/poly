@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	// Redeem check interval - not too frequent to avoid rate limits
-	redeemInterval = 2 * time.Minute
 	// Delay between individual redeem calls - relayer limit is 15/min, so 5s = 12/min max (safe)
 	redeemDelay = 5 * time.Second
-	// Max redeems per check cycle to stay under rate limit
-	maxRedeemsPerCycle = 10
+	// Max redeems per check cycle to stay under daily quota
+	maxRedeemsPerCycle = 50
+	// Daily run time (9 AM UTC)
+	dailyRunHour   = 9
+	dailyRunMinute = 0
 )
 
 // AutoRedeemer automatically redeems resolved positions via Polymarket Relayer
@@ -127,7 +128,7 @@ func (ar *AutoRedeemer) Start(ctx context.Context) error {
 	ar.wg.Add(1)
 	go ar.redeemLoop(ctx)
 
-	log.Printf("[AutoRedeemer] Started - checking every %v (gasless via Relayer)", redeemInterval)
+	log.Printf("[AutoRedeemer] Started - runs daily at 9:00 AM UTC (gasless via Relayer)")
 	return nil
 }
 
@@ -149,14 +150,29 @@ func (ar *AutoRedeemer) GetStats() (redeemed int, usdc float64, lastTime time.Ti
 	return ar.totalRedeemed, ar.totalUSDC, ar.lastRedeemTime
 }
 
+// timeUntilNextRun calculates duration until next 9 AM UTC
+func timeUntilNextRun() time.Duration {
+	now := time.Now().UTC()
+	nextRun := time.Date(now.Year(), now.Month(), now.Day(), dailyRunHour, dailyRunMinute, 0, 0, time.UTC)
+
+	// If we've already passed today's run time, schedule for tomorrow
+	if now.After(nextRun) {
+		nextRun = nextRun.Add(24 * time.Hour)
+	}
+
+	return nextRun.Sub(now)
+}
+
 func (ar *AutoRedeemer) redeemLoop(ctx context.Context) {
 	defer ar.wg.Done()
 
-	// Run immediately on start
-	ar.checkAndRedeem(ctx)
+	// Calculate time until next 9 AM UTC
+	untilNext := timeUntilNextRun()
+	log.Printf("[AutoRedeemer] Next redemption run scheduled in %v (at 9:00 AM UTC)", untilNext.Round(time.Minute))
 
-	ticker := time.NewTicker(redeemInterval)
-	defer ticker.Stop()
+	// Wait until next scheduled run
+	timer := time.NewTimer(untilNext)
+	defer timer.Stop()
 
 	for {
 		select {
@@ -164,8 +180,14 @@ func (ar *AutoRedeemer) redeemLoop(ctx context.Context) {
 			return
 		case <-ar.stopCh:
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			log.Printf("[AutoRedeemer] 🕘 Daily redemption run starting (9 AM UTC)")
 			ar.checkAndRedeem(ctx)
+
+			// Schedule next run for tomorrow at 9 AM UTC
+			untilNext = timeUntilNextRun()
+			log.Printf("[AutoRedeemer] Next redemption run scheduled in %v", untilNext.Round(time.Minute))
+			timer.Reset(untilNext)
 		}
 	}
 }
