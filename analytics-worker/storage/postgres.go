@@ -1881,8 +1881,8 @@ func (s *PostgresStore) UpdateBlockchainConfirmedAt(ctx context.Context, tokenID
 				($3 = 'SELL' AND following_shares < 0)
 			)
 			AND follower_time IS NOT NULL
-			AND follower_time > $1 - INTERVAL '5 minutes'
-			AND follower_time < $1 + INTERVAL '2 minutes'
+			AND follower_time > ($1::timestamptz - INTERVAL '5 minutes')
+			AND follower_time < ($1::timestamptz + INTERVAL '2 minutes')
 			ORDER BY follower_time DESC
 			LIMIT 1
 		)
