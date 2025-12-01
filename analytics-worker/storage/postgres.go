@@ -2262,11 +2262,19 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 	}
 	upsertCount := result.RowsAffected()
 
-	// Step 1b: Update market_title from token_map_cache where missing
+	// Step 1b: Update market_title and market_start_time from token_map_cache where missing
 	// Uses slug as the title since it's more readable (e.g., "btc-updown-15m-1764577800")
+	// Extracts Unix timestamp from slug to get market_start_time
 	_, err = s.pool.Exec(ctx, `
 		UPDATE copy_trade_pnl p
-		SET market_title = c.slug, updated_at = NOW()
+		SET
+			market_title = c.slug,
+			market_start_time = CASE
+				WHEN c.slug ~ '-[0-9]+$'
+				THEN to_timestamp(CAST(substring(c.slug from '-([0-9]+)$') AS bigint))
+				ELSE NULL
+			END,
+			updated_at = NOW()
 		FROM token_map_cache c
 		WHERE p.token_id = c.token_id
 		  AND (p.market_title IS NULL OR p.market_title = '')
