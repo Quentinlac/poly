@@ -2795,20 +2795,12 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		seenResolvedMarkets[marketID] = true
 		resolvedTrades += tradeCount
 
-		// Calculate USER's actual PNL (no slippage, no multiplier)
-		// PNL = sell proceeds + redeem proceeds - buy cost + remaining shares if won
-		userRemaining := totalBought - totalSold
-		if userRemaining < 0 {
-			userRemaining = 0 // Can't have negative remaining
-		}
-		var userPositionPnL float64
-		if outcome != nil && *outcome == *winningOutcome {
-			// Winner: remaining shares worth $1 each
-			userPositionPnL = totalSellProceeds + totalRedeemed - totalBuyCost + userRemaining
-		} else {
-			// Loser: remaining shares worth $0
-			userPositionPnL = totalSellProceeds + totalRedeemed - totalBuyCost
-		}
+		// Calculate USER's actual PNL using REALIZED cash flow only
+		// We don't add "remaining shares @ $1" because:
+		// 1. Minting transactions aren't tracked as buys, so share counts are unreliable
+		// 2. Unredeemed shares are unrealized profit
+		// PNL = sell proceeds + redeem proceeds - buy cost
+		userPositionPnL := totalSellProceeds + totalRedeemed - totalBuyCost
 		userPnl += userPositionPnL
 
 		// Calculate OUR simulated PNL with multiplier and slippage
@@ -2818,20 +2810,9 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
 		// Redeem: NO slippage (exactly $1 per share)
 		simRedeemed := totalRedeemed * multiplier
-		// Remaining shares
-		simRemaining := (totalBought - totalSold) * multiplier
-		if simRemaining < 0 {
-			simRemaining = 0
-		}
 
-		var positionPnL float64
-		if outcome != nil && *outcome == *winningOutcome {
-			// Winner: remaining shares worth $1 each
-			positionPnL = simSellProceeds + simRedeemed - simBuyCost + simRemaining
-		} else {
-			// Loser: remaining shares worth $0
-			positionPnL = simSellProceeds + simRedeemed - simBuyCost
-		}
+		// PNL = sells + redeems - buys (all realized cash flow)
+		positionPnL := simSellProceeds + simRedeemed - simBuyCost
 		pnl += positionPnL
 	}
 
