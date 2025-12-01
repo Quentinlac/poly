@@ -834,20 +834,9 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		"maxUSD":     maxUSD,
 	}
 
-	// Step 2: Calculate target amount
+	// Step 2: Calculate target shares (we follow number of shares, not dollar amount)
 	calcStart := time.Now()
-	originalTargetUSDC := trade.UsdcSize * multiplier
-	targetUSDC := originalTargetUSDC
-	if targetUSDC < minUSDC {
-		targetUSDC = minUSDC
-		log.Printf("[CopyTrader-Bot] BUY amount below minimum, using $%.2f", targetUSDC)
-	}
-
-	// Apply max cap if set
-	if maxUSD != nil && targetUSDC > *maxUSD {
-		log.Printf("[CopyTrader-Bot] BUY amount $%.2f exceeds max cap $%.2f, capping", targetUSDC, *maxUSD)
-		targetUSDC = *maxUSD
-	}
+	targetShares := trade.Size * multiplier
 
 	// Copied user's price is our target price
 	// Use dynamic slippage based on price (lower prices are more volatile)
@@ -866,16 +855,15 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 
 	slippagePct := getMaxSlippage(copiedPrice) * 100
 	debugLog["calculation"] = map[string]interface{}{
-		"copiedTradeUSDC":    trade.UsdcSize,
-		"originalTargetUSDC": originalTargetUSDC,
-		"finalTargetUSDC":    targetUSDC,
+		"copiedTradeShares":  trade.Size,
+		"targetShares":       targetShares,
 		"copiedPrice":        copiedPrice,
 		"maxPrice":           maxPrice,
 		"priceLimit":         fmt.Sprintf("+%.0f%%", slippagePct),
 	}
 
-	log.Printf("[CopyTrader-Bot] BUY: Copied price=%.4f, maxPrice=%.4f (+%.0f%%), targetUSDC=$%.2f, market=%s",
-		copiedPrice, maxPrice, slippagePct, targetUSDC, trade.Title)
+	log.Printf("[CopyTrader-Bot] BUY: Copied shares=%.4f, targetShares=%.4f, copiedPrice=%.4f, maxPrice=%.4f (+%.0f%%), market=%s",
+		trade.Size, targetShares, copiedPrice, maxPrice, slippagePct, trade.Title)
 
 	// Step 3: Add token to cache
 	cacheStart := time.Now()
@@ -892,10 +880,10 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
 			log.Printf("[CopyTrader-Bot] BUY: market closed/resolved, skipping")
 			debugLog["decision"] = "skipped - market closed/resolved"
-			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "market closed/resolved", "", storage.StrategyBot, debugLog, timing, timestamps)
+			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "skipped", "market closed/resolved", "", storage.StrategyBot, debugLog, timing, timestamps)
 		}
 		debugLog["decision"] = fmt.Sprintf("failed - order book error: %v", err)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "", storage.StrategyBot, debugLog, timing, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
 	// Step 5: Analyze order book
@@ -922,7 +910,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
 		log.Printf("[CopyTrader-Bot] BUY: no asks in order book")
 		debugLog["decision"] = "skipped - no asks in order book"
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "no asks in order book", "", storage.StrategyBot, debugLog, timing, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "skipped", "no asks in order book", "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
 	// Find all asks within our price range, sorted by price (cheapest first)
@@ -966,43 +954,44 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		log.Printf("[CopyTrader-Bot] BUY: no asks within 10%% of copied price (best ask %.4f > max %.4f)",
 			bestAsk, maxPrice)
 		debugLog["decision"] = fmt.Sprintf("skipped - best ask %.4f > max %.4f", bestAsk, maxPrice)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped",
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "skipped",
 			fmt.Sprintf("no liquidity within 10%% (best=%.4f, max=%.4f)", bestAsk, maxPrice), "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
-	// Step 6: Calculate fill - sweep through asks and track max price
+	// Step 6: Calculate fill - sweep through asks to accumulate target shares
 	fillStart := time.Now()
-	remainingUSDC := targetUSDC
+	remainingShares := targetShares
 	totalSize := 0.0
 	totalCost := 0.0
 	maxFillPrice := 0.0 // Track the highest price level we need to sweep
 
 	for _, ask := range affordableAsks {
-		if remainingUSDC <= 0 {
+		if remainingShares <= 0 {
 			break
 		}
 
-		levelCost := ask.price * ask.size
-		if levelCost <= remainingUSDC {
+		if ask.size <= remainingShares {
+			// Take entire level
 			totalSize += ask.size
-			totalCost += levelCost
-			remainingUSDC -= levelCost
+			totalCost += ask.price * ask.size
+			remainingShares -= ask.size
 			maxFillPrice = ask.price // Update max price as we sweep deeper
 		} else {
-			partialSize := remainingUSDC / ask.price
-			totalSize += partialSize
-			totalCost += remainingUSDC
-			remainingUSDC = 0
+			// Partial fill at this level
+			totalSize += remainingShares
+			totalCost += ask.price * remainingShares
+			remainingShares = 0
 			maxFillPrice = ask.price // This level is our deepest
 		}
 	}
 	timing["6_fill_calc_ms"] = float64(time.Since(fillStart).Microseconds()) / 1000
 
 	debugLog["fillCalculation"] = map[string]interface{}{
-		"totalSize":     totalSize,
-		"totalCost":     totalCost,
-		"remainingUSDC": remainingUSDC,
-		"maxFillPrice":  maxFillPrice,
+		"targetShares":    targetShares,
+		"totalSize":       totalSize,
+		"totalCost":       totalCost,
+		"remainingShares": remainingShares,
+		"maxFillPrice":    maxFillPrice,
 	}
 
 	// Polymarket requires minimum $1 order
@@ -1013,7 +1002,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		log.Printf("[CopyTrader-Bot] BUY: insufficient affordable liquidity (size=%.4f, cost=$%.4f)",
 			totalSize, totalCost)
 		debugLog["decision"] = fmt.Sprintf("skipped - insufficient liquidity (size=%.4f, cost=$%.4f)", totalSize, totalCost)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "skipped", "insufficient affordable liquidity", "", storage.StrategyBot, debugLog, timing, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "skipped", "insufficient affordable liquidity", "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
 	avgPrice := totalCost / totalSize
@@ -1024,18 +1013,40 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	// - maxFillPrice is 0.12, which matches both levels
 	orderPrice := maxFillPrice
 
-	// Ensure we meet Polymarket's minimum order size ($1)
-	// If we calculated less than $1 but have liquidity, bump up to $1
-	if totalCost < polymarketMinOrder {
-		log.Printf("[CopyTrader-Bot] BUY: calculated $%.4f, bumping to $%.2f minimum", totalCost, polymarketMinOrder)
-		totalCost = polymarketMinOrder
+	// Ensure we meet minimum order requirements
+	// 1. Polymarket minimum ($1)
+	// 2. User's minUSDC setting
+	effectiveMinUSDC := polymarketMinOrder
+	if minUSDC > effectiveMinUSDC {
+		effectiveMinUSDC = minUSDC
+	}
+
+	// Apply max cap if set (before minimum check)
+	if maxUSD != nil && totalCost > *maxUSD {
+		log.Printf("[CopyTrader-Bot] BUY: cost $%.4f exceeds max cap $%.2f, capping", totalCost, *maxUSD)
+		totalCost = *maxUSD
+		if orderPrice > 0 {
+			totalSize = totalCost / orderPrice
+		}
+		debugLog["maxCapAdjustment"] = map[string]interface{}{
+			"maxCap":       *maxUSD,
+			"adjustedCost": totalCost,
+			"adjustedSize": totalSize,
+		}
+	}
+
+	// Ensure we meet minimum order size
+	if totalCost < effectiveMinUSDC {
+		log.Printf("[CopyTrader-Bot] BUY: calculated $%.4f, bumping to $%.2f minimum", totalCost, effectiveMinUSDC)
+		originalCost := totalCost
+		totalCost = effectiveMinUSDC
 		// Recalculate size based on max fill price (not avg)
 		if orderPrice > 0 {
 			totalSize = totalCost / orderPrice
 		}
 		debugLog["minOrderAdjustment"] = map[string]interface{}{
-			"originalCost": totalCost,
-			"adjustedCost": polymarketMinOrder,
+			"originalCost": originalCost,
+			"adjustedCost": effectiveMinUSDC,
 			"adjustedSize": totalSize,
 		}
 	}
@@ -1062,7 +1073,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		log.Printf("[CopyTrader-Bot] BUY failed: %v", err)
 		debugLog["orderResponse"] = map[string]interface{}{"error": err.Error()}
 		debugLog["decision"] = fmt.Sprintf("failed - order error: %v", err)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot, debugLog, timing, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
 	// Order confirmed by Polymarket
@@ -1079,7 +1090,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
 		log.Printf("[CopyTrader-Bot] BUY rejected: %s", resp.ErrorMsg)
 		debugLog["decision"] = fmt.Sprintf("failed - rejected: %s", resp.ErrorMsg)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, 0, 0, 0, "failed", resp.ErrorMsg, "", storage.StrategyBot, debugLog, timing, timestamps)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", resp.ErrorMsg, "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
 	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
@@ -1111,7 +1122,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		timing["processing_latency_ms"] = float64(time.Since(trade.DetectedAt).Milliseconds())
 	}
 
-	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, targetUSDC, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID, storage.StrategyBot, debugLog, timing, timestamps)
+	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID, storage.StrategyBot, debugLog, timing, timestamps)
 }
 
 // executeBotSell implements the bot following strategy for sells.
