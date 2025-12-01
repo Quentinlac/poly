@@ -105,10 +105,10 @@ func main() {
 
 	// Start balance tracker if a wallet address is configured
 	if walletAddr := os.Getenv("POLYMARKET_FUNDER_ADDRESS"); walletAddr != "" {
-		balanceTracker := syncer.NewBalanceTracker(store, walletAddr, 2*time.Second)
+		balanceTracker := syncer.NewBalanceTracker(store, walletAddr, 30*time.Second)
 		balanceTracker.Start()
 		defer balanceTracker.Stop()
-		log.Printf("[Worker] Balance tracker started for %s (checking every 2s)", walletAddr)
+		log.Printf("[Worker] Balance tracker started for %s (checking every 30s)", walletAddr)
 	}
 
 	// Start auto-redeemer (always enabled - automatically redeems resolved positions)
