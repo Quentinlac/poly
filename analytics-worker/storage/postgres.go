@@ -2366,6 +2366,23 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 		return upsertCount, fmt.Errorf("update slippage: %w", err)
 	}
 
+	// Step 4: Calculate estimated multiplier (rounded to nearest 0.05)
+	// Multiplier = follower_shares_bought / following_shares_bought
+	_, err = s.pool.Exec(ctx, `
+		UPDATE copy_trade_pnl
+		SET estimated_multiplier = ROUND(
+			CASE
+				WHEN following_shares_bought > 0
+				THEN (follower_shares_bought / following_shares_bought) / 0.05
+				ELSE 0
+			END
+		) * 0.05
+		WHERE following_shares_bought > 0
+	`)
+	if err != nil {
+		return upsertCount, fmt.Errorf("update estimated_multiplier: %w", err)
+	}
+
 	return upsertCount, nil
 }
 
