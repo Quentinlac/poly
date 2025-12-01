@@ -1456,10 +1456,9 @@ func (s *PostgresStore) SetUserCopySettings(ctx context.Context, settings UserCo
 // GetFollowedUsersByStrategy returns followed user addresses filtered by strategy type
 func (s *PostgresStore) GetFollowedUsersByStrategy(ctx context.Context, strategyType int) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT fu.user_address
-		FROM followed_users fu
-		JOIN user_copy_settings ucs ON LOWER(fu.user_address) = LOWER(ucs.user_address)
-		WHERE ucs.enabled = true AND ucs.strategy_type = $1
+		SELECT user_address
+		FROM user_copy_settings
+		WHERE enabled = true AND strategy_type = $1
 	`, strategyType)
 	if err != nil {
 		return nil, err
