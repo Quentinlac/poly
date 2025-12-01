@@ -2322,7 +2322,8 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 	}
 
 	// Step 3: Calculate slippage per market
-	// BUY slippage = (follower_price - following_price) * follower_shares (positive = we paid more)
+	// Sign convention: following_shares < 0 = BUY, following_shares > 0 = SELL
+	// BUY slippage = (follower_price - following_price) * |follower_shares| (positive = we paid more)
 	// SELL slippage = (following_price - follower_price) * |follower_shares| (positive = we got less)
 	// Percentage is based on OUR cost/value, not the followed user's
 	_, err = s.pool.Exec(ctx, `
@@ -2330,21 +2331,21 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			SELECT
 				token_id,
 				following_address,
-				-- BUY slippage USD (positive shares = buy, filter bad prices)
-				COALESCE(SUM(CASE
-					WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
-					THEN (follower_price - following_price) * follower_shares
-					ELSE 0 END), 0) as buy_slip_usd,
-				-- SELL slippage USD (negative shares = sell, filter bad prices)
+				-- BUY slippage USD (negative following_shares = buy, filter bad prices)
 				COALESCE(SUM(CASE
 					WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
+					THEN (follower_price - following_price) * ABS(follower_shares)
+					ELSE 0 END), 0) as buy_slip_usd,
+				-- SELL slippage USD (positive following_shares = sell, filter bad prices)
+				COALESCE(SUM(CASE
+					WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
 					THEN (following_price - follower_price) * ABS(follower_shares)
 					ELSE 0 END), 0) as sell_slip_usd,
 				-- OUR buy cost (what we actually paid)
-				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
-					THEN follower_shares * follower_price ELSE 0 END), 0) as our_buy_cost,
-				-- OUR sell value (what we actually received)
 				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
+					THEN ABS(follower_shares) * follower_price ELSE 0 END), 0) as our_buy_cost,
+				-- OUR sell value (what we actually received)
+				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
 					THEN ABS(follower_shares) * follower_price ELSE 0 END), 0) as our_sell_value
 			FROM copy_trade_log
 			WHERE token_id IS NOT NULL
