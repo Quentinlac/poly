@@ -2280,10 +2280,12 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 			market_resolved = TRUE,
 			winning_outcome = r.outcome,
 			following_redeem_amount = r.redeem_amount,
+			-- Follower redeem amount: if our outcome matches the winner, our remaining shares are worth $1 each
+			follower_redeem_amount = CASE WHEN p.outcome = r.outcome THEN GREATEST(p.follower_shares_remaining, 0) ELSE 0 END,
 			resolved_at = r.redeem_time,
 			following_net_pnl = p.following_usdc_received + r.redeem_amount - p.following_usdc_spent,
 			-- Follower P&L: if followed user redeemed, this outcome won, so our shares are worth $1
-			follower_net_pnl = p.follower_usdc_received - p.follower_usdc_spent + 
+			follower_net_pnl = p.follower_usdc_received - p.follower_usdc_spent +
 				CASE WHEN p.outcome = r.outcome THEN GREATEST(p.follower_shares_remaining, 0) ELSE 0 END,
 			updated_at = NOW()
 		FROM redeems r
@@ -2440,11 +2442,15 @@ func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error)
 
 		// Update all rows with this token_id
 		// Calculate P&L: if our outcome matches winner, remaining shares * $1
+		// Also calculate redeem amounts = remaining shares if outcome won (shares worth $1 each)
 		result, err := s.pool.Exec(ctx, `
 			UPDATE copy_trade_pnl
 			SET
 				market_resolved = TRUE,
 				winning_outcome = $2,
+				-- Redeem amounts: remaining shares are worth $1 each if outcome won
+				following_redeem_amount = CASE WHEN outcome = $2 THEN GREATEST(following_shares_remaining, 0) ELSE 0 END,
+				follower_redeem_amount = CASE WHEN outcome = $2 THEN GREATEST(follower_shares_remaining, 0) ELSE 0 END,
 				-- Following user P&L: if their outcome won, remaining shares are worth $1 each
 				following_net_pnl = following_usdc_received - following_usdc_spent +
 					CASE WHEN outcome = $2 THEN GREATEST(following_shares_remaining, 0) ELSE 0 END,
