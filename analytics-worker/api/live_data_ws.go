@@ -133,13 +133,16 @@ func (c *LiveDataWSClient) UpdateSubscriptions(eventSlugs []string) error {
 	return c.sendSubscription(eventSlugs)
 }
 
-// GetBTC15mSlugs returns the current and next BTC 15m market slugs
-func GetBTC15mSlugs() (current, next string) {
+// GetBTC15mSlugs returns the previous, current, and next BTC 15m market slugs
+// We subscribe to 3 markets to catch late trades on the previous market
+func GetBTC15mSlugs() (previous, current, next string) {
 	now := time.Now().Unix()
 	// Current period end = next 15-min boundary
 	currentEnd := ((now / 900) + 1) * 900
+	previousEnd := currentEnd - 900
 	nextEnd := currentEnd + 900
 
+	previous = fmt.Sprintf("btc-updown-15m-%d", previousEnd)
 	current = fmt.Sprintf("btc-updown-15m-%d", currentEnd)
 	next = fmt.Sprintf("btc-updown-15m-%d", nextEnd)
 	return

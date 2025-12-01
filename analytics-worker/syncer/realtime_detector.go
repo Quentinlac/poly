@@ -166,12 +166,13 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 		if err := d.liveDataWS.Start(ctx); err != nil {
 			log.Printf("[RealtimeDetector] Warning: LiveData WebSocket failed to start: %v", err)
 		} else {
-			// Subscribe to current and next BTC 15m market slugs
-			current, next := api.GetBTC15mSlugs()
-			if err := d.liveDataWS.UpdateSubscriptions([]string{current, next}); err != nil {
+			// Subscribe to previous, current, and next BTC 15m market slugs
+			// We include previous to catch late trades on recently-ended markets
+			prev, current, next := api.GetBTC15mSlugs()
+			if err := d.liveDataWS.UpdateSubscriptions([]string{prev, current, next}); err != nil {
 				log.Printf("[RealtimeDetector] Warning: LiveData WebSocket subscription failed: %v", err)
 			} else {
-				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (BTC 15m: %s, %s)", current, next)
+				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (BTC 15m: %s, %s, %s)", prev, current, next)
 			}
 		}
 	}
@@ -749,12 +750,12 @@ func (d *RealtimeDetector) slugRotationLoop(ctx context.Context) {
 				continue
 			}
 
-			current, next := api.GetBTC15mSlugs()
+			prev, current, next := api.GetBTC15mSlugs()
 
 			// Only update if slugs changed
 			if current != lastCurrent || next != lastNext {
-				log.Printf("[RealtimeDetector] BTC 15m slug rotation: %s → %s", current, next)
-				if err := d.liveDataWS.UpdateSubscriptions([]string{current, next}); err != nil {
+				log.Printf("[RealtimeDetector] BTC 15m slug rotation: %s, %s, %s", prev, current, next)
+				if err := d.liveDataWS.UpdateSubscriptions([]string{prev, current, next}); err != nil {
 					log.Printf("[RealtimeDetector] Warning: slug rotation failed: %v", err)
 				}
 				lastCurrent = current
