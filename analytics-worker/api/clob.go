@@ -1019,20 +1019,25 @@ func (c *ClobClient) createSignedOrderFOK(tokenID string, side Side, size float6
 		sideStr = "SELL"
 	}
 
-	// Create order with expiration
-	expiration := time.Now().Add(5 * time.Minute).Unix()
-	nonce := time.Now().UnixNano()
+	// Create order with no expiration (like GTC)
+	salt := generateSalt()
+	expiration := int64(0) // No expiration for GTC-like behavior
+
+	// For Magic wallets: maker = funder (where funds are), signer = private key wallet
+	// For EOA wallets: maker = signer = wallet address
+	makerAddress := c.funder.Hex()
+	signerAddress := c.auth.GetAddress().Hex()
 
 	order := &Order{
-		Salt:          nonce,
-		Maker:         c.funder.Hex(),
-		Signer:        c.funder.Hex(),
+		Salt:          salt,
+		Maker:         makerAddress,
+		Signer:        signerAddress,
 		Taker:         "0x0000000000000000000000000000000000000000",
 		TokenID:       tokenID,
 		MakerAmount:   makerAmount.String(),
 		TakerAmount:   takerAmount.String(),
-		Expiration:    fmt.Sprintf("%d", expiration),
-		Nonce:         fmt.Sprintf("%d", nonce),
+		Expiration:    strconv.FormatInt(expiration, 10),
+		Nonce:         "0",
 		FeeRateBps:    "0",
 		Side:          sideStr,
 		SignatureType: c.signatureType,
