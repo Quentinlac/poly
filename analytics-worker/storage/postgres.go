@@ -1831,6 +1831,17 @@ func (s *PostgresStore) IsTradeAlreadyExecuted(ctx context.Context, followingTra
 	return count > 0, nil
 }
 
+// UpdateCopyTradeLogTxHash updates the follower_tx_hash for a copy trade log entry
+// This is called async after the real blockchain tx hash is fetched from Data API
+func (s *PostgresStore) UpdateCopyTradeLogTxHash(ctx context.Context, followingTradeID, txHash string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE copy_trade_log
+		SET follower_tx_hash = $2
+		WHERE following_trade_id = $1 AND status = 'executed'
+	`, followingTradeID, txHash)
+	return err
+}
+
 // GetCopyTradeLogs retrieves recent copy trade logs
 func (s *PostgresStore) GetCopyTradeLogs(ctx context.Context, limit int) ([]CopyTradeLogEntry, error) {
 	if limit <= 0 {

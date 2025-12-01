@@ -805,8 +805,8 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 		}
 	}
 
-	// Polymarket requires minimum 5 tokens for SELL orders
-	const minSellSize = 5.0
+	// Polymarket requires minimum 0.1 tokens for SELL orders
+	const minSellSize = 0.1
 	if side == SideSell && size < minSellSize {
 		log.Printf("[CLOB] Bumping SELL size from %.4f to %.4f to meet minimum", size, minSellSize)
 		size = minSellSize

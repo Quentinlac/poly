@@ -1023,8 +1023,8 @@ func (c *ClobClient) createSignedOrderFOK(tokenID string, side Side, size float6
 		size = 0.01
 	}
 
-	// Polymarket requires minimum token sizes
-	const minTokenSize = 5.0
+	// Polymarket requires minimum token sizes (0.1 tokens based on testing)
+	const minTokenSize = 0.1
 	if size < minTokenSize {
 		size = minTokenSize
 	}
@@ -1144,9 +1144,9 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 	// Use +0.5 for rounding to avoid floating point truncation errors
 	usdcValue := size * price
 
-	// Polymarket requires minimum token sizes (varies by market, using 5 as safe default)
+	// Polymarket requires minimum token sizes (0.1 tokens based on testing)
 	// This must be checked BEFORE the $1 USDC minimum to avoid conflicts
-	const minTokenSize = 5.0
+	const minTokenSize = 0.1
 	if size < minTokenSize {
 		log.Printf("[CLOB] Bumping size from %.4f to %.4f tokens to meet minimum token size", size, minTokenSize)
 		size = minTokenSize

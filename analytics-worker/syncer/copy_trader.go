@@ -1607,7 +1607,63 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		}
 	}()
 
+	// For executed trades, spawn async goroutine to fetch real tx hash after 60s
+	if (status == "executed" || status == "success") && tokenID != "" && ct.myAddress != "" {
+		followerTimeVal := time.Now()
+		if followerTime != nil {
+			followerTimeVal = *followerTime
+		}
+		go ct.fetchAndUpdateTxHash(trade.ID, tokenID, followerTimeVal)
+	}
+
 	return nil
+}
+
+// fetchAndUpdateTxHash waits, then fetches the real blockchain tx hash from Data API and updates the DB
+// This is called async after a trade is executed since the tx hash isn't available immediately
+func (ct *CopyTrader) fetchAndUpdateTxHash(followingTradeID, tokenID string, followerTime time.Time) {
+	// Wait 60 seconds for the trade to settle on-chain
+	time.Sleep(60 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Query Data API for our recent trades
+	trades, err := ct.client.GetActivity(ctx, api.TradeQuery{
+		User:  ct.myAddress,
+		Limit: 50,
+	})
+	if err != nil {
+		log.Printf("[CopyTrader] Failed to fetch trades for tx hash lookup: %v", err)
+		return
+	}
+
+	// Find matching trade by token and approximate timestamp (within 2 minutes)
+	for _, trade := range trades {
+		// Match by token ID
+		if trade.Asset != tokenID {
+			continue
+		}
+
+		// Match by timestamp (within 2 minutes of our execution time)
+		tradeTime := time.Unix(trade.Timestamp, 0)
+		timeDiff := tradeTime.Sub(followerTime)
+		if timeDiff < -2*time.Minute || timeDiff > 2*time.Minute {
+			continue
+		}
+
+		// Found a match - update the DB
+		if trade.TransactionHash != "" {
+			if err := ct.store.UpdateCopyTradeLogTxHash(ctx, followingTradeID, trade.TransactionHash); err != nil {
+				log.Printf("[CopyTrader] Failed to update tx hash for %s: %v", followingTradeID[:16], err)
+			} else {
+				log.Printf("[CopyTrader] Updated tx hash for %s -> %s", followingTradeID[:16], trade.TransactionHash[:16])
+			}
+			return
+		}
+	}
+
+	log.Printf("[CopyTrader] No matching trade found for tx hash lookup (followingTradeID=%s)", followingTradeID[:16])
 }
 
 // GetStats returns copy trading statistics

@@ -34,12 +34,29 @@ func main() {
 		log.Printf("  TX Hash: %s", event.TxHash)
 		log.Printf("  From: %s", event.From)
 		log.Printf("  To: %s", event.To)
+		log.Printf("  Contract: %s", event.ContractName)
 		log.Printf("  Detected at: %s", event.DetectedAt.Format("15:04:05.000"))
 		log.Printf("  Nonce: %d", event.Nonce)
+		log.Printf("  GasPrice: %v", event.GasPrice)
+		log.Printf("  Decoded: %v", event.Decoded)
+		if event.Decoded {
+			log.Printf("  === DECODED TRADE DETAILS ===")
+			log.Printf("  TokenID: %s", event.TokenID)
+			log.Printf("  Side: %s", event.Side)
+			log.Printf("  Size: %.6f", event.Size)
+			log.Printf("  Price: %.6f", event.Price)
+			log.Printf("  MakerAmount: %v", event.MakerAmount)
+			log.Printf("  TakerAmount: %v", event.TakerAmount)
+		}
+		log.Printf("  Raw Input (first 200 chars): %s...", event.Input[:min(200, len(event.Input))])
+		log.Printf("  Full Input length: %d", len(event.Input))
 	})
 
-	// Set the address to monitor
-	client.SetFollowedAddresses([]string{userAddr})
+	// Set the address to monitor (empty = monitor ALL addresses)
+	if userAddr != "ALL" {
+		client.SetFollowedAddresses([]string{userAddr})
+	}
+	// If userAddr == "ALL", don't set any filter - will see all trades
 
 	// Start monitoring
 	ctx, cancel := context.WithCancel(context.Background())
