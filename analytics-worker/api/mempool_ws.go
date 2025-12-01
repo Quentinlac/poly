@@ -365,17 +365,43 @@ func (c *MempoolWSClient) handleMessage(ctx context.Context, data []byte) {
 		return
 	}
 
+	now := time.Now()
+
 	c.statsMu.Lock()
 	c.pendingTxSeen++
 	count := c.pendingTxSeen
 	c.statsMu.Unlock()
 
+	// Cache ALL transaction hashes immediately (no HTTP call needed)
+	// When LiveData reports a trade, we'll check if we saw its TX hash here
+	c.mempoolCacheMu.Lock()
+	if _, exists := c.mempoolCache[strings.ToLower(txHash)]; !exists {
+		c.mempoolCache[strings.ToLower(txHash)] = now
+		c.statsMu.Lock()
+		c.polymarketTxSeen++ // Count all cached (might be Polymarket or not)
+		c.statsMu.Unlock()
+	}
+	// Cleanup old entries to prevent memory growth (keep last 5 minutes)
+	if count%10000 == 0 {
+		cutoff := now.Add(-5 * time.Minute)
+		for k, t := range c.mempoolCache {
+			if t.Before(cutoff) {
+				delete(c.mempoolCache, k)
+			}
+		}
+	}
+	c.mempoolCacheMu.Unlock()
+
 	// Log progress periodically
-	if count%1000 == 0 {
-		log.Printf("[MempoolWS] Seen %d pending transactions", count)
+	if count%5000 == 0 {
+		c.mempoolCacheMu.RLock()
+		cacheSize := len(c.mempoolCache)
+		c.mempoolCacheMu.RUnlock()
+		log.Printf("[MempoolWS] Seen %d pending transactions, cache size: %d", count, cacheSize)
 	}
 
-	// Fetch the full transaction to check if it's relevant
+	// Still try to check if it's a followed user (async, best effort)
+	// This enables direct mempool execution if we can decode the trade
 	go c.checkTransaction(ctx, txHash)
 }
 
