@@ -21,6 +21,7 @@ const (
 	liveDataReconnectDelay    = 2 * time.Second
 	liveDataMaxReconnectDelay = 30 * time.Second
 	liveDataPingInterval      = 30 * time.Second
+	liveDataReadTimeout       = 90 * time.Second // Allow longer idle periods between trades
 )
 
 // LiveDataTradeEvent represents a trade from the orders_matched WebSocket
@@ -243,8 +244,8 @@ func (c *LiveDataWSClient) readLoop(ctx context.Context) {
 			continue
 		}
 
-		// Set read deadline
-		conn.SetReadDeadline(time.Now().Add(liveDataPingInterval + 10*time.Second))
+		// Set read deadline - allow longer idle periods between trades
+		conn.SetReadDeadline(time.Now().Add(liveDataReadTimeout))
 
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -252,7 +253,10 @@ func (c *LiveDataWSClient) readLoop(ctx context.Context) {
 				log.Printf("[LiveDataWS] Connection closed normally")
 				return
 			}
-			log.Printf("[LiveDataWS] Read error: %v, reconnecting...", err)
+			// Timeouts are expected when no trades happen - just reconnect quietly
+			if c.reconnectAttempts == 0 {
+				log.Printf("[LiveDataWS] Idle timeout, reconnecting...")
+			}
 			c.reconnect(ctx)
 			continue
 		}
@@ -285,8 +289,8 @@ func (c *LiveDataWSClient) pingLoop(ctx context.Context) {
 			}
 
 			// Check if we haven't received a pong in too long
-			if time.Since(c.lastPong) > liveDataPingInterval+10*time.Second {
-				log.Printf("[LiveDataWS] Pong timeout, reconnecting...")
+			if time.Since(c.lastPong) > liveDataReadTimeout {
+				log.Printf("[LiveDataWS] Pong timeout (no response in %v), reconnecting...", liveDataReadTimeout)
 				c.reconnect(ctx)
 			}
 		}
