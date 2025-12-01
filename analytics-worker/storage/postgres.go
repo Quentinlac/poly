@@ -2739,23 +2739,23 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	startDays := (week - 1) * 7
 	endDays := week * 7
 
-	// Get all trades for this user in the date range, grouped by market and outcome
-	// Include REDEEM transactions separately (they have no slippage)
+	// Get all TRADE transactions (not REDEEM) grouped by market and outcome
+	// We use market resolution to calculate value, not REDEEM transactions
 	rows, err := s.pool.Query(ctx, `
 		SELECT
 			ut.market_id,
 			ut.outcome,
-			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
-			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
-			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
-			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
-			SUM(CASE WHEN ut.type = 'REDEEM' THEN ut.usdc_size ELSE 0 END) as total_redeemed,
+			SUM(CASE WHEN ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
+			SUM(CASE WHEN ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
+			SUM(CASE WHEN ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
+			SUM(CASE WHEN ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
 			COUNT(*) as trade_count,
 			mr.market_closed,
 			mr.winning_outcome
 		FROM user_trades ut
 		LEFT JOIN market_resolutions mr ON ut.market_id = mr.token_id
 		WHERE ut.user_id = $1
+		  AND ut.type = 'TRADE'
 		  AND ut.timestamp >= NOW() - INTERVAL '1 day' * $3
 		  AND ut.timestamp < NOW() - INTERVAL '1 day' * $2
 		GROUP BY ut.market_id, ut.outcome, mr.market_closed, mr.winning_outcome
@@ -2771,14 +2771,14 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	for rows.Next() {
 		var marketID string
 		var outcome *string
-		var totalBought, totalSold, totalBuyCost, totalSellProceeds, totalRedeemed float64
+		var totalBought, totalSold, totalBuyCost, totalSellProceeds float64
 		var tradeCount int
 		var marketClosed *bool
 		var winningOutcome *string
 
 		if err := rows.Scan(
 			&marketID, &outcome,
-			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds, &totalRedeemed,
+			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds,
 			&tradeCount,
 			&marketClosed, &winningOutcome,
 		); err != nil {
@@ -2795,12 +2795,20 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		seenResolvedMarkets[marketID] = true
 		resolvedTrades += tradeCount
 
-		// Calculate USER's actual PNL using REALIZED cash flow only
-		// We don't add "remaining shares @ $1" because:
-		// 1. Minting transactions aren't tracked as buys, so share counts are unreliable
-		// 2. Unredeemed shares are unrealized profit
-		// PNL = sell proceeds + redeem proceeds - buy cost
-		userPositionPnL := totalSellProceeds + totalRedeemed - totalBuyCost
+		// Calculate USER's actual PNL using market resolution
+		// Formula: sells - buys + remaining_shares × resolution_value
+		// We don't use REDEEM transactions because they vary by user behavior
+		// Instead we calculate the value based on market outcome
+		remaining := totalBought - totalSold
+		if remaining < 0 {
+			remaining = 0 // Can happen with minting - cap at 0
+		}
+
+		var resolutionValue float64 = 0
+		if outcome != nil && *outcome == *winningOutcome {
+			resolutionValue = 1.0 // Winner shares worth $1 each
+		}
+		userPositionPnL := totalSellProceeds - totalBuyCost + remaining*resolutionValue
 		userPnl += userPositionPnL
 
 		// Calculate OUR simulated PNL with multiplier and slippage
@@ -2808,11 +2816,11 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		simBuyCost := totalBuyCost * multiplier * (1 + avgBuySlippage)
 		// Sell: apply slippage (we receive less if positive)
 		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
-		// Redeem: NO slippage (exactly $1 per share)
-		simRedeemed := totalRedeemed * multiplier
+		// Remaining shares (with multiplier)
+		simRemaining := remaining * multiplier
 
-		// PNL = sells + redeems - buys (all realized cash flow)
-		positionPnL := simSellProceeds + simRedeemed - simBuyCost
+		// PNL = sells - buys + remaining × resolution_value (all with slippage/multiplier)
+		positionPnL := simSellProceeds - simBuyCost + simRemaining*resolutionValue
 		pnl += positionPnL
 	}
 
