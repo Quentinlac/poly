@@ -2169,6 +2169,23 @@ func (s *PostgresStore) GetLatestBalance(ctx context.Context, walletAddress stri
 	return &r, nil
 }
 
+// BackfillMissingOutcomes updates user_trades with outcome from token_map_cache
+// This fixes trades that were inserted before the token cache was populated
+func (s *PostgresStore) BackfillMissingOutcomes(ctx context.Context) (int64, error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE user_trades ut
+		SET outcome = c.outcome
+		FROM token_map_cache c
+		WHERE ut.market_id = c.token_id
+		  AND (ut.outcome IS NULL OR ut.outcome = '')
+		  AND c.outcome IS NOT NULL AND c.outcome != ''
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("backfill outcomes: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
 // RefreshCopyTradePnL updates the copy_trade_pnl table with latest data from copy_trade_log
 // This aggregates all trades by token_id and following_address, then updates redemption data
 func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) {

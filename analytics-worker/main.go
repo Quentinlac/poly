@@ -192,6 +192,14 @@ func runPnLRefresh(store *storage.PostgresStore) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	// Step 0: Backfill missing outcomes from token cache
+	backfilled, err := store.BackfillMissingOutcomes(ctx)
+	if err != nil {
+		log.Printf("[Worker] Backfill outcomes error: %v", err)
+	} else if backfilled > 0 {
+		log.Printf("[Worker] Backfilled %d trades with missing outcomes", backfilled)
+	}
+
 	// Step 1: Refresh P&L data from copy_trade_log
 	count, err := store.RefreshCopyTradePnL(ctx)
 	if err != nil {
