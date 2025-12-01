@@ -900,6 +900,23 @@ func (c *ClobClient) PlaceLimitOrder(ctx context.Context, tokenID string, side S
 	return c.postOrder(ctx, order, OrderTypeGTC)
 }
 
+// PlaceOrderFOK places a Fill-Or-Kill order for immediate execution
+// This is faster than PlaceMarketOrder because it skips order book fetch
+func (c *ClobClient) PlaceOrderFOK(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return nil, fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create signed order: %w", err)
+	}
+
+	return c.postOrder(ctx, order, OrderTypeFOK)
+}
+
 func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
 	// Round price to tick size (0.01 for most markets)
 	tickSize := 0.01
