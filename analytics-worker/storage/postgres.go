@@ -2518,6 +2518,300 @@ func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error)
 }
 
 // ============================================================================
+// Potential PNL Calculation (What-If Analysis)
+// ============================================================================
+
+// RefreshPotentialPnL calculates what PNL we would have made if we copied ALL trades
+// for each followed user, using a fixed 0.5 multiplier and average observed slippage.
+// Only considers resolved markets.
+func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
+	log.Printf("[potential-pnl] Starting potential PNL refresh...")
+
+	// Step 1: Get global average slippage from actual copy trades (excluding zeros)
+	var avgBuySlippage, avgSellSlippage float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(AVG(CASE WHEN buy_slippage_pct != 0 THEN buy_slippage_pct END), 0.005) as avg_buy,
+			COALESCE(AVG(CASE WHEN sell_slippage_pct != 0 THEN sell_slippage_pct END), -0.005) as avg_sell
+		FROM copy_trade_pnl
+	`).Scan(&avgBuySlippage, &avgSellSlippage)
+	if err != nil {
+		return fmt.Errorf("get avg slippage: %w", err)
+	}
+	log.Printf("[potential-pnl] Using avg slippage: buy=%.4f%%, sell=%.4f%%", avgBuySlippage*100, avgSellSlippage*100)
+
+	// Step 2: Get list of followed users (from user_copy_settings, not just enabled)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT user_address FROM user_copy_settings`)
+	if err != nil {
+		return fmt.Errorf("get followed users: %w", err)
+	}
+	defer rows.Close()
+
+	var followedUsers []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		followedUsers = append(followedUsers, addr)
+	}
+	log.Printf("[potential-pnl] Processing %d followed users", len(followedUsers))
+
+	// Step 3: Update market_resolutions cache for markets we haven't checked yet
+	if err := s.updateMarketResolutionsCache(ctx); err != nil {
+		log.Printf("[potential-pnl] Warning: failed to update resolutions cache: %v", err)
+	}
+
+	// Step 4: For each user, calculate potential PNL
+	const multiplier = 0.5
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for _, userAddr := range followedUsers {
+		if ctx.Err() != nil {
+			break
+		}
+
+		pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, err := s.calculateUserPotentialPnL(
+			ctx, client, userAddr, multiplier, avgBuySlippage, avgSellSlippage,
+		)
+		if err != nil {
+			log.Printf("[potential-pnl] Error calculating for %s: %v", userAddr[:10], err)
+			continue
+		}
+
+		// Upsert result
+		_, err = s.pool.Exec(ctx, `
+			INSERT INTO potential_pnl (user_address, potential_pnl, total_resolved_markets, total_resolved_trades,
+				total_unresolved_markets, avg_buy_slippage_used, avg_sell_slippage_used, multiplier_used, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+			ON CONFLICT (user_address) DO UPDATE SET
+				potential_pnl = EXCLUDED.potential_pnl,
+				total_resolved_markets = EXCLUDED.total_resolved_markets,
+				total_resolved_trades = EXCLUDED.total_resolved_trades,
+				total_unresolved_markets = EXCLUDED.total_unresolved_markets,
+				avg_buy_slippage_used = EXCLUDED.avg_buy_slippage_used,
+				avg_sell_slippage_used = EXCLUDED.avg_sell_slippage_used,
+				multiplier_used = EXCLUDED.multiplier_used,
+				updated_at = NOW()
+		`, userAddr, pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, avgBuySlippage, avgSellSlippage, multiplier)
+
+		if err != nil {
+			log.Printf("[potential-pnl] Failed to save for %s: %v", userAddr[:10], err)
+			continue
+		}
+
+		log.Printf("[potential-pnl] User %s: potential_pnl=$%.2f, resolved_markets=%d, trades=%d, unresolved=%d",
+			userAddr[:10], pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets)
+	}
+
+	log.Printf("[potential-pnl] Refresh complete for %d users", len(followedUsers))
+	return nil
+}
+
+// updateMarketResolutionsCache checks resolution status for markets in user_trades
+// that we haven't checked recently
+func (s *PostgresStore) updateMarketResolutionsCache(ctx context.Context) error {
+	// Get unique market_ids from user_trades that aren't in our cache or haven't been checked in 1 hour
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ut.market_id
+		FROM user_trades ut
+		LEFT JOIN market_resolutions mr ON ut.market_id = mr.token_id
+		WHERE mr.token_id IS NULL
+		   OR (mr.market_closed = FALSE AND mr.checked_at < NOW() - INTERVAL '1 hour')
+		LIMIT 100
+	`)
+	if err != nil {
+		return fmt.Errorf("query unchecked markets: %w", err)
+	}
+	defer rows.Close()
+
+	var tokenIDs []string
+	for rows.Next() {
+		var tokenID string
+		if err := rows.Scan(&tokenID); err != nil {
+			continue
+		}
+		tokenIDs = append(tokenIDs, tokenID)
+	}
+
+	if len(tokenIDs) == 0 {
+		return nil
+	}
+
+	log.Printf("[potential-pnl] Checking resolution for %d markets", len(tokenIDs))
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for _, tokenID := range tokenIDs {
+		if ctx.Err() != nil {
+			break
+		}
+
+		closed, winningOutcome := s.checkMarketResolutionGamma(client, tokenID)
+
+		// Upsert to cache
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO market_resolutions (token_id, market_closed, winning_outcome, resolved_at, checked_at)
+			VALUES ($1, $2, $3, CASE WHEN $2 THEN NOW() ELSE NULL END, NOW())
+			ON CONFLICT (token_id) DO UPDATE SET
+				market_closed = EXCLUDED.market_closed,
+				winning_outcome = EXCLUDED.winning_outcome,
+				resolved_at = CASE WHEN EXCLUDED.market_closed AND market_resolutions.resolved_at IS NULL THEN NOW() ELSE market_resolutions.resolved_at END,
+				checked_at = NOW()
+		`, tokenID, closed, winningOutcome)
+
+		if err != nil {
+			log.Printf("[potential-pnl] Failed to cache resolution for %s: %v", tokenID[:20], err)
+		}
+
+		// Rate limit
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return nil
+}
+
+// checkMarketResolutionGamma queries Gamma API to check if a market is resolved
+func (s *PostgresStore) checkMarketResolutionGamma(client *http.Client, tokenID string) (closed bool, winningOutcome string) {
+	url := "https://gamma-api.polymarket.com/markets?clob_token_ids=" + tokenID
+	resp, err := client.Get(url)
+	if err != nil {
+		return false, ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, ""
+	}
+
+	var markets []struct {
+		Closed        bool   `json:"closed"`
+		Outcomes      string `json:"outcomes"`
+		OutcomePrices string `json:"outcomePrices"`
+	}
+	if err := json.Unmarshal(body, &markets); err != nil || len(markets) == 0 {
+		return false, ""
+	}
+
+	market := markets[0]
+	if !market.Closed {
+		return false, ""
+	}
+
+	// Parse outcomes and prices to find winner
+	var outcomes []string
+	var prices []string
+	json.Unmarshal([]byte(market.Outcomes), &outcomes)
+	json.Unmarshal([]byte(market.OutcomePrices), &prices)
+
+	for i, price := range prices {
+		if price == "1" || strings.HasPrefix(price, "0.99") {
+			if i < len(outcomes) {
+				return true, outcomes[i]
+			}
+		}
+	}
+
+	return true, "" // Closed but can't determine winner
+}
+
+// calculateUserPotentialPnL calculates the potential PNL for a single user
+func (s *PostgresStore) calculateUserPotentialPnL(
+	ctx context.Context,
+	client *http.Client,
+	userAddr string,
+	multiplier, avgBuySlippage, avgSellSlippage float64,
+) (pnl float64, resolvedMarkets, resolvedTrades, unresolvedMarkets int, err error) {
+
+	// Get all trades for this user, grouped by market and outcome
+	// We need to calculate net position per market+outcome
+	rows, err := s.pool.Query(ctx, `
+		SELECT
+			ut.market_id,
+			ut.outcome,
+			SUM(CASE WHEN ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
+			SUM(CASE WHEN ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
+			SUM(CASE WHEN ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
+			SUM(CASE WHEN ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
+			AVG(CASE WHEN ut.side = 'BUY' THEN ut.price END) as avg_buy_price,
+			AVG(CASE WHEN ut.side = 'SELL' THEN ut.price END) as avg_sell_price,
+			COUNT(*) as trade_count,
+			mr.market_closed,
+			mr.winning_outcome
+		FROM user_trades ut
+		LEFT JOIN market_resolutions mr ON ut.market_id = mr.token_id
+		WHERE ut.user_id = $1
+		GROUP BY ut.market_id, ut.outcome, mr.market_closed, mr.winning_outcome
+	`, userAddr)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
+	}
+	defer rows.Close()
+
+	seenMarkets := make(map[string]bool)
+	seenResolvedMarkets := make(map[string]bool)
+
+	for rows.Next() {
+		var marketID, outcome string
+		var totalBought, totalSold, totalBuyCost, totalSellProceeds float64
+		var avgBuyPrice, avgSellPrice *float64
+		var tradeCount int
+		var marketClosed *bool
+		var winningOutcome *string
+
+		if err := rows.Scan(
+			&marketID, &outcome,
+			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds,
+			&avgBuyPrice, &avgSellPrice, &tradeCount,
+			&marketClosed, &winningOutcome,
+		); err != nil {
+			continue
+		}
+
+		seenMarkets[marketID] = true
+
+		// Skip unresolved markets
+		if marketClosed == nil || !*marketClosed || winningOutcome == nil {
+			continue
+		}
+
+		seenResolvedMarkets[marketID] = true
+		resolvedTrades += tradeCount
+
+		// Calculate simulated position with multiplier and slippage
+		simBought := totalBought * multiplier
+		simSold := totalSold * multiplier
+
+		// Apply slippage to costs
+		// Buy slippage: we pay more (positive slippage = bad)
+		simBuyCost := totalBuyCost * multiplier * (1 + avgBuySlippage)
+		// Sell slippage: we receive less (negative slippage = good, positive = bad)
+		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
+
+		// Net shares remaining
+		simRemaining := simBought - simSold
+
+		// Calculate P&L
+		// If outcome matches winner, remaining shares are worth $1 each
+		var positionPnL float64
+		if outcome == *winningOutcome {
+			// Winner: remaining shares worth $1 each
+			positionPnL = simSellProceeds - simBuyCost + simRemaining
+		} else {
+			// Loser: remaining shares worth $0
+			positionPnL = simSellProceeds - simBuyCost
+		}
+
+		pnl += positionPnL
+	}
+
+	resolvedMarkets = len(seenResolvedMarkets)
+	unresolvedMarkets = len(seenMarkets) - resolvedMarkets
+
+	return pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, nil
+}
+
+// ============================================================================
 // Binance Price Data Storage
 // ============================================================================
 

@@ -207,6 +207,11 @@ func runPnLRefresh(store *storage.PostgresStore) {
 	} else if resolved > 0 {
 		log.Printf("[Worker] Resolved %d markets via Gamma API", resolved)
 	}
+
+	// Step 3: Refresh potential PNL (what-if analysis for all followed users)
+	if err := store.RefreshPotentialPnL(ctx); err != nil {
+		log.Printf("[Worker] Potential PNL refresh error: %v", err)
+	}
 }
 
 // getEnvFloat retrieves a float from environment or returns default
