@@ -768,47 +768,14 @@ func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
 	d.processedTxs[txHash] = true
 	d.processedTxsMu.Unlock()
 
-	// If we have decoded trade details, execute immediately!
+	// NOTE: We no longer execute immediately from mempool because the decoded tokenId
+	// is often wrong (decoder picks up wrong field). Instead, we record the mempool
+	// detection time and let LiveData provide the correct tokenId when it arrives.
+	// This still gives us the timing advantage (~4s faster detection_source=mempool)
+	// while using the correct market data from LiveData.
 	if event.Decoded && event.TokenID != "" && event.Side != "" {
-		log.Printf("[MempoolWS] 🚀 EXECUTING FROM MEMPOOL! from=%s side=%s size=%.4f price=%.4f tx=%s",
+		log.Printf("[MempoolWS] 🔍 PRE-DETECTED from mempool: from=%s side=%s size=%.4f price=%.4f tx=%s (waiting for LiveData)",
 			utils.ShortAddress(event.From), event.Side, event.Size, event.Price, txHash[:16])
-
-		// Create TradeDetail from decoded mempool data
-		usdcSize := event.Size * event.Price
-		detail := models.TradeDetail{
-			ID:              txHash,
-			UserID:          utils.NormalizeAddress(event.From),
-			MarketID:        event.TokenID, // Token ID from decoded input
-			Type:            "TRADE",
-			Side:            event.Side,
-			Size:            event.Size,
-			UsdcSize:        usdcSize,
-			Price:           event.Price,
-			TransactionHash: txHash,
-			Timestamp:       detectedAt, // Use detection time as trade time
-			DetectedAt:      detectedAt,
-			DetectionSource: "mempool", // Detected via mempool (~3s faster than LiveData)
-		}
-
-		// Update metrics
-		d.metricsMu.Lock()
-		d.metrics.TradesDetected++
-		d.metrics.LastDetectionTime = detectedAt
-		d.metricsMu.Unlock()
-
-		// Save trade asynchronously
-		go func() {
-			bgCtx := context.Background()
-			if err := d.store.SaveTrades(bgCtx, []models.TradeDetail{detail}, false); err != nil {
-				log.Printf("[MempoolWS] Warning: failed to save mempool trade: %v", err)
-			}
-		}()
-
-		// Execute copy trade immediately!
-		if d.onNewTrade != nil {
-			d.onNewTrade(detail)
-		}
-		return
 	}
 
 	// Fallback: Record pre-detection for when LiveData arrives
