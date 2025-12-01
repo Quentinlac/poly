@@ -77,22 +77,22 @@ type OrderBookLevel struct {
 
 // MarketInfo represents market information from CLOB
 type MarketInfo struct {
-	ConditionID           string `json:"condition_id"`
-	QuestionID            string `json:"question_id"`
+	ConditionID           string          `json:"condition_id"`
+	QuestionID            string          `json:"question_id"`
 	Tokens                []ClobTokenInfo `json:"tokens"`
-	MinimumOrderSize      string `json:"minimum_order_size"`
-	MinimumTickSize       string `json:"minimum_tick_size"`
-	Description           string `json:"description"`
-	Category              string `json:"category"`
-	EndDateISO            string `json:"end_date_iso"`
-	GameStartTime         string `json:"game_start_time"`
-	QuestionHasScreenshot bool   `json:"question_has_screenshot"`
-	Active                bool   `json:"active"`
-	Closed                bool   `json:"closed"`
-	MarketSlug            string `json:"market_slug"`
-	Icon                  string `json:"icon"`
-	Fpmm                  string `json:"fpmm"`
-	NegRisk               bool   `json:"neg_risk"`
+	MinimumOrderSize      float64         `json:"minimum_order_size"`
+	MinimumTickSize       float64         `json:"minimum_tick_size"`
+	Description           string          `json:"description"`
+	Category              string          `json:"category"`
+	EndDateISO            string          `json:"end_date_iso"`
+	GameStartTime         string          `json:"game_start_time"`
+	QuestionHasScreenshot bool            `json:"question_has_screenshot"`
+	Active                bool            `json:"active"`
+	Closed                bool            `json:"closed"`
+	MarketSlug            string          `json:"market_slug"`
+	Icon                  string          `json:"icon"`
+	Fpmm                  string          `json:"fpmm"`
+	NegRisk               bool            `json:"neg_risk"`
 }
 
 // ClobTokenInfo represents token information from CLOB
