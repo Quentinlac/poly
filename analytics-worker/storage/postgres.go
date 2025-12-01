@@ -2355,10 +2355,14 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 		SET
 			buy_slippage_usd = s.buy_slip_usd,
 			sell_slippage_usd = s.sell_slip_usd,
-			-- Buy slippage % = slip_usd / OUR cost (what % more we paid)
-			buy_slippage_pct = CASE WHEN s.our_buy_cost > 0 THEN s.buy_slip_usd / s.our_buy_cost ELSE 0 END,
-			-- Sell slippage % = slip_usd / OUR value (what % less we got)
-			sell_slippage_pct = CASE WHEN s.our_sell_value > 0 THEN s.sell_slip_usd / s.our_sell_value ELSE 0 END,
+			-- Buy slippage % = (our_avg_price / their_avg_price) - 1 (positive = we paid more)
+			buy_slippage_pct = CASE WHEN p.following_avg_buy_price > 0
+				THEN (p.follower_avg_buy_price / p.following_avg_buy_price) - 1
+				ELSE 0 END,
+			-- Sell slippage % = (their_avg_price / our_avg_price) - 1 (positive = we got less)
+			sell_slippage_pct = CASE WHEN p.follower_avg_sell_price > 0
+				THEN (p.following_avg_sell_price / p.follower_avg_sell_price) - 1
+				ELSE 0 END,
 			total_slippage_usd = s.buy_slip_usd + s.sell_slip_usd
 		FROM slippage s
 		WHERE p.token_id = s.token_id
