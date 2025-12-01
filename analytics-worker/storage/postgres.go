@@ -2523,7 +2523,7 @@ func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error)
 
 // RefreshPotentialPnL calculates what PNL we would have made if we copied ALL trades
 // for each followed user, using a fixed 0.5 multiplier and average observed slippage.
-// Only considers resolved markets.
+// Only considers resolved markets. Calculates per week (1=0-7 days, 2=7-14 days, 3=14-21 days).
 func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
 	log.Printf("[potential-pnl] Starting potential PNL refresh...")
 
@@ -2555,53 +2555,54 @@ func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
 		}
 		followedUsers = append(followedUsers, addr)
 	}
-	log.Printf("[potential-pnl] Processing %d followed users", len(followedUsers))
+	log.Printf("[potential-pnl] Processing %d followed users x 3 weeks", len(followedUsers))
 
 	// Step 3: Update market_resolutions cache for markets we haven't checked yet
 	if err := s.updateMarketResolutionsCache(ctx); err != nil {
 		log.Printf("[potential-pnl] Warning: failed to update resolutions cache: %v", err)
 	}
 
-	// Step 4: For each user, calculate potential PNL
+	// Step 4: For each user, calculate potential PNL for each week
 	const multiplier = 0.5
-	client := &http.Client{Timeout: 10 * time.Second}
 
 	for _, userAddr := range followedUsers {
 		if ctx.Err() != nil {
 			break
 		}
 
-		pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, err := s.calculateUserPotentialPnL(
-			ctx, client, userAddr, multiplier, avgBuySlippage, avgSellSlippage,
-		)
-		if err != nil {
-			log.Printf("[potential-pnl] Error calculating for %s: %v", userAddr[:10], err)
-			continue
+		// Calculate for weeks 1, 2, 3
+		for week := 1; week <= 3; week++ {
+			pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, err := s.calculateUserPotentialPnLWeek(
+				ctx, userAddr, multiplier, avgBuySlippage, avgSellSlippage, week,
+			)
+			if err != nil {
+				log.Printf("[potential-pnl] Error calculating week %d for %s: %v", week, userAddr[:10], err)
+				continue
+			}
+
+			// Upsert result
+			_, err = s.pool.Exec(ctx, `
+				INSERT INTO potential_pnl (user_address, week_number, potential_pnl, total_resolved_markets, total_resolved_trades,
+					total_unresolved_markets, avg_buy_slippage_used, avg_sell_slippage_used, multiplier_used, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+				ON CONFLICT (user_address, week_number) DO UPDATE SET
+					potential_pnl = EXCLUDED.potential_pnl,
+					total_resolved_markets = EXCLUDED.total_resolved_markets,
+					total_resolved_trades = EXCLUDED.total_resolved_trades,
+					total_unresolved_markets = EXCLUDED.total_unresolved_markets,
+					avg_buy_slippage_used = EXCLUDED.avg_buy_slippage_used,
+					avg_sell_slippage_used = EXCLUDED.avg_sell_slippage_used,
+					multiplier_used = EXCLUDED.multiplier_used,
+					updated_at = NOW()
+			`, userAddr, week, pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, avgBuySlippage, avgSellSlippage, multiplier)
+
+			if err != nil {
+				log.Printf("[potential-pnl] Failed to save week %d for %s: %v", week, userAddr[:10], err)
+				continue
+			}
 		}
 
-		// Upsert result
-		_, err = s.pool.Exec(ctx, `
-			INSERT INTO potential_pnl (user_address, potential_pnl, total_resolved_markets, total_resolved_trades,
-				total_unresolved_markets, avg_buy_slippage_used, avg_sell_slippage_used, multiplier_used, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-			ON CONFLICT (user_address) DO UPDATE SET
-				potential_pnl = EXCLUDED.potential_pnl,
-				total_resolved_markets = EXCLUDED.total_resolved_markets,
-				total_resolved_trades = EXCLUDED.total_resolved_trades,
-				total_unresolved_markets = EXCLUDED.total_unresolved_markets,
-				avg_buy_slippage_used = EXCLUDED.avg_buy_slippage_used,
-				avg_sell_slippage_used = EXCLUDED.avg_sell_slippage_used,
-				multiplier_used = EXCLUDED.multiplier_used,
-				updated_at = NOW()
-		`, userAddr, pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, avgBuySlippage, avgSellSlippage, multiplier)
-
-		if err != nil {
-			log.Printf("[potential-pnl] Failed to save for %s: %v", userAddr[:10], err)
-			continue
-		}
-
-		log.Printf("[potential-pnl] User %s: potential_pnl=$%.2f, resolved_markets=%d, trades=%d, unresolved=%d",
-			userAddr[:10], pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets)
+		log.Printf("[potential-pnl] User %s: calculated 3 weeks", userAddr[:10])
 	}
 
 	log.Printf("[potential-pnl] Refresh complete for %d users", len(followedUsers))
@@ -2715,16 +2716,23 @@ func (s *PostgresStore) checkMarketResolutionGamma(client *http.Client, tokenID 
 	return true, "" // Closed but can't determine winner
 }
 
-// calculateUserPotentialPnL calculates the potential PNL for a single user
-func (s *PostgresStore) calculateUserPotentialPnL(
+// calculateUserPotentialPnLWeek calculates the potential PNL for a single user for a specific week
+// week 1 = 0-7 days ago, week 2 = 7-14 days ago, week 3 = 14-21 days ago
+func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	ctx context.Context,
-	client *http.Client,
 	userAddr string,
 	multiplier, avgBuySlippage, avgSellSlippage float64,
+	week int,
 ) (pnl float64, resolvedMarkets, resolvedTrades, unresolvedMarkets int, err error) {
 
-	// Get all trades for this user, grouped by market and outcome
-	// We need to calculate net position per market+outcome
+	// Calculate date range for this week
+	// Week 1: NOW - 7 days to NOW
+	// Week 2: NOW - 14 days to NOW - 7 days
+	// Week 3: NOW - 21 days to NOW - 14 days
+	startDays := (week - 1) * 7
+	endDays := week * 7
+
+	// Get all trades for this user in the date range, grouped by market and outcome
 	rows, err := s.pool.Query(ctx, `
 		SELECT
 			ut.market_id,
@@ -2733,16 +2741,16 @@ func (s *PostgresStore) calculateUserPotentialPnL(
 			SUM(CASE WHEN ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
 			SUM(CASE WHEN ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
 			SUM(CASE WHEN ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
-			AVG(CASE WHEN ut.side = 'BUY' THEN ut.price END) as avg_buy_price,
-			AVG(CASE WHEN ut.side = 'SELL' THEN ut.price END) as avg_sell_price,
 			COUNT(*) as trade_count,
 			mr.market_closed,
 			mr.winning_outcome
 		FROM user_trades ut
 		LEFT JOIN market_resolutions mr ON ut.market_id = mr.token_id
 		WHERE ut.user_id = $1
+		  AND ut.timestamp >= NOW() - INTERVAL '1 day' * $3
+		  AND ut.timestamp < NOW() - INTERVAL '1 day' * $2
 		GROUP BY ut.market_id, ut.outcome, mr.market_closed, mr.winning_outcome
-	`, userAddr)
+	`, userAddr, startDays, endDays)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
 	}
@@ -2754,7 +2762,6 @@ func (s *PostgresStore) calculateUserPotentialPnL(
 	for rows.Next() {
 		var marketID, outcome string
 		var totalBought, totalSold, totalBuyCost, totalSellProceeds float64
-		var avgBuyPrice, avgSellPrice *float64
 		var tradeCount int
 		var marketClosed *bool
 		var winningOutcome *string
@@ -2762,7 +2769,7 @@ func (s *PostgresStore) calculateUserPotentialPnL(
 		if err := rows.Scan(
 			&marketID, &outcome,
 			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds,
-			&avgBuyPrice, &avgSellPrice, &tradeCount,
+			&tradeCount,
 			&marketClosed, &winningOutcome,
 		); err != nil {
 			continue
