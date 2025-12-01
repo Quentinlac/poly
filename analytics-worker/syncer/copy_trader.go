@@ -521,13 +521,38 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	} else if trade.DetectionSource == "live_ws" {
 		// LiveData WebSocket: MarketID is conditionID, need to look up tokenID
 		log.Printf("[CopyTrader] ⚡ LiveData WS trade: looking up tokenID from conditionID=%s outcome=%s", trade.MarketID, trade.Outcome)
+
+		// First try database cache (fast)
 		tokenInfo, err := ct.store.GetTokenByConditionAndOutcome(ctx, trade.MarketID, trade.Outcome)
-		if err != nil || tokenInfo == nil {
-			return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get token ID for conditionID %s outcome %s: %v", trade.MarketID, trade.Outcome, err), "")
+		if err == nil && tokenInfo != nil {
+			tokenID = tokenInfo.TokenID
+			negRisk = false // Will get from order book
+			log.Printf("[CopyTrader] ⚡ LiveData WS: found tokenID=%s from cache", tokenID)
+		} else {
+			// Cache miss - call CLOB API directly (always works for active markets)
+			log.Printf("[CopyTrader] ⚡ LiveData WS: cache miss, calling CLOB API...")
+			market, err := ct.clobClient.GetMarket(ctx, trade.MarketID)
+			if err != nil {
+				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("CLOB API failed for conditionID %s: %v", trade.MarketID, err), "")
+			}
+
+			// Find the token with matching outcome
+			var foundToken string
+			for _, token := range market.Tokens {
+				if strings.EqualFold(token.Outcome, trade.Outcome) {
+					foundToken = token.TokenID
+					break
+				}
+			}
+
+			if foundToken == "" {
+				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("no token found for outcome %s in conditionID %s", trade.Outcome, trade.MarketID), "")
+			}
+
+			tokenID = foundToken
+			negRisk = market.NegRisk
+			log.Printf("[CopyTrader] ⚡ LiveData WS: found tokenID=%s from CLOB API (negRisk=%v)", tokenID, negRisk)
 		}
-		tokenID = tokenInfo.TokenID
-		negRisk = false // Will get from order book
-		log.Printf("[CopyTrader] ⚡ LiveData WS: found tokenID=%s for %s", tokenID, trade.Outcome)
 	} else {
 		// Slow path: legacy trades need verification
 		tokenLookupStart := time.Now()
