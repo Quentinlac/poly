@@ -133,19 +133,33 @@ func (c *LiveDataWSClient) UpdateSubscriptions(eventSlugs []string) error {
 	return c.sendSubscription(eventSlugs)
 }
 
-// GetBTC15mSlugs returns the previous, current, and next BTC 15m market slugs
-// We subscribe to 3 markets to catch late trades on the previous market
-func GetBTC15mSlugs() (previous, current, next string) {
-	now := time.Now().Unix()
-	// Current period end = next 15-min boundary
-	currentEnd := ((now / 900) + 1) * 900
-	previousEnd := currentEnd - 900
-	nextEnd := currentEnd + 900
+// SubscribeToAllTrades subscribes to all orders_matched events without filtering
+// This is simpler and more reliable than filtering by event_slug
+func (c *LiveDataWSClient) SubscribeToAllTrades() error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 
-	previous = fmt.Sprintf("btc-updown-15m-%d", previousEnd)
-	current = fmt.Sprintf("btc-updown-15m-%d", currentEnd)
-	next = fmt.Sprintf("btc-updown-15m-%d", nextEnd)
-	return
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	msg := map[string]interface{}{
+		"action": "subscribe",
+		"subscriptions": []map[string]interface{}{
+			{
+				"topic": "activity",
+				"type":  "orders_matched",
+				// No filters - receive ALL trades, filter locally by proxyWallet
+			},
+		},
+	}
+
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return fmt.Errorf("send subscription failed: %w", err)
+	}
+
+	log.Printf("[LiveDataWS] Subscribed to ALL orders_matched (no filter)")
+	return nil
 }
 
 func (c *LiveDataWSClient) connect() error {
@@ -214,16 +228,8 @@ func (c *LiveDataWSClient) sendSubscription(eventSlugs []string) error {
 }
 
 func (c *LiveDataWSClient) resubscribe() error {
-	c.subscriptionsMu.RLock()
-	slugs := make([]string, len(c.subscriptions))
-	copy(slugs, c.subscriptions)
-	c.subscriptionsMu.RUnlock()
-
-	if len(slugs) == 0 {
-		return nil
-	}
-
-	return c.sendSubscription(slugs)
+	// Always subscribe to all trades (no filter)
+	return c.SubscribeToAllTrades()
 }
 
 func (c *LiveDataWSClient) readLoop(ctx context.Context) {

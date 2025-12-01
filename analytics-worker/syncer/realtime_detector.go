@@ -161,18 +161,16 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start LiveData WebSocket for BTC 15m markets (Strategy 3)
+	// Start LiveData WebSocket for Strategy 3 users
+	// Subscribe to ALL trades and filter locally by proxyWallet
 	if d.liveDataWS != nil {
 		if err := d.liveDataWS.Start(ctx); err != nil {
 			log.Printf("[RealtimeDetector] Warning: LiveData WebSocket failed to start: %v", err)
 		} else {
-			// Subscribe to previous, current, and next BTC 15m market slugs
-			// We include previous to catch late trades on recently-ended markets
-			prev, current, next := api.GetBTC15mSlugs()
-			if err := d.liveDataWS.UpdateSubscriptions([]string{prev, current, next}); err != nil {
+			if err := d.liveDataWS.SubscribeToAllTrades(); err != nil {
 				log.Printf("[RealtimeDetector] Warning: LiveData WebSocket subscription failed: %v", err)
 			} else {
-				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (BTC 15m: %s, %s, %s)", prev, current, next)
+				log.Printf("[RealtimeDetector] ✓ LiveData WebSocket started (all trades, filter locally)")
 			}
 		}
 	}
@@ -207,11 +205,7 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 	d.wg.Add(1)
 	go d.userRefreshLoop(ctx)
 
-	// Start slug rotation loop for BTC 15m markets (every 1 minute check)
-	d.wg.Add(1)
-	go d.slugRotationLoop(ctx)
-
-	log.Printf("[RealtimeDetector] Started with %d polled users, %d BTC 15m users", len(d.followedUsers), len(d.btc15mUsers))
+	log.Printf("[RealtimeDetector] Started with %d polled users, %d Strategy 3 users", len(d.followedUsers), len(d.btc15mUsers))
 	return nil
 }
 
@@ -729,43 +723,7 @@ func (d *RealtimeDetector) userRefreshLoop(ctx context.Context) {
 	}
 }
 
-// slugRotationLoop updates BTC 15m market subscriptions every minute
-func (d *RealtimeDetector) slugRotationLoop(ctx context.Context) {
-	defer d.wg.Done()
-
-	// Check every minute for slug changes
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	var lastCurrent, lastNext string
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-d.stopCh:
-			return
-		case <-ticker.C:
-			if d.liveDataWS == nil {
-				continue
-			}
-
-			prev, current, next := api.GetBTC15mSlugs()
-
-			// Only update if slugs changed
-			if current != lastCurrent || next != lastNext {
-				log.Printf("[RealtimeDetector] BTC 15m slug rotation: %s, %s, %s", prev, current, next)
-				if err := d.liveDataWS.UpdateSubscriptions([]string{prev, current, next}); err != nil {
-					log.Printf("[RealtimeDetector] Warning: slug rotation failed: %v", err)
-				}
-				lastCurrent = current
-				lastNext = next
-			}
-		}
-	}
-}
-
-// handleLiveDataTrade is called when LiveData WebSocket detects a trade on BTC 15m markets
+// handleLiveDataTrade is called when LiveData WebSocket detects a trade
 // This is the PRIMARY detection method for Strategy 3 users (~650ms latency)
 func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 	detectedAt := time.Now()
