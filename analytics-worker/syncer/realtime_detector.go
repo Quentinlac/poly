@@ -772,12 +772,33 @@ func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 	// Update metrics for all events
 	d.metricsMu.Lock()
 	d.metrics.LiveDataWSEvents++
+	eventCount := d.metrics.LiveDataWSEvents
 	d.metricsMu.Unlock()
 
+	// Log every 10th trade to show WebSocket is receiving data
+	if eventCount%10 == 1 {
+		log.Printf("[LiveDataWS] Received trade #%d: %s %s %.0f @ %.2f on %s",
+			eventCount, event.Name, event.Side, event.Size, event.Price, event.EventSlug)
+	}
+
 	// Check if the trader (proxyWallet) is a followed BTC 15m user
+	normalizedWallet := utils.NormalizeAddress(event.ProxyWallet)
 	d.btc15mUsersMu.RLock()
-	isFollowed := d.btc15mUsers[utils.NormalizeAddress(event.ProxyWallet)]
+	isFollowed := d.btc15mUsers[normalizedWallet]
+	numFollowed := len(d.btc15mUsers)
 	d.btc15mUsersMu.RUnlock()
+
+	// Debug: Log when checking a trade from a potential match
+	if len(event.ProxyWallet) > 10 {
+		shortWallet := event.ProxyWallet[:10]
+		// Check if this wallet starts with our followed user's prefix
+		for addr := range d.btc15mUsers {
+			if len(addr) > 10 && addr[:10] == normalizedWallet[:10] {
+				log.Printf("[LiveDataWS] DEBUG: Potential match! wallet=%s followed=%v (tracking %d users)", shortWallet, isFollowed, numFollowed)
+				break
+			}
+		}
+	}
 
 	if !isFollowed {
 		return // Not a followed user
