@@ -2323,30 +2323,28 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 	// Step 3: Calculate slippage per market
 	// BUY slippage = (follower_price - following_price) * follower_shares (positive = we paid more)
 	// SELL slippage = (following_price - follower_price) * |follower_shares| (positive = we got less)
+	// Percentage is based on OUR cost/value, not the followed user's
 	_, err = s.pool.Exec(ctx, `
 		WITH slippage AS (
 			SELECT
 				token_id,
 				following_address,
-				-- BUY slippage (positive shares = buy, filter bad prices)
+				-- BUY slippage USD (positive shares = buy, filter bad prices)
 				COALESCE(SUM(CASE
 					WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
 					THEN (follower_price - following_price) * follower_shares
 					ELSE 0 END), 0) as buy_slip_usd,
-				-- SELL slippage (negative shares = sell, filter bad prices)
+				-- SELL slippage USD (negative shares = sell, filter bad prices)
 				COALESCE(SUM(CASE
 					WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
 					THEN (following_price - follower_price) * ABS(follower_shares)
 					ELSE 0 END), 0) as sell_slip_usd,
-				-- For percentage: weighted avg prices
+				-- OUR buy cost (what we actually paid)
 				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
-					THEN follower_shares ELSE 0 END), 0) as buy_shares,
-				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares > 0 AND follower_price >= 0.02
-					THEN following_shares * following_price ELSE 0 END), 0) as foll_buy_cost,
+					THEN follower_shares * follower_price ELSE 0 END), 0) as our_buy_cost,
+				-- OUR sell value (what we actually received)
 				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
-					THEN ABS(follower_shares) ELSE 0 END), 0) as sell_shares,
-				COALESCE(SUM(CASE WHEN status = 'executed' AND following_shares < 0 AND follower_price >= 0.02
-					THEN ABS(following_shares) * following_price ELSE 0 END), 0) as foll_sell_value
+					THEN ABS(follower_shares) * follower_price ELSE 0 END), 0) as our_sell_value
 			FROM copy_trade_log
 			WHERE token_id IS NOT NULL
 			GROUP BY token_id, following_address
@@ -2355,10 +2353,10 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 		SET
 			buy_slippage_usd = s.buy_slip_usd,
 			sell_slippage_usd = s.sell_slip_usd,
-			-- Buy slippage % = slip_usd / following_cost (if we have cost)
-			buy_slippage_pct = CASE WHEN s.foll_buy_cost > 0 THEN s.buy_slip_usd / s.foll_buy_cost ELSE 0 END,
-			-- Sell slippage % = slip_usd / following_value (if we have value)
-			sell_slippage_pct = CASE WHEN s.foll_sell_value > 0 THEN s.sell_slip_usd / s.foll_sell_value ELSE 0 END,
+			-- Buy slippage % = slip_usd / OUR cost (what % more we paid)
+			buy_slippage_pct = CASE WHEN s.our_buy_cost > 0 THEN s.buy_slip_usd / s.our_buy_cost ELSE 0 END,
+			-- Sell slippage % = slip_usd / OUR value (what % less we got)
+			sell_slippage_pct = CASE WHEN s.our_sell_value > 0 THEN s.sell_slip_usd / s.our_sell_value ELSE 0 END,
 			total_slippage_usd = s.buy_slip_usd + s.sell_slip_usd
 		FROM slippage s
 		WHERE p.token_id = s.token_id
