@@ -97,10 +97,10 @@ type MarketInfo struct {
 
 // ClobTokenInfo represents token information from CLOB
 type ClobTokenInfo struct {
-	TokenID  string `json:"token_id"`
-	Outcome  string `json:"outcome"`
-	Price    string `json:"price"`
-	Winner   bool   `json:"winner"`
+	TokenID string  `json:"token_id"`
+	Outcome string  `json:"outcome"`
+	Price   float64 `json:"price"`
+	Winner  bool    `json:"winner"`
 }
 
 // OrderType represents the type of order
