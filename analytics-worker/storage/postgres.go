@@ -2447,16 +2447,16 @@ func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error)
 			UPDATE copy_trade_pnl
 			SET
 				market_resolved = TRUE,
-				winning_outcome = $2,
+				winning_outcome = $2::text,
 				-- Redeem amounts: remaining shares are worth $1 each if outcome won
-				following_redeem_amount = CASE WHEN outcome = $2 THEN GREATEST(following_shares_remaining, 0) ELSE 0 END,
-				follower_redeem_amount = CASE WHEN outcome = $2 THEN GREATEST(follower_shares_remaining, 0) ELSE 0 END,
+				following_redeem_amount = CASE WHEN outcome = $2::text THEN GREATEST(following_shares_remaining, 0) ELSE 0::numeric END,
+				follower_redeem_amount = CASE WHEN outcome = $2::text THEN GREATEST(follower_shares_remaining, 0) ELSE 0::numeric END,
 				-- Following user P&L: if their outcome won, remaining shares are worth $1 each
 				following_net_pnl = following_usdc_received - following_usdc_spent +
-					CASE WHEN outcome = $2 THEN GREATEST(following_shares_remaining, 0) ELSE 0 END,
+					CASE WHEN outcome = $2::text THEN GREATEST(following_shares_remaining, 0) ELSE 0::numeric END,
 				-- Follower P&L: same logic
 				follower_net_pnl = follower_usdc_received - follower_usdc_spent +
-					CASE WHEN outcome = $2 THEN GREATEST(follower_shares_remaining, 0) ELSE 0 END,
+					CASE WHEN outcome = $2::text THEN GREATEST(follower_shares_remaining, 0) ELSE 0::numeric END,
 				resolved_at = NOW(),
 				updated_at = NOW()
 			WHERE token_id = $1
