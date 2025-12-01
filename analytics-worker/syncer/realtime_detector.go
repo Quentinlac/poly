@@ -939,10 +939,17 @@ func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 		event.Name, event.Side, event.Size, event.Price, event.Outcome, latency.Round(time.Millisecond))
 
 	// Check if we had a mempool pre-detection for this trade
+	// First check local pre-detections (from decoded mempool trades)
 	txHashLower := strings.ToLower(event.TransactionHash)
 	d.mempoolPreDetectionsMu.RLock()
 	mempoolTime, wasPreDetected := d.mempoolPreDetections[txHashLower]
 	d.mempoolPreDetectionsMu.RUnlock()
+
+	// If not found locally, check the mempool cache (ALL Polymarket transactions)
+	// This catches trades we saw in mempool but couldn't decode or match by address
+	if !wasPreDetected && d.mempoolWS != nil {
+		mempoolTime, wasPreDetected = d.mempoolWS.GetMempoolTime(txHashLower)
+	}
 
 	detectionSource := "live_ws"
 	if wasPreDetected {
@@ -951,7 +958,7 @@ func (d *RealtimeDetector) handleLiveDataTrade(event api.LiveDataTradeEvent) {
 			txHashLower[:16], timeSaved.Round(time.Millisecond))
 		detectionSource = "mempool" // Credit to mempool for the detection
 
-		// Clean up the pre-detection entry
+		// Clean up the local pre-detection entry if it was there
 		d.mempoolPreDetectionsMu.Lock()
 		delete(d.mempoolPreDetections, txHashLower)
 		d.mempoolPreDetectionsMu.Unlock()

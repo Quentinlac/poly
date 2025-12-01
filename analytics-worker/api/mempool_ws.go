@@ -59,7 +59,7 @@ type MempoolTradeEvent struct {
 // MempoolTradeHandler is called when a pending trade is detected from a followed user
 type MempoolTradeHandler func(event MempoolTradeEvent)
 
-// MempoolWSClient monitors Polygon mempool for pending trades from followed users
+// MempoolWSClient monitors Polygon mempool for pending trades
 type MempoolWSClient struct {
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -77,14 +77,20 @@ type MempoolWSClient struct {
 	followedAddrs   map[string]bool
 	followedAddrsMu sync.RWMutex
 
+	// Cache of Polymarket transactions seen in mempool: tx_hash -> timestamp
+	// Used to check if a trade was pre-detected when LiveData reports it
+	mempoolCache   map[string]time.Time
+	mempoolCacheMu sync.RWMutex
+
 	running bool
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 
 	// Stats
-	pendingTxSeen   int64
-	tradesDetected  int64
-	statsMu         sync.RWMutex
+	pendingTxSeen        int64
+	polymarketTxSeen     int64
+	tradesDetected       int64
+	statsMu              sync.RWMutex
 
 	// Rate limiting for RPC calls
 	lastRPCCall time.Time
@@ -96,12 +102,29 @@ func NewMempoolWSClient(onTrade MempoolTradeHandler) *MempoolWSClient {
 	return &MempoolWSClient{
 		onTrade:       onTrade,
 		followedAddrs: make(map[string]bool),
+		mempoolCache:  make(map[string]time.Time),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
+}
+
+// GetMempoolTime returns when a transaction was first seen in the mempool
+// Returns zero time if not found
+func (c *MempoolWSClient) GetMempoolTime(txHash string) (time.Time, bool) {
+	c.mempoolCacheMu.RLock()
+	defer c.mempoolCacheMu.RUnlock()
+	t, ok := c.mempoolCache[strings.ToLower(txHash)]
+	return t, ok
+}
+
+// GetPolymarketTxCount returns the number of Polymarket transactions seen in mempool
+func (c *MempoolWSClient) GetPolymarketTxCount() int64 {
+	c.statsMu.RLock()
+	defer c.statsMu.RUnlock()
+	return c.polymarketTxSeen
 }
 
 // SetFollowedAddresses updates the list of addresses to monitor
@@ -187,10 +210,10 @@ func (c *MempoolWSClient) Stop() {
 }
 
 // GetStats returns monitoring statistics
-func (c *MempoolWSClient) GetStats() (pendingTxSeen, tradesDetected int64) {
+func (c *MempoolWSClient) GetStats() (pendingTxSeen, polymarketTxSeen, tradesDetected int64) {
 	c.statsMu.RLock()
 	defer c.statsMu.RUnlock()
-	return c.pendingTxSeen, c.tradesDetected
+	return c.pendingTxSeen, c.polymarketTxSeen, c.tradesDetected
 }
 
 func (c *MempoolWSClient) connect() error {
@@ -356,6 +379,76 @@ func (c *MempoolWSClient) handleMessage(ctx context.Context, data []byte) {
 	go c.checkTransaction(ctx, txHash)
 }
 
+// extractMakerAddresses extracts maker/signer addresses from Polymarket order input data
+// Order struct fields (each 32 bytes):
+// 0: salt, 1: maker, 2: signer, 3: taker, 4: tokenId, 5: makerAmount, 6: takerAmount...
+func extractMakerAddresses(input string) []string {
+	if len(input) < 10 {
+		return nil
+	}
+
+	data := strings.TrimPrefix(input, "0x")
+	if len(data) < 8 {
+		return nil
+	}
+
+	// Skip function selector (4 bytes = 8 hex chars)
+	data = data[8:]
+
+	// Decode hex to bytes
+	dataBytes, err := hex.DecodeString(data)
+	if err != nil || len(dataBytes) < 256 {
+		return nil
+	}
+
+	var addresses []string
+	seen := make(map[string]bool)
+
+	// Scan through the data looking for potential addresses
+	// Addresses are 20 bytes, stored in 32-byte fields (12 zero bytes + 20 address bytes)
+	// Order struct: salt(32), maker(32), signer(32), taker(32), tokenId(32)...
+	// We scan at 32-byte boundaries looking for address patterns
+
+	for offset := 0; offset+32 <= len(dataBytes); offset += 32 {
+		// Check if this looks like an address field (first 12 bytes should be zeros)
+		isAddressField := true
+		for i := 0; i < 12; i++ {
+			if dataBytes[offset+i] != 0 {
+				isAddressField = false
+				break
+			}
+		}
+		if !isAddressField {
+			continue
+		}
+
+		// Extract the 20-byte address
+		addrBytes := dataBytes[offset+12 : offset+32]
+
+		// Skip zero addresses and small values that aren't real addresses
+		// Real addresses should have non-zero bytes in the first ~10 bytes
+		// (addresses like 0x05c1... have non-zero early bytes)
+		nonZeroCount := 0
+		for i := 0; i < 10; i++ {
+			if addrBytes[i] != 0 {
+				nonZeroCount++
+			}
+		}
+		// Require at least 3 non-zero bytes in first 10 bytes to be a real address
+		if nonZeroCount < 3 {
+			continue
+		}
+
+		addr := fmt.Sprintf("0x%x", addrBytes)
+		if !seen[addr] {
+			seen[addr] = true
+			addresses = append(addresses, addr)
+		}
+	}
+
+	return addresses
+}
+
 func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 	// Rate limit RPC calls slightly
 	c.rpcMu.Lock()
@@ -378,15 +471,41 @@ func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 		return
 	}
 
-	// Check if sender is a followed address
-	fromAddr := strings.ToLower(tx.From)
+	now := time.Now()
+
+	// Cache ALL Polymarket transactions - used for pre-detection lookup
+	// When LiveData reports a trade, we can check if we saw it in mempool first
+	c.mempoolCacheMu.Lock()
+	if _, exists := c.mempoolCache[strings.ToLower(txHash)]; !exists {
+		c.mempoolCache[strings.ToLower(txHash)] = now
+		c.statsMu.Lock()
+		c.polymarketTxSeen++
+		c.statsMu.Unlock()
+	}
+	c.mempoolCacheMu.Unlock()
+
+	// Extract maker/signer addresses from the order input data
+	// The whale's address is INSIDE the order struct, not tx.From (which is the operator)
+	makerAddrs := extractMakerAddresses(tx.Input)
+
+	// Check if any maker/signer is a followed address
+	var followedMaker string
 	c.followedAddrsMu.RLock()
-	isFollowed := c.followedAddrs[fromAddr]
+	for _, addr := range makerAddrs {
+		if c.followedAddrs[strings.ToLower(addr)] {
+			followedMaker = addr
+			break
+		}
+	}
 	c.followedAddrsMu.RUnlock()
 
-	if !isFollowed {
+	// If no followed address found, still return - we already cached the TX
+	if followedMaker == "" {
 		return
 	}
+
+	// Use the followed maker as the "from" address for the event
+	fromAddr := strings.ToLower(followedMaker)
 
 	// We found a pending trade from a followed user!
 	c.statsMu.Lock()
