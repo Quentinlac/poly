@@ -2572,7 +2572,7 @@ func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
 
 		// Calculate for weeks 1, 2, 3
 		for week := 1; week <= 3; week++ {
-			pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, err := s.calculateUserPotentialPnLWeek(
+			pnl, userPnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, err := s.calculateUserPotentialPnLWeek(
 				ctx, userAddr, multiplier, avgBuySlippage, avgSellSlippage, week,
 			)
 			if err != nil {
@@ -2582,11 +2582,12 @@ func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
 
 			// Upsert result
 			_, err = s.pool.Exec(ctx, `
-				INSERT INTO potential_pnl (user_address, week_number, potential_pnl, total_resolved_markets, total_resolved_trades,
+				INSERT INTO potential_pnl (user_address, week_number, potential_pnl, user_actual_pnl, total_resolved_markets, total_resolved_trades,
 					total_unresolved_markets, avg_buy_slippage_used, avg_sell_slippage_used, multiplier_used, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
 				ON CONFLICT (user_address, week_number) DO UPDATE SET
 					potential_pnl = EXCLUDED.potential_pnl,
+					user_actual_pnl = EXCLUDED.user_actual_pnl,
 					total_resolved_markets = EXCLUDED.total_resolved_markets,
 					total_resolved_trades = EXCLUDED.total_resolved_trades,
 					total_unresolved_markets = EXCLUDED.total_unresolved_markets,
@@ -2594,15 +2595,20 @@ func (s *PostgresStore) RefreshPotentialPnL(ctx context.Context) error {
 					avg_sell_slippage_used = EXCLUDED.avg_sell_slippage_used,
 					multiplier_used = EXCLUDED.multiplier_used,
 					updated_at = NOW()
-			`, userAddr, week, pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, avgBuySlippage, avgSellSlippage, multiplier)
+			`, userAddr, week, pnl, userPnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, avgBuySlippage, avgSellSlippage, multiplier)
 
 			if err != nil {
 				log.Printf("[potential-pnl] Failed to save week %d for %s: %v", week, userAddr[:10], err)
 				continue
 			}
-		}
 
-		log.Printf("[potential-pnl] User %s: calculated 3 weeks", userAddr[:10])
+			ratio := 0.0
+			if userPnl != 0 {
+				ratio = pnl / userPnl
+			}
+			log.Printf("[potential-pnl] User %s week %d: our_pnl=$%.2f, user_pnl=$%.2f (ratio=%.2f)",
+				userAddr[:10], week, pnl, userPnl, ratio)
+		}
 	}
 
 	log.Printf("[potential-pnl] Refresh complete for %d users", len(followedUsers))
@@ -2718,12 +2724,13 @@ func (s *PostgresStore) checkMarketResolutionGamma(client *http.Client, tokenID 
 
 // calculateUserPotentialPnLWeek calculates the potential PNL for a single user for a specific week
 // week 1 = 0-7 days ago, week 2 = 7-14 days ago, week 3 = 14-21 days ago
+// Returns both our simulated PNL and the user's actual PNL
 func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	ctx context.Context,
 	userAddr string,
 	multiplier, avgBuySlippage, avgSellSlippage float64,
 	week int,
-) (pnl float64, resolvedMarkets, resolvedTrades, unresolvedMarkets int, err error) {
+) (pnl, userPnl float64, resolvedMarkets, resolvedTrades, unresolvedMarkets int, err error) {
 
 	// Calculate date range for this week
 	// Week 1: NOW - 7 days to NOW
@@ -2733,14 +2740,16 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	endDays := week * 7
 
 	// Get all trades for this user in the date range, grouped by market and outcome
+	// Include REDEEM transactions separately (they have no slippage)
 	rows, err := s.pool.Query(ctx, `
 		SELECT
 			ut.market_id,
 			ut.outcome,
-			SUM(CASE WHEN ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
-			SUM(CASE WHEN ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
-			SUM(CASE WHEN ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
-			SUM(CASE WHEN ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
+			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
+			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
+			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
+			SUM(CASE WHEN ut.type = 'TRADE' AND ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
+			SUM(CASE WHEN ut.type = 'REDEEM' THEN ut.usdc_size ELSE 0 END) as total_redeemed,
 			COUNT(*) as trade_count,
 			mr.market_closed,
 			mr.winning_outcome
@@ -2752,7 +2761,7 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		GROUP BY ut.market_id, ut.outcome, mr.market_closed, mr.winning_outcome
 	`, userAddr, startDays, endDays)
 	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
+		return 0, 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
 	}
 	defer rows.Close()
 
@@ -2760,15 +2769,16 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	seenResolvedMarkets := make(map[string]bool)
 
 	for rows.Next() {
-		var marketID, outcome string
-		var totalBought, totalSold, totalBuyCost, totalSellProceeds float64
+		var marketID string
+		var outcome *string
+		var totalBought, totalSold, totalBuyCost, totalSellProceeds, totalRedeemed float64
 		var tradeCount int
 		var marketClosed *bool
 		var winningOutcome *string
 
 		if err := rows.Scan(
 			&marketID, &outcome,
-			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds,
+			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds, &totalRedeemed,
 			&tradeCount,
 			&marketClosed, &winningOutcome,
 		); err != nil {
@@ -2785,37 +2795,50 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 		seenResolvedMarkets[marketID] = true
 		resolvedTrades += tradeCount
 
-		// Calculate simulated position with multiplier and slippage
-		simBought := totalBought * multiplier
-		simSold := totalSold * multiplier
-
-		// Apply slippage to costs
-		// Buy slippage: we pay more (positive slippage = bad)
-		simBuyCost := totalBuyCost * multiplier * (1 + avgBuySlippage)
-		// Sell slippage: we receive less (negative slippage = good, positive = bad)
-		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
-
-		// Net shares remaining
-		simRemaining := simBought - simSold
-
-		// Calculate P&L
-		// If outcome matches winner, remaining shares are worth $1 each
-		var positionPnL float64
-		if outcome == *winningOutcome {
+		// Calculate USER's actual PNL (no slippage, no multiplier)
+		// PNL = sell proceeds + redeem proceeds - buy cost + remaining shares if won
+		userRemaining := totalBought - totalSold
+		if userRemaining < 0 {
+			userRemaining = 0 // Can't have negative remaining
+		}
+		var userPositionPnL float64
+		if outcome != nil && *outcome == *winningOutcome {
 			// Winner: remaining shares worth $1 each
-			positionPnL = simSellProceeds - simBuyCost + simRemaining
+			userPositionPnL = totalSellProceeds + totalRedeemed - totalBuyCost + userRemaining
 		} else {
 			// Loser: remaining shares worth $0
-			positionPnL = simSellProceeds - simBuyCost
+			userPositionPnL = totalSellProceeds + totalRedeemed - totalBuyCost
+		}
+		userPnl += userPositionPnL
+
+		// Calculate OUR simulated PNL with multiplier and slippage
+		// Buy: apply slippage (we pay more if positive)
+		simBuyCost := totalBuyCost * multiplier * (1 + avgBuySlippage)
+		// Sell: apply slippage (we receive less if positive)
+		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
+		// Redeem: NO slippage (exactly $1 per share)
+		simRedeemed := totalRedeemed * multiplier
+		// Remaining shares
+		simRemaining := (totalBought - totalSold) * multiplier
+		if simRemaining < 0 {
+			simRemaining = 0
 		}
 
+		var positionPnL float64
+		if outcome != nil && *outcome == *winningOutcome {
+			// Winner: remaining shares worth $1 each
+			positionPnL = simSellProceeds + simRedeemed - simBuyCost + simRemaining
+		} else {
+			// Loser: remaining shares worth $0
+			positionPnL = simSellProceeds + simRedeemed - simBuyCost
+		}
 		pnl += positionPnL
 	}
 
 	resolvedMarkets = len(seenResolvedMarkets)
 	unresolvedMarkets = len(seenMarkets) - resolvedMarkets
 
-	return pnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, nil
+	return pnl, userPnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, nil
 }
 
 // ============================================================================
