@@ -2352,12 +2352,12 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 // CheckMarketResolutions queries Gamma API for unresolved markets and updates their status
 // This determines the winning outcome and calculates theoretical P&L
 func (s *PostgresStore) CheckMarketResolutions(ctx context.Context) (int, error) {
-	// Get unresolved markets (older than 30 min to avoid checking active markets)
+	// Get unresolved markets (older than 15 min to catch BTC 15m markets faster)
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT token_id
 		FROM copy_trade_pnl
 		WHERE market_resolved = FALSE
-		  AND last_trade_at < NOW() - INTERVAL '30 minutes'
+		  AND last_trade_at < NOW() - INTERVAL '15 minutes'
 		LIMIT 50
 	`)
 	if err != nil {
