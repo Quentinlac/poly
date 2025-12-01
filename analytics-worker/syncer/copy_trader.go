@@ -970,11 +970,12 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 			fmt.Sprintf("no liquidity within 10%% (best=%.4f, max=%.4f)", bestAsk, maxPrice), "", storage.StrategyBot, debugLog, timing, timestamps)
 	}
 
-	// Step 6: Calculate fill
+	// Step 6: Calculate fill - sweep through asks and track max price
 	fillStart := time.Now()
 	remainingUSDC := targetUSDC
 	totalSize := 0.0
 	totalCost := 0.0
+	maxFillPrice := 0.0 // Track the highest price level we need to sweep
 
 	for _, ask := range affordableAsks {
 		if remainingUSDC <= 0 {
@@ -986,11 +987,13 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 			totalSize += ask.size
 			totalCost += levelCost
 			remainingUSDC -= levelCost
+			maxFillPrice = ask.price // Update max price as we sweep deeper
 		} else {
 			partialSize := remainingUSDC / ask.price
 			totalSize += partialSize
 			totalCost += remainingUSDC
 			remainingUSDC = 0
+			maxFillPrice = ask.price // This level is our deepest
 		}
 	}
 	timing["6_fill_calc_ms"] = float64(time.Since(fillStart).Microseconds()) / 1000
@@ -999,6 +1002,7 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		"totalSize":     totalSize,
 		"totalCost":     totalCost,
 		"remainingUSDC": remainingUSDC,
+		"maxFillPrice":  maxFillPrice,
 	}
 
 	// Polymarket requires minimum $1 order
@@ -1014,14 +1018,20 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 
 	avgPrice := totalCost / totalSize
 
+	// Use maxFillPrice for the order (not avgPrice) to ensure we sweep all levels
+	// Example: if asks are 5@0.11 and 10@0.12, and we want to sweep both:
+	// - avgPrice would be ~0.114, which only matches 0.11 asks
+	// - maxFillPrice is 0.12, which matches both levels
+	orderPrice := maxFillPrice
+
 	// Ensure we meet Polymarket's minimum order size ($1)
 	// If we calculated less than $1 but have liquidity, bump up to $1
 	if totalCost < polymarketMinOrder {
 		log.Printf("[CopyTrader-Bot] BUY: calculated $%.4f, bumping to $%.2f minimum", totalCost, polymarketMinOrder)
 		totalCost = polymarketMinOrder
-		// Recalculate size based on average price
-		if avgPrice > 0 {
-			totalSize = totalCost / avgPrice
+		// Recalculate size based on max fill price (not avg)
+		if orderPrice > 0 {
+			totalSize = totalCost / orderPrice
 		}
 		debugLog["minOrderAdjustment"] = map[string]interface{}{
 			"originalCost": totalCost,
@@ -1029,21 +1039,22 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 			"adjustedSize": totalSize,
 		}
 	}
-	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f",
-		totalSize, totalCost, avgPrice)
+	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f, orderPrice=%.4f (max fill)",
+		totalSize, totalCost, avgPrice, orderPrice)
 
 	debugLog["order"] = map[string]interface{}{
-		"type":     "market",
-		"side":     "BUY",
-		"size":     totalSize,
-		"cost":     totalCost,
-		"avgPrice": avgPrice,
+		"type":       "market",
+		"side":       "BUY",
+		"size":       totalSize,
+		"cost":       totalCost,
+		"avgPrice":   avgPrice,
+		"orderPrice": orderPrice,
 	}
 
-	// Step 7: Place order - try FOK first (immediate), fall back to GTC if needed
+	// Step 7: Place order at maxFillPrice to sweep all affordable levels
 	orderStart := time.Now()
 	timestamps.OrderPlacedAt = &orderStart // Track when we sent the order
-	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, avgPrice, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
 	orderConfirmed := time.Now()
 	timing["7_place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
 	if err != nil {
@@ -1224,9 +1235,11 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	}
 
 	// Calculate how much we can sell to acceptable bids
+	// Track the minimum price level (deepest bid we'll sweep)
 	remainingSize := sellSize
 	totalSold := 0.0
 	totalUSDC := 0.0
+	minFillPrice := 0.0 // Track the lowest price level we need to sweep
 
 	for _, bid := range acceptableBids {
 		if remainingSize <= 0 {
@@ -1238,24 +1251,31 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 			totalSold += bid.size
 			totalUSDC += bid.price * bid.size
 			remainingSize -= bid.size
+			minFillPrice = bid.price // Update as we sweep deeper (bids are sorted high to low)
 		} else {
 			// Partial fill at this level
 			totalSold += remainingSize
 			totalUSDC += bid.price * remainingSize
 			remainingSize = 0
+			minFillPrice = bid.price // This level is our deepest
 		}
 	}
 
 	// If we found acceptable bids, sell into them
 	if totalSold > 0.01 {
 		avgPrice := totalUSDC / totalSold
-		log.Printf("[CopyTrader-Bot] SELL: selling %.4f tokens at avg price %.4f for $%.4f",
-			totalSold, avgPrice, totalUSDC)
+		// Use minFillPrice (not avgPrice) to ensure we sweep all bid levels
+		// Example: if bids are 10@0.12 and 5@0.11, and we want to sweep both:
+		// - avgPrice would be ~0.115, which only matches 0.12 bids
+		// - minFillPrice is 0.11, which matches both levels
+		orderPrice := minFillPrice
+		log.Printf("[CopyTrader-Bot] SELL: selling %.4f tokens at avgPrice=%.4f, orderPrice=%.4f (min fill) for $%.4f",
+			totalSold, avgPrice, orderPrice, totalUSDC)
 
 		orderPlacedAt := time.Now()
 		timestamps.OrderPlacedAt = &orderPlacedAt
 		// Try FOK first (immediate), fall back to GTC if needed
-		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, avgPrice, negRisk)
+		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
 		orderConfirmedAt := time.Now()
 		if err != nil {
 			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
