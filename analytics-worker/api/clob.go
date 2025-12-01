@@ -503,7 +503,9 @@ func (c *ClobClient) GetMarket(ctx context.Context, conditionID string) (*Market
 
 // GetMarketBySlug fetches market info from Gamma API using the market slug
 // This is used for BTC 15m candle markets where we need to look up by slug pattern
+// It first gets the conditionId from Gamma, then fetches full market info (with tokens) from CLOB
 func (c *ClobClient) GetMarketBySlug(ctx context.Context, slug string) (*MarketInfo, error) {
+	// Step 1: Get conditionId from Gamma API
 	url := "https://gamma-api.polymarket.com/markets?slug=" + slug
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -524,14 +526,10 @@ func (c *ClobClient) GetMarketBySlug(ctx context.Context, slug string) (*MarketI
 
 	// Gamma API returns an array of markets
 	var markets []struct {
-		ConditionID string `json:"condition_id"`
-		Description string `json:"description"`
-		Slug        string `json:"market_slug"`
-		NegRisk     bool   `json:"neg_risk"`
-		Tokens      []struct {
-			TokenID string `json:"token_id"`
-			Outcome string `json:"outcome"`
-		} `json:"tokens"`
+		ConditionID string `json:"conditionId"`
+		Description string `json:"question"`
+		Slug        string `json:"slug"`
+		NegRisk     bool   `json:"negRisk"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
@@ -542,23 +540,13 @@ func (c *ClobClient) GetMarketBySlug(ctx context.Context, slug string) (*MarketI
 		return nil, fmt.Errorf("no market found for slug %s", slug)
 	}
 
-	// Convert to MarketInfo format
-	m := markets[0]
-	market := &MarketInfo{
-		ConditionID: m.ConditionID,
-		Description: m.Description,
-		MarketSlug:  m.Slug,
-		NegRisk:     m.NegRisk,
-		Tokens:      make([]ClobTokenInfo, len(m.Tokens)),
-	}
-	for i, t := range m.Tokens {
-		market.Tokens[i] = ClobTokenInfo{
-			TokenID: t.TokenID,
-			Outcome: t.Outcome,
-		}
+	conditionID := markets[0].ConditionID
+	if conditionID == "" {
+		return nil, fmt.Errorf("empty conditionId for slug %s", slug)
 	}
 
-	return market, nil
+	// Step 2: Get full market info (with tokens) from CLOB API
+	return c.GetMarket(ctx, conditionID)
 }
 
 // BalanceAllowance represents the balance and allowance for an account
