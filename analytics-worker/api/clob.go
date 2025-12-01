@@ -917,6 +917,35 @@ func (c *ClobClient) PlaceOrderFOK(ctx context.Context, tokenID string, side Sid
 	return c.postOrder(ctx, order, OrderTypeFOK)
 }
 
+// PlaceOrderFast tries FOK first (immediate execution), falls back to GTC if FOK fails
+// FOK can fail due to precision limits or no liquidity at exact price
+func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return nil, fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create signed order: %w", err)
+	}
+
+	// Try FOK first (immediate execution)
+	resp, err := c.postOrder(ctx, order, OrderTypeFOK)
+	if err == nil && resp.Success {
+		return resp, nil
+	}
+
+	// FOK failed - try GTC (more flexible, better fill rate)
+	log.Printf("[CLOB] FOK failed (err=%v, success=%v), falling back to GTC", err, resp != nil && resp.Success)
+	order2, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GTC order: %w", err)
+	}
+	return c.postOrder(ctx, order2, OrderTypeGTC)
+}
+
 func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
 	// Round price to tick size (0.01 for most markets)
 	tickSize := 0.01

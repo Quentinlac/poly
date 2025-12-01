@@ -1040,11 +1040,10 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 		"avgPrice": avgPrice,
 	}
 
-	// Step 7: Place order directly with pre-calculated size/price (faster than PlaceMarketOrder)
-	// Using GTC instead of FOK for better fill rates on limit orders
+	// Step 7: Place order - try FOK first (immediate), fall back to GTC if needed
 	orderStart := time.Now()
 	timestamps.OrderPlacedAt = &orderStart // Track when we sent the order
-	resp, err := ct.clobClient.PlaceLimitOrder(ctx, tokenID, api.SideBuy, totalSize, avgPrice, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, avgPrice, negRisk)
 	orderConfirmed := time.Now()
 	timing["7_place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
 	if err != nil {
@@ -1255,8 +1254,8 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 
 		orderPlacedAt := time.Now()
 		timestamps.OrderPlacedAt = &orderPlacedAt
-		// Use PlaceLimitOrder directly with pre-calculated size/price (faster than PlaceMarketOrder)
-		resp, err := ct.clobClient.PlaceLimitOrder(ctx, tokenID, api.SideSell, totalSold, avgPrice, negRisk)
+		// Try FOK first (immediate), fall back to GTC if needed
+		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, avgPrice, negRisk)
 		orderConfirmedAt := time.Now()
 		if err != nil {
 			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
@@ -1306,13 +1305,13 @@ func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDeta
 	var totalFilled float64
 	var totalValue float64
 
-	// Use PlaceLimitOrder directly with pre-calculated size/price (faster than PlaceMarketOrder)
+	// Try FOK first (immediate), fall back to GTC if needed
 	orderPlacedAt := time.Now()
 	timestamps.OrderPlacedAt = &orderPlacedAt
 	sellUSDC := sellSize * order3Price
-	log.Printf("[CopyTrader-Bot] SELL: Placing limit sell for %.4f tokens at $%.4f (total ~$%.2f)",
+	log.Printf("[CopyTrader-Bot] SELL: Placing order for %.4f tokens at $%.4f (total ~$%.2f)",
 		sellSize, order3Price, sellUSDC)
-	resp, err := ct.clobClient.PlaceLimitOrder(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
 	orderConfirmedAt := time.Now()
 
 	// Capture detailed error info
