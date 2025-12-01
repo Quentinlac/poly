@@ -2745,93 +2745,58 @@ func (s *PostgresStore) calculateUserPotentialPnLWeek(
 	startDays := (week - 1) * 7
 	endDays := week * 7
 
-	// Get all TRADE transactions (not REDEEM) grouped by market and outcome
-	// We use market resolution to calculate value, not REDEEM transactions
-	rows, err := s.pool.Query(ctx, `
+	// Simple realized PNL formula: sells + redeems - buys
+	// This only counts actual money flow, no estimation of unredeemed shares
+	var totalBuys, totalSells, totalRedeems float64
+	var tradeCount int
+
+	err = s.pool.QueryRow(ctx, `
 		SELECT
-			ut.market_id,
-			ut.outcome,
-			SUM(CASE WHEN ut.side = 'BUY' THEN ut.size ELSE 0 END) as total_bought,
-			SUM(CASE WHEN ut.side = 'SELL' THEN ut.size ELSE 0 END) as total_sold,
-			SUM(CASE WHEN ut.side = 'BUY' THEN ut.usdc_size ELSE 0 END) as total_buy_cost,
-			SUM(CASE WHEN ut.side = 'SELL' THEN ut.usdc_size ELSE 0 END) as total_sell_proceeds,
-			COUNT(*) as trade_count,
-			mr.market_closed,
-			mr.winning_outcome
+			COALESCE(SUM(CASE WHEN type = 'TRADE' AND side = 'BUY' THEN usdc_size ELSE 0 END), 0) as total_buys,
+			COALESCE(SUM(CASE WHEN type = 'TRADE' AND side = 'SELL' THEN usdc_size ELSE 0 END), 0) as total_sells,
+			COALESCE(SUM(CASE WHEN type = 'REDEEM' THEN usdc_size ELSE 0 END), 0) as total_redeems,
+			COUNT(CASE WHEN type = 'TRADE' THEN 1 END) as trade_count
+		FROM user_trades
+		WHERE user_id = $1
+		  AND timestamp >= NOW() - INTERVAL '1 day' * $3
+		  AND timestamp < NOW() - INTERVAL '1 day' * $2
+	`, userAddr, startDays, endDays).Scan(&totalBuys, &totalSells, &totalRedeems, &tradeCount)
+	if err != nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
+	}
+
+	// User's actual PNL = sells + redeems - buys
+	userPnl = totalSells + totalRedeems - totalBuys
+
+	// Our simulated PNL with multiplier and slippage
+	// Buy: apply slippage (we pay more if positive slippage)
+	simBuyCost := totalBuys * multiplier * (1 + avgBuySlippage)
+	// Sell: apply slippage (we receive less if positive slippage)
+	simSellProceeds := totalSells * multiplier * (1 - avgSellSlippage)
+	// Redeems: same multiplier, no slippage (it's just $1 per winning share)
+	simRedeems := totalRedeems * multiplier
+
+	pnl = simSellProceeds + simRedeems - simBuyCost
+
+	// Count markets (for info only)
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(DISTINCT market_id) as total_markets,
+			COUNT(DISTINCT CASE WHEN mr.market_closed = true THEN ut.market_id END) as resolved_markets
 		FROM user_trades ut
 		LEFT JOIN market_resolutions mr ON ut.market_id = mr.token_id
 		WHERE ut.user_id = $1
 		  AND ut.type = 'TRADE'
 		  AND ut.timestamp >= NOW() - INTERVAL '1 day' * $3
 		  AND ut.timestamp < NOW() - INTERVAL '1 day' * $2
-		GROUP BY ut.market_id, ut.outcome, mr.market_closed, mr.winning_outcome
-	`, userAddr, startDays, endDays)
+	`, userAddr, startDays, endDays).Scan(&unresolvedMarkets, &resolvedMarkets)
 	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("query user trades: %w", err)
+		// Non-fatal, just use zeros
+		unresolvedMarkets = 0
+		resolvedMarkets = 0
 	}
-	defer rows.Close()
-
-	seenMarkets := make(map[string]bool)
-	seenResolvedMarkets := make(map[string]bool)
-
-	for rows.Next() {
-		var marketID string
-		var outcome *string
-		var totalBought, totalSold, totalBuyCost, totalSellProceeds float64
-		var tradeCount int
-		var marketClosed *bool
-		var winningOutcome *string
-
-		if err := rows.Scan(
-			&marketID, &outcome,
-			&totalBought, &totalSold, &totalBuyCost, &totalSellProceeds,
-			&tradeCount,
-			&marketClosed, &winningOutcome,
-		); err != nil {
-			continue
-		}
-
-		seenMarkets[marketID] = true
-
-		// Skip unresolved markets
-		if marketClosed == nil || !*marketClosed || winningOutcome == nil {
-			continue
-		}
-
-		seenResolvedMarkets[marketID] = true
-		resolvedTrades += tradeCount
-
-		// Calculate USER's actual PNL using market resolution
-		// Formula: sells - buys + remaining_shares × resolution_value
-		// We don't use REDEEM transactions because they vary by user behavior
-		// Instead we calculate the value based on market outcome
-		remaining := totalBought - totalSold
-		if remaining < 0 {
-			remaining = 0 // Can happen with minting - cap at 0
-		}
-
-		var resolutionValue float64 = 0
-		if outcome != nil && *outcome == *winningOutcome {
-			resolutionValue = 1.0 // Winner shares worth $1 each
-		}
-		userPositionPnL := totalSellProceeds - totalBuyCost + remaining*resolutionValue
-		userPnl += userPositionPnL
-
-		// Calculate OUR simulated PNL with multiplier and slippage
-		// Buy: apply slippage (we pay more if positive)
-		simBuyCost := totalBuyCost * multiplier * (1 + avgBuySlippage)
-		// Sell: apply slippage (we receive less if positive)
-		simSellProceeds := totalSellProceeds * multiplier * (1 - avgSellSlippage)
-		// Remaining shares (with multiplier)
-		simRemaining := remaining * multiplier
-
-		// PNL = sells - buys + remaining × resolution_value (all with slippage/multiplier)
-		positionPnL := simSellProceeds - simBuyCost + simRemaining*resolutionValue
-		pnl += positionPnL
-	}
-
-	resolvedMarkets = len(seenResolvedMarkets)
-	unresolvedMarkets = len(seenMarkets) - resolvedMarkets
+	unresolvedMarkets = unresolvedMarkets - resolvedMarkets // Adjust to get actual unresolved count
+	resolvedTrades = tradeCount
 
 	return pnl, userPnl, resolvedMarkets, resolvedTrades, unresolvedMarkets, nil
 }
