@@ -2262,6 +2262,20 @@ func (s *PostgresStore) RefreshCopyTradePnL(ctx context.Context) (int64, error) 
 	}
 	upsertCount := result.RowsAffected()
 
+	// Step 1b: Update market_title from token_map_cache where missing
+	// Uses slug as the title since it's more readable (e.g., "btc-updown-15m-1764577800")
+	_, err = s.pool.Exec(ctx, `
+		UPDATE copy_trade_pnl p
+		SET market_title = c.slug, updated_at = NOW()
+		FROM token_map_cache c
+		WHERE p.token_id = c.token_id
+		  AND (p.market_title IS NULL OR p.market_title = '')
+		  AND c.slug IS NOT NULL AND c.slug != ''
+	`)
+	if err != nil {
+		log.Printf("[pnl] Warning: failed to update market_title from cache: %v", err)
+	}
+
 	// Step 2: Update redemption data from user_trades for resolved markets
 	_, err = s.pool.Exec(ctx, `
 		WITH redeems AS (
