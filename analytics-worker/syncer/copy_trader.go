@@ -590,7 +590,12 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		// Fast path: use token ID directly (already in decimal format from realtime_detector)
 		tokenID = trade.MarketID
 		negRisk = false // Default, will be overridden by order book if needed
-		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, skipping API lookups, tokenID=%s", tokenID)
+		// Quick cache lookup for title (no API call - speed is critical)
+		if tokenInfo, err := ct.store.GetTokenInfo(ctx, tokenID); err == nil && tokenInfo != nil {
+			trade.Title = tokenInfo.Title
+			trade.Outcome = tokenInfo.Outcome
+		}
+		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, tokenID=%s, title=%s", tokenID, trade.Title)
 	} else if trade.DetectionSource == "mempool" {
 		// Mempool trades: use Alchemy simulation/receipt for ACCURATE data
 		// The decoded calldata is unreliable - Alchemy gives us real OrderFilled events
@@ -616,11 +621,12 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		trade.Price = alchemyResult.Price
 		tokenID = alchemyResult.TokenID
 
-		// Look up outcome from token cache (tokenID is now accurate from Alchemy)
+		// Look up outcome and title from token cache (tokenID is now accurate from Alchemy)
 		tokenInfo, err := ct.store.GetTokenInfo(ctx, tokenID)
 		if err == nil && tokenInfo != nil {
 			trade.Outcome = tokenInfo.Outcome
-			log.Printf("[CopyTrader] ⚡ Mempool: outcome from cache = %s", trade.Outcome)
+			trade.Title = tokenInfo.Title
+			log.Printf("[CopyTrader] ⚡ Mempool: from cache - outcome=%s, title=%s", trade.Outcome, trade.Title)
 		} else {
 			// Fetch from Gamma API
 			gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, tokenID)
@@ -628,9 +634,10 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: failed to get token info for %s: %v", tokenID, err), "")
 			}
 			trade.Outcome = gammaInfo.Outcome
+			trade.Title = gammaInfo.Title
 			negRisk = gammaInfo.NegRisk
 			ct.store.SaveTokenInfo(ctx, tokenID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
-			log.Printf("[CopyTrader] ⚡ Mempool: outcome from Gamma = %s", trade.Outcome)
+			log.Printf("[CopyTrader] ⚡ Mempool: from Gamma - outcome=%s, title=%s", trade.Outcome, trade.Title)
 		}
 	} else if trade.DetectionSource == "live_ws" {
 		// LiveData WebSocket: MarketID is conditionID, need to look up tokenID
@@ -1709,7 +1716,7 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		FollowerTime:     followerTime,
 		FollowerShares:   followerShares,
 		FollowerPrice:    followerPrice,
-		FollowerOrderID:  orderID,
+		FollowerOrderID:  "", // Leave empty - will be populated async with real tx hash
 		MarketTitle:      trade.Title,
 		Outcome:          trade.Outcome,
 		TokenID:          tokenID,
@@ -1761,6 +1768,9 @@ func (ct *CopyTrader) fetchAndUpdateTxHash(followingTradeID, tokenID string, fol
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	log.Printf("[CopyTrader] Fetching tx hash for %s (tokenID=%s, time=%s, myAddr=%s)",
+		followingTradeID[:16], tokenID[:20], followerTime.Format("15:04:05"), ct.myAddress[:10])
+
 	// Query Data API for our recent trades
 	trades, err := ct.client.GetActivity(ctx, api.TradeQuery{
 		User:  ct.myAddress,
@@ -1770,6 +1780,8 @@ func (ct *CopyTrader) fetchAndUpdateTxHash(followingTradeID, tokenID string, fol
 		log.Printf("[CopyTrader] Failed to fetch trades for tx hash lookup: %v", err)
 		return
 	}
+
+	log.Printf("[CopyTrader] Got %d trades from Data API for tx hash lookup", len(trades))
 
 	// Find matching trade by token and approximate timestamp (within 2 minutes)
 	for _, trade := range trades {
@@ -1782,6 +1794,8 @@ func (ct *CopyTrader) fetchAndUpdateTxHash(followingTradeID, tokenID string, fol
 		tradeTime := time.Unix(trade.Timestamp, 0)
 		timeDiff := tradeTime.Sub(followerTime)
 		if timeDiff < -2*time.Minute || timeDiff > 2*time.Minute {
+			log.Printf("[CopyTrader] Token match but time mismatch: trade=%s, follower=%s, diff=%s",
+				tradeTime.Format("15:04:05"), followerTime.Format("15:04:05"), timeDiff)
 			continue
 		}
 
@@ -1790,13 +1804,14 @@ func (ct *CopyTrader) fetchAndUpdateTxHash(followingTradeID, tokenID string, fol
 			if err := ct.store.UpdateCopyTradeLogTxHash(ctx, followingTradeID, trade.TransactionHash); err != nil {
 				log.Printf("[CopyTrader] Failed to update tx hash for %s: %v", followingTradeID[:16], err)
 			} else {
-				log.Printf("[CopyTrader] Updated tx hash for %s -> %s", followingTradeID[:16], trade.TransactionHash[:16])
+				log.Printf("[CopyTrader] ✅ Updated tx hash for %s -> %s", followingTradeID[:16], trade.TransactionHash[:16])
 			}
 			return
 		}
 	}
 
-	log.Printf("[CopyTrader] No matching trade found for tx hash lookup (followingTradeID=%s)", followingTradeID[:16])
+	log.Printf("[CopyTrader] ❌ No matching trade found for tx hash lookup (followingTradeID=%s, tokenID=%s)",
+		followingTradeID[:16], tokenID[:20])
 }
 
 // GetStats returns copy trading statistics
