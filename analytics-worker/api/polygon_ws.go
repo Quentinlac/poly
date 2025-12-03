@@ -17,11 +17,13 @@ import (
 
 const (
 	// Polygon WebSocket RPC endpoints (public)
-	polygonWSURL        = "wss://polygon-bor-rpc.publicnode.com"
-	polygonWSURLBackup  = "wss://polygon.drpc.org"
+	polygonWSURL       = "wss://polygon-bor-rpc.publicnode.com"
+	polygonWSURLBackup = "wss://polygon.drpc.org"
 
-	// CTF Exchange contract address on Polygon
-	CTFExchangeAddress = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+	// CTF Exchange contract addresses on Polygon
+	// Both contracts emit OrderFilled events - must monitor both for complete coverage
+	CTFExchangeAddress     = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // Standard CTF Exchange
+	NegRiskCTFExchange     = "0xC5d563A36AE78145C45a50134d48A1215220f80a" // NegRisk CTF Exchange (used by NegRiskAdapter)
 
 	// OrderFilled event signature: OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)
 	// keccak256("OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)")
@@ -118,7 +120,7 @@ func (c *PolygonWSClient) Start(ctx context.Context) error {
 	c.running = true
 	go c.readLoop(ctx)
 
-	log.Printf("[PolygonWS] Started - monitoring CTF Exchange at %s", CTFExchangeAddress)
+	log.Printf("[PolygonWS] Started - monitoring CTF Exchange at %s and NegRisk at %s", CTFExchangeAddress, NegRiskCTFExchange)
 	return nil
 }
 
@@ -195,14 +197,15 @@ func (c *PolygonWSClient) subscribe() error {
 		return fmt.Errorf("not connected")
 	}
 
-	// Subscribe to logs from CTF Exchange with OrderFilled topic
+	// Subscribe to logs from BOTH CTF Exchange contracts with OrderFilled topic
+	// This ensures we catch all trades regardless of which contract processes them
 	subMsg := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "eth_subscribe",
 		"params": []interface{}{
 			"logs",
 			map[string]interface{}{
-				"address": CTFExchangeAddress,
+				"address": []string{CTFExchangeAddress, NegRiskCTFExchange},
 				"topics":  []string{OrderFilledTopic},
 			},
 		},

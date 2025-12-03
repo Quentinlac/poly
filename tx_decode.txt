@@ -1,0 +1,348 @@
+================================================================================
+COMPLETE TX DECODE
+================================================================================
+TX Hash: 0x5a56cb8b9ceca03b4dae7fab7d674a18a95700f2a6b51651313fa4d5d426d642
+From: 0x5b6e4ef2952398983ccee7e1efa0ff0d3cf7b12a
+To: 0xe3f18acc55091e2c48d883fc8c8413319d4ab7b0
+Input Length: 4298 chars (2148 bytes)
+
+Function Selector: 0x2287e350
+
+Data bytes length: 2144
+
+================================================================================
+ABI HEADER WORDS (fillOrders)
+================================================================================
+Word 0 (offset to orders[]):    224 (0xe0)
+Word 1 (offset to fillAmounts[]): 768 (0x300)
+Word 2 (takerFillAmountUsdc):   20000000 = 20.000000 USDC
+Word 3 (takerFillAmountShares): 12000000 = 12.000000 SHARES (TOTAL)
+
+================================================================================
+fillAmounts[] ARRAY (from Word 1 offset)
+================================================================================
+Array length: 2
+
+  fillAmounts[0] = 64 = 0.000064 SHARES
+  fillAmounts[1] = 608 = 0.000608 SHARES
+
+SUM of fillAmounts[] = 0.000672 SHARES
+Word 3 (total)       = 12.000000 SHARES
+Match: False
+
+================================================================================
+orders[] ARRAY (from Word 0 offset)
+================================================================================
+Number of orders: 660553991
+
+Order offsets: [925108101349250037040075273185544626729739983424, 607270455198809597287008376823095580354080489712, 256, 68922602220537972017850526410493309568265569031145995144948303833113557427141, 20000256]...
+
+--- Order 2 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[2]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 6 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[6]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 7 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[7]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 8 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[8]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 9 ---
+  maker:        0x5ef2f1c4c97a183e48c2d3c2657577d9f53ff000
+  signer:       0x0000000000000000000000000000000000000098
+  taker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  side:         BUY
+  makerAmount:  3072.000000
+  takerAmount:  0.000000
+  fillAmount[9]: 0.000000 SHARES
+  fee_bps:      256
+
+--- Order 10 ---
+  maker:        0x5ef2f1c4c97a183e48c2d3c2657577d9f53ff000
+  signer:       0x0000000000000000000000000000000000000098
+  taker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  side:         BUY
+  makerAmount:  3072.000000
+  takerAmount:  0.000000
+  fillAmount[10]: 0.000000 SHARES
+  fee_bps:      256
+
+--- Order 11 ---
+  maker:        0x375cac4588a53f544bea6cce26170770ac00337f
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x0000000000000000000000000000000000000002
+  side:         SELL
+  makerAmount:  0.000608
+  takerAmount:  298.561445
+  fillAmount[11]: 0.000000 SHARES
+  fee_bps:      0
+
+--- Order 12 ---
+  maker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  signer:       0x00000000000000000000000000000001312d0000
+  taker:        0x00000000000000000000000000000000b71b0000
+  side:         SELL
+  makerAmount:  0.000000
+  takerAmount:  0.000000
+  fillAmount[12]: 0.000000 SHARES
+  fee_bps:      106496
+
+--- Order 16 ---
+  maker:        0xf2f1c4c97a183e48c2d3c2657577d9f53ff00000
+  signer:       0x0000000000000000000000000000000000009860
+  taker:        0xf9c24fa83ff676e8b04cfeb0f17067e762c50000
+  side:         BUY
+  makerAmount:  786432.000000
+  takerAmount:  0.000000
+  fillAmount[16]: 0.000000 SHARES
+  fee_bps:      65536
+
+--- Order 17 ---
+  maker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  signer:       0x0000000000000000000000000000000001312d00
+  taker:        0x0000000000000000000000000000000000b71b00
+  side:         SELL
+  makerAmount:  0.000000
+  takerAmount:  0.000000
+  fillAmount[17]: 0.000000 SHARES
+  fee_bps:      416
+
+--- Order 18 <<<< TARGET ---
+  maker:        0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  signer:       0xa801c456d654454b285b3a7d413e12b74838d045
+  taker:        0x0000000000000000000000000000000000000000
+  side:         BUY
+  makerAmount:  7.800000
+  takerAmount:  13.000000
+  fillAmount[18]: 0.000000 SHARES
+  fee_bps:      0
+
+--- Order 22 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[22]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 27 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[27]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 28 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[28]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 29 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[29]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 30 ---
+  maker:        0x5ef2f1c4c97a183e48c2d3c2657577d9f53ff000
+  signer:       0x0000000000000000000000000000000000000098
+  taker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  side:         BUY
+  makerAmount:  3072.000000
+  takerAmount:  0.000000
+  fillAmount[30]: 0.000000 SHARES
+  fee_bps:      256
+
+--- Order 31 ---
+  maker:        0x375cac4588a53f544bea6cce26170770ac00337f
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x0000000000000000000000000000000000000002
+  side:         SELL
+  makerAmount:  0.000608
+  takerAmount:  298.561445
+  fillAmount[31]: 0.000000 SHARES
+  fee_bps:      0
+
+--- Order 32 ---
+  maker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  signer:       0x00000000000000000000000000000001312d0000
+  taker:        0x00000000000000000000000000000000b71b0000
+  side:         SELL
+  makerAmount:  0.000000
+  takerAmount:  0.000000
+  fillAmount[32]: 0.000000 SHARES
+  fee_bps:      106496
+
+--- Order 39 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[39]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 43 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[43]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 44 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[44]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 45 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[45]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 46 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[46]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 47 ---
+  maker:        0xf2f1c4c97a183e48c2d3c2657577d9f53ff00000
+  signer:       0x0000000000000000000000000000000000009860
+  taker:        0xf9c24fa83ff676e8b04cfeb0f17067e762c50000
+  side:         BUY
+  makerAmount:  786432.000000
+  takerAmount:  0.000000
+  fillAmount[47]: 0.000000 SHARES
+  fee_bps:      65536
+
+--- Order 48 ---
+  maker:        0x375cac4588a53f544bea6cce26170770ac00337f
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x0000000000000000000000000000000000000002
+  side:         SELL
+  makerAmount:  0.000608
+  takerAmount:  298.561445
+  fillAmount[48]: 0.000000 SHARES
+  fee_bps:      0
+
+--- Order 49 ---
+  maker:        0xc2f9c24fa83ff676e8b04cfeb0f17067e762c500
+  signer:       0x00000000000000000000000000000001312d0000
+  taker:        0x00000000000000000000000000000000b71b0000
+  side:         SELL
+  makerAmount:  0.000000
+  takerAmount:  0.000000
+  fillAmount[49]: 0.000000 SHARES
+  fee_bps:      106496
+
+--- Order 53 ---
+  maker:        0xf2f1c4c97a183e48c2d3c2657577d9f53ff00000
+  signer:       0x0000000000000000000000000000000000009860
+  taker:        0xf9c24fa83ff676e8b04cfeb0f17067e762c50000
+  side:         BUY
+  makerAmount:  786432.000000
+  takerAmount:  0.000000
+  fillAmount[53]: 0.000000 SHARES
+  fee_bps:      65536
+
+--- Order 56 ---
+  maker:        0xf2f1c4c97a183e48c2d3c2657577d9f53ff00000
+  signer:       0x0000000000000000000000000000000000009860
+  taker:        0xf9c24fa83ff676e8b04cfeb0f17067e762c50000
+  side:         BUY
+  makerAmount:  786432.000000
+  takerAmount:  0.000000
+  fillAmount[56]: 0.000000 SHARES
+  fee_bps:      65536
+
+--- Order 57 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[57]: 0.000000 SHARES
+  fee_bps:      1
+
+--- Order 58 ---
+  maker:        0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  signer:       0x0000000000000000000000000000000000000000
+  taker:        0x95c2f9c24fa83ff676e8b04cfeb0f17067e762c5
+  side:         SELL
+  makerAmount:  12.000000
+  takerAmount:  0.000000
+  fillAmount[58]: 0.000000 SHARES
+  fee_bps:      1
+
+================================================================================
+SUMMARY
+================================================================================
+Target wallet: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+Target order index: 18
+Target's fillAmount: 0.000000 SHARES
+
+Word 3 (WRONG - total): 12.000000
+fillAmounts[18] (CORRECT): 0.000000

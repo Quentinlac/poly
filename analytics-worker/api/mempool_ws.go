@@ -39,7 +39,7 @@ var polymarketContracts = map[string]string{
 // MempoolTradeEvent represents a pending trade detected in mempool
 type MempoolTradeEvent struct {
 	TxHash       string
-	From         string    // User's proxy wallet address
+	From         string    // User's proxy wallet address (the followed user)
 	To           string    // Polymarket contract
 	ContractName string    // "CTFExchange", "NegRiskCTFExchange", or "NegRiskAdapter"
 	Input        string    // Encoded function call
@@ -55,6 +55,28 @@ type MempoolTradeEvent struct {
 	TakerAmount  *big.Int
 	Size         float64 // Decoded size
 	Price        float64 // Decoded price
+	Role         string  // "MAKER" or "TAKER" - indicates if user is maker or taker in the order
+
+	// Additional decoded fields for analysis
+	TxSender       string   // Who sent the TX (the relayer/operator, NOT the trader)
+	MakerAddress   string   // Maker address from Order struct
+	TakerAddress   string   // Taker address from Order struct (often 0x0 for open orders)
+	SignerAddress  string   // Who signed the order (may differ from maker for proxy wallets)
+	Expiration     uint64   // Order expiration timestamp
+	OrderNonce     *big.Int // Order nonce (sequence number)
+	FeeRateBps     uint64   // Fee rate in basis points
+	FillAmount     *big.Int // Actual fill amount (may be less than full order)
+	OrderCount     int      // Number of orders in multi-fill TX
+	FunctionSig    string   // Function signature (e.g., "fillOrders", "matchOrders")
+	InputDataLen   int      // Length of input data in bytes
+	SignatureType  uint8    // 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+	SaltHex        string   // Salt as hex string (unique order ID)
+
+	// TX-level fields
+	Gas            uint64   // Gas limit for this TX
+	MaxFeePerGas   *big.Int // EIP-1559 max fee per gas (nil if legacy TX)
+	MaxPriorityFee *big.Int // EIP-1559 max priority fee (nil if legacy TX)
+	TxValue        *big.Int // TX value (should be 0 for trades)
 }
 
 // MempoolTradeHandler is called when a pending trade is detected from a followed user
@@ -406,10 +428,34 @@ func (c *MempoolWSClient) handleMessage(ctx context.Context, data []byte) {
 	go c.checkTransaction(ctx, txHash)
 }
 
-// extractMakerAddresses extracts maker/signer addresses from Polymarket order input data
+// AddressWithRole contains an address and its role in the Order struct
+type AddressWithRole struct {
+	Address string
+	Role    string // "MAKER" or "TAKER"
+}
+
+// extractMakerAddresses extracts maker/signer/taker addresses from Polymarket order input data
 // Order struct fields (each 32 bytes):
 // 0: salt, 1: maker, 2: signer, 3: taker, 4: tokenId, 5: makerAmount, 6: takerAmount...
+// Returns addresses with their role (MAKER or TAKER) in the order
 func extractMakerAddresses(input string) []string {
+	results := extractAddressesWithRole(input)
+	addresses := make([]string, 0, len(results))
+	for _, r := range results {
+		addresses = append(addresses, r.Address)
+	}
+	return addresses
+}
+
+// extractAddressesWithRole extracts addresses and their role from order calldata
+// The Order struct layout is:
+//   - Offset 0x00: salt (32 bytes)
+//   - Offset 0x20: maker (32 bytes) <-- MAKER address
+//   - Offset 0x40: signer (32 bytes)
+//   - Offset 0x60: taker (32 bytes) <-- TAKER address
+//   - Offset 0x80: tokenId (32 bytes)
+//   - ...
+func extractAddressesWithRole(input string) []AddressWithRole {
 	if len(input) < 10 {
 		return nil
 	}
@@ -428,52 +474,78 @@ func extractMakerAddresses(input string) []string {
 		return nil
 	}
 
-	var addresses []string
+	var results []AddressWithRole
 	seen := make(map[string]bool)
 
-	// Scan through the data looking for potential addresses
-	// Addresses are 20 bytes, stored in 32-byte fields (12 zero bytes + 20 address bytes)
-	// Order struct: salt(32), maker(32), signer(32), taker(32), tokenId(32)...
-	// We scan at 32-byte boundaries looking for address patterns
+	// Order struct size is approximately 13-14 * 32 bytes = 416-448 bytes
+	// We look for Order structs by scanning for valid address patterns
+	// at maker (offset +0x20) and taker (offset +0x60) positions
 
-	for offset := 0; offset+32 <= len(dataBytes); offset += 32 {
-		// Check if this looks like an address field (first 12 bytes should be zeros)
-		isAddressField := true
-		for i := 0; i < 12; i++ {
-			if dataBytes[offset+i] != 0 {
-				isAddressField = false
-				break
+	// First pass: find potential Order struct starts by looking for salt patterns
+	// Salt is typically a large random number, followed by maker address
+	for orderStart := 0; orderStart+448 <= len(dataBytes); orderStart += 32 {
+		// Check if this could be the start of an Order struct
+		// Try to extract maker at orderStart+32 and taker at orderStart+96
+
+		makerOffset := orderStart + 32  // 0x20
+		takerOffset := orderStart + 96  // 0x60
+
+		// Check maker field
+		if makerOffset+32 <= len(dataBytes) {
+			if isValidAddressField(dataBytes[makerOffset : makerOffset+32]) {
+				addrBytes := dataBytes[makerOffset+12 : makerOffset+32]
+				addr := fmt.Sprintf("0x%x", addrBytes)
+				key := addr + ":MAKER"
+				if !seen[key] {
+					seen[key] = true
+					results = append(results, AddressWithRole{Address: addr, Role: "MAKER"})
+				}
 			}
 		}
-		if !isAddressField {
-			continue
-		}
 
-		// Extract the 20-byte address
-		addrBytes := dataBytes[offset+12 : offset+32]
-
-		// Skip zero addresses and small values that aren't real addresses
-		// Real addresses should have non-zero bytes in the first ~10 bytes
-		// (addresses like 0x05c1... have non-zero early bytes)
-		nonZeroCount := 0
-		for i := 0; i < 10; i++ {
-			if addrBytes[i] != 0 {
-				nonZeroCount++
+		// Check taker field
+		if takerOffset+32 <= len(dataBytes) {
+			if isValidAddressField(dataBytes[takerOffset : takerOffset+32]) {
+				addrBytes := dataBytes[takerOffset+12 : takerOffset+32]
+				addr := fmt.Sprintf("0x%x", addrBytes)
+				key := addr + ":TAKER"
+				if !seen[key] {
+					seen[key] = true
+					results = append(results, AddressWithRole{Address: addr, Role: "TAKER"})
+				}
 			}
-		}
-		// Require at least 3 non-zero bytes in first 10 bytes to be a real address
-		if nonZeroCount < 3 {
-			continue
-		}
-
-		addr := fmt.Sprintf("0x%x", addrBytes)
-		if !seen[addr] {
-			seen[addr] = true
-			addresses = append(addresses, addr)
 		}
 	}
 
-	return addresses
+	return results
+}
+
+// isValidAddressField checks if a 32-byte field contains a valid address
+// (first 12 bytes should be zeros, remaining 20 bytes should look like an address)
+func isValidAddressField(field []byte) bool {
+	if len(field) != 32 {
+		return false
+	}
+
+	// First 12 bytes should be zeros
+	for i := 0; i < 12; i++ {
+		if field[i] != 0 {
+			return false
+		}
+	}
+
+	// Check if the address part looks real
+	// Real addresses should have non-zero bytes distributed across the address
+	addrBytes := field[12:32]
+	nonZeroCount := 0
+	for i := 0; i < 10; i++ {
+		if addrBytes[i] != 0 {
+			nonZeroCount++
+		}
+	}
+
+	// Require at least 3 non-zero bytes in first 10 bytes to be a real address
+	return nonZeroCount >= 3
 }
 
 func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
@@ -511,33 +583,38 @@ func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 	}
 	c.mempoolCacheMu.Unlock()
 
-	// Extract maker/signer addresses from the order input data
+	// Extract maker/signer/taker addresses from the order input data with their roles
 	// The whale's address is INSIDE the order struct, not tx.From (which is the operator)
-	makerAddrs := extractMakerAddresses(tx.Input)
+	addressesWithRoles := extractAddressesWithRole(tx.Input)
 
-	// Check if any maker/signer is a followed address
-	var followedMaker string
+	// Check if any address is a followed user and get their role
+	var followedAddr string
+	var userRole string
 	c.followedAddrsMu.RLock()
-	for _, addr := range makerAddrs {
-		if c.followedAddrs[strings.ToLower(addr)] {
-			followedMaker = addr
+	for _, ar := range addressesWithRoles {
+		if c.followedAddrs[strings.ToLower(ar.Address)] {
+			followedAddr = ar.Address
+			userRole = ar.Role
 			break
 		}
 	}
 	c.followedAddrsMu.RUnlock()
 
 	// If no followed address found, still return - we already cached the TX
-	if followedMaker == "" {
+	if followedAddr == "" {
 		return
 	}
 
-	// Use the followed maker as the "from" address for the event
-	fromAddr := strings.ToLower(followedMaker)
+	// Use the followed address as the "from" address for the event
+	fromAddr := strings.ToLower(followedAddr)
 
 	// We found a pending trade from a followed user!
 	c.statsMu.Lock()
 	c.tradesDetected++
 	c.statsMu.Unlock()
+
+	// Use DecodeTradeInputForTarget for comprehensive decoding with per-order fill amounts
+	decodedOrder, functionSig, orderCount := DecodeTradeInputForTarget(tx.Input, followedAddr)
 
 	event := MempoolTradeEvent{
 		TxHash:       txHash,
@@ -548,49 +625,83 @@ func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 		DetectedAt:   time.Now(),
 		GasPrice:     tx.GasPrice,
 		Nonce:        tx.Nonce,
+		Role:         userRole, // "MAKER" or "TAKER" based on position in Order struct
+
+		// Additional analysis fields
+		TxSender:       tx.From,                 // The actual TX sender (relayer/operator)
+		FunctionSig:    functionSig,             // e.g., "fillOrders", "matchOrders"
+		InputDataLen:   (len(tx.Input) - 2) / 2, // Length in bytes (subtract 0x prefix, divide by 2)
+		OrderCount:     orderCount,              // Number of orders in this TX
+		Gas:            tx.Gas,                  // Gas limit
+		MaxFeePerGas:   tx.MaxFeePerGas,         // EIP-1559 max fee (nil if legacy)
+		MaxPriorityFee: tx.MaxPriorityFee,       // EIP-1559 priority fee (nil if legacy)
+		TxValue:        tx.Value,                // TX value (should be 0)
 	}
 
-	// Try to decode the trade details from input
-	if decoded, side, tokenID, makerAmt, takerAmt := DecodeTradeInput(tx.Input); decoded {
+	// Populate fields from decoded order
+	if decodedOrder.Decoded {
 		event.Decoded = true
-		event.Side = side
-		event.TokenID = tokenID
-		event.MakerAmount = makerAmt
-		event.TakerAmount = takerAmt
+		event.Side = decodedOrder.Side
+		event.TokenID = decodedOrder.TokenID
+		event.MakerAmount = decodedOrder.MakerAmount
+		event.TakerAmount = decodedOrder.TakerAmount
+		event.MakerAddress = decodedOrder.MakerAddress
+		event.TakerAddress = decodedOrder.TakerAddress
+		event.SignerAddress = decodedOrder.SignerAddress
+		event.Expiration = decodedOrder.Expiration
+		event.OrderNonce = decodedOrder.OrderNonce
+		event.FeeRateBps = decodedOrder.FeeRateBps
+		event.FillAmount = decodedOrder.FillAmount
+		event.SignatureType = decodedOrder.SignatureType
+		if decodedOrder.Salt != nil {
+			event.SaltHex = fmt.Sprintf("0x%x", decodedOrder.Salt)
+		}
 
 		// Calculate size and price
-		// For BUY: makerAmount=USDC paid, takerAmount=tokens received
-		// For SELL: makerAmount=tokens sold, takerAmount=USDC received
-		if makerAmt != nil && takerAmt != nil {
+		// FillAmount is now the per-order fill from fillAmounts[orderIndex], NOT Word 3 (total)
+		// For price calculation, we use the Order's makerAmount/takerAmount ratio
+		makerAmt := decodedOrder.MakerAmount
+		takerAmt := decodedOrder.TakerAmount
+
+		// Size comes from FillAmount (takerFillAmountShares), NOT from Order amounts
+		if decodedOrder.FillAmount != nil && decodedOrder.FillAmount.Sign() > 0 {
+			// FillAmount is in shares (with 6 decimals like USDC)
+			fillF := new(big.Float).SetInt(decodedOrder.FillAmount)
+			sizeF := new(big.Float).Quo(fillF, big.NewFloat(1e6))
+			event.Size, _ = sizeF.Float64()
+		}
+
+		// Price comes from Order's maker/taker amounts ratio
+		if makerAmt != nil && takerAmt != nil && makerAmt.Sign() > 0 && takerAmt.Sign() > 0 {
 			makerF := new(big.Float).SetInt(makerAmt)
 			takerF := new(big.Float).SetInt(takerAmt)
 
-			if side == "BUY" {
-				// Size = tokens received (takerAmount / 1e6)
-				sizeF := new(big.Float).Quo(takerF, big.NewFloat(1e6))
-				event.Size, _ = sizeF.Float64()
-				// Price = USDC paid / tokens received
-				if takerAmt.Sign() > 0 {
-					priceF := new(big.Float).Quo(makerF, takerF)
-					event.Price, _ = priceF.Float64()
-				}
+			if decodedOrder.Side == "BUY" {
+				// Price = USDC paid / tokens received = makerAmount / takerAmount
+				priceF := new(big.Float).Quo(makerF, takerF)
+				event.Price, _ = priceF.Float64()
 			} else {
-				// SELL: Size = tokens sold (makerAmount / 1e6)
-				sizeF := new(big.Float).Quo(makerF, big.NewFloat(1e6))
-				event.Size, _ = sizeF.Float64()
-				// Price = USDC received / tokens sold
-				if makerAmt.Sign() > 0 {
-					priceF := new(big.Float).Quo(takerF, makerF)
-					event.Price, _ = priceF.Float64()
-				}
+				// SELL: Price = USDC received / tokens sold = takerAmount / makerAmount
+				priceF := new(big.Float).Quo(takerF, makerF)
+				event.Price, _ = priceF.Float64()
 			}
 		}
 
-		log.Printf("[MempoolWS] 🚀 PENDING TRADE DECODED: from=%s side=%s size=%.4f price=%.4f token=%s tx=%s",
-			fromAddr[:16], side, event.Size, event.Price, tokenID[:16], txHash[:16])
+		// Log with all decoded details
+		expirationStr := "N/A"
+		if event.Expiration > 0 {
+			expirationStr = time.Unix(int64(event.Expiration), 0).Format("15:04:05")
+		}
+		log.Printf("[MempoolWS] 🚀 PENDING TRADE DECODED: from=%s role=%s side=%s size=%.4f price=%.4f token=%s tx=%s func=%s orders=%d maker=%s taker=%s exp=%s fee=%dbps",
+			fromAddr[:16], userRole, decodedOrder.Side, event.Size, event.Price,
+			decodedOrder.TokenID[:min(16, len(decodedOrder.TokenID))], txHash[:16],
+			functionSig, orderCount,
+			event.MakerAddress[:min(16, len(event.MakerAddress))],
+			event.TakerAddress[:min(16, len(event.TakerAddress))],
+			expirationStr, event.FeeRateBps)
 	} else {
-		log.Printf("[MempoolWS] 🚀 PENDING TRADE DETECTED (not decoded): from=%s contract=%s tx=%s",
-			fromAddr[:16], contractName, txHash[:16])
+		log.Printf("[MempoolWS] 🚀 PENDING TRADE DETECTED (not decoded): from=%s role=%s contract=%s tx=%s func=%s inputLen=%d",
+			fromAddr[:16], userRole, contractName, txHash[:16], functionSig, event.InputDataLen)
 	}
 
 	if c.onTrade != nil {
@@ -599,12 +710,15 @@ func (c *MempoolWSClient) checkTransaction(ctx context.Context, txHash string) {
 }
 
 type rpcTransaction struct {
-	From     string   `json:"from"`
-	To       string   `json:"to"`
-	Input    string   `json:"input"`
-	Value    string   `json:"value"`
-	GasPrice *big.Int `json:"gasPrice"`
-	Nonce    uint64   `json:"nonce"`
+	From           string   `json:"from"`
+	To             string   `json:"to"`
+	Input          string   `json:"input"`
+	Value          *big.Int `json:"value"`
+	GasPrice       *big.Int `json:"gasPrice"`
+	Nonce          uint64   `json:"nonce"`
+	Gas            uint64   `json:"gas"`
+	MaxFeePerGas   *big.Int `json:"maxFeePerGas"`   // EIP-1559
+	MaxPriorityFee *big.Int `json:"maxPriorityFeePerGas"` // EIP-1559
 }
 
 func (c *MempoolWSClient) getTransaction(txHash string) (*rpcTransaction, error) {
@@ -634,12 +748,15 @@ func (c *MempoolWSClient) getTransaction(txHash string) (*rpcTransaction, error)
 
 	var result struct {
 		Result *struct {
-			From     string `json:"from"`
-			To       string `json:"to"`
-			Input    string `json:"input"`
-			Value    string `json:"value"`
-			GasPrice string `json:"gasPrice"`
-			Nonce    string `json:"nonce"`
+			From                 string `json:"from"`
+			To                   string `json:"to"`
+			Input                string `json:"input"`
+			Value                string `json:"value"`
+			GasPrice             string `json:"gasPrice"`
+			Nonce                string `json:"nonce"`
+			Gas                  string `json:"gas"`
+			MaxFeePerGas         string `json:"maxFeePerGas"`         // EIP-1559
+			MaxPriorityFeePerGas string `json:"maxPriorityFeePerGas"` // EIP-1559
 		} `json:"result"`
 		Error *struct {
 			Message string `json:"message"`
@@ -677,7 +794,407 @@ func (c *MempoolWSClient) getTransaction(txHash string) (*rpcTransaction, error)
 		tx.Nonce = nonceInt.Uint64()
 	}
 
+	// Parse gas limit
+	if result.Result.Gas != "" {
+		gasInt := new(big.Int)
+		gasInt.SetString(strings.TrimPrefix(result.Result.Gas, "0x"), 16)
+		tx.Gas = gasInt.Uint64()
+	}
+
+	// Parse value
+	if result.Result.Value != "" {
+		tx.Value = new(big.Int)
+		tx.Value.SetString(strings.TrimPrefix(result.Result.Value, "0x"), 16)
+	}
+
+	// Parse EIP-1559 fields
+	if result.Result.MaxFeePerGas != "" {
+		tx.MaxFeePerGas = new(big.Int)
+		tx.MaxFeePerGas.SetString(strings.TrimPrefix(result.Result.MaxFeePerGas, "0x"), 16)
+	}
+	if result.Result.MaxPriorityFeePerGas != "" {
+		tx.MaxPriorityFee = new(big.Int)
+		tx.MaxPriorityFee.SetString(strings.TrimPrefix(result.Result.MaxPriorityFeePerGas, "0x"), 16)
+	}
+
 	return tx, nil
+}
+
+// DecodedOrder contains all decoded fields from an Order struct
+type DecodedOrder struct {
+	Decoded       bool
+	Side          string   // "BUY" or "SELL"
+	TokenID       string   // Market token ID
+	MakerAmount   *big.Int // Amount maker gives
+	TakerAmount   *big.Int // Amount taker gives
+	FillAmount    *big.Int // Actual fill amount for THIS specific order (from fillAmounts array)
+	TotalFill     *big.Int // Total fill across all orders (Word 3 - for reference only)
+	OrderIndex    int      // Index of this order in the orders array
+	MakerAddress  string   // Maker address
+	TakerAddress  string   // Taker address (often 0x0 for open orders)
+	SignerAddress string   // Who signed the order
+	Expiration    uint64   // Order expiration timestamp
+	OrderNonce    *big.Int // Order nonce
+	FeeRateBps    uint64   // Fee rate in basis points
+	Salt          *big.Int // Unique order identifier
+	SignatureType uint8    // 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+}
+
+// Known function selectors
+var functionSelectors = map[string]string{
+	"2287e350": "fillOrders",      // NegRiskAdapter
+	"e20b2304": "fillOrder",       // CTFExchange single order
+	"a4a6c5a5": "matchOrders",     // Match two orders
+	"d798eff6": "fillOrdersNeg",   // NegRisk variant
+	"4f7e43df": "cancelOrder",     // Cancel order
+	"b93ea7ad": "cancelOrders",    // Cancel multiple orders
+}
+
+// DecodeTradeInputFull attempts to decode all available fields from transaction input
+// Now properly extracts per-order fill amounts instead of total fill
+func DecodeTradeInputFull(input string) (order DecodedOrder, functionSig string, orderCount int) {
+	return DecodeTradeInputForTarget(input, "")
+}
+
+// DecodeTradeInputForTarget decodes transaction input and finds the specific order for target address
+// Returns the order with correct per-order fill amount (not total fill)
+// Properly parses ABI-encoded arrays at their correct offsets
+func DecodeTradeInputForTarget(input string, targetAddress string) (order DecodedOrder, functionSig string, orderCount int) {
+	if len(input) < 10 {
+		return DecodedOrder{}, "", 0
+	}
+
+	data := strings.TrimPrefix(input, "0x")
+	if len(data) < 8 {
+		return DecodedOrder{}, "", 0
+	}
+
+	selector := data[:8]
+	functionSig = functionSelectors[selector]
+	if functionSig == "" {
+		functionSig = "unknown_" + selector
+	}
+
+	// Decode hex to bytes (skip function selector)
+	dataBytes, err := hex.DecodeString(data[8:])
+	if err != nil || len(dataBytes) < 256 {
+		return DecodedOrder{}, functionSig, 0
+	}
+
+	// Normalize target address for comparison
+	targetClean := strings.ToLower(strings.TrimPrefix(targetAddress, "0x"))
+
+	// Order struct layout (each field is 32 bytes = 384 bytes total for 12 fields):
+	// 0x00: salt, 0x20: maker, 0x40: signer, 0x60: taker, 0x80: tokenId
+	// 0xA0: makerAmount, 0xC0: takerAmount, 0xE0: expiration, 0x100: nonce
+	// 0x120: feeRateBps, 0x140: side, 0x160: signatureType
+	const orderStructSize = 384
+
+	// Helper to parse a single order at a given byte offset
+	parseOrderAt := func(offset int) (makerAddr, signerAddr, takerAddr, tokenID string, makerAmt, takerAmt *big.Int, side string, valid bool) {
+		if offset+orderStructSize > len(dataBytes) {
+			return
+		}
+		// Validate maker address field
+		makerField := dataBytes[offset+32 : offset+64]
+		if !isValidAddressField(makerField) {
+			return
+		}
+		makerAddr = fmt.Sprintf("%x", dataBytes[offset+44:offset+64])
+		signerAddr = fmt.Sprintf("%x", dataBytes[offset+76:offset+96])
+		takerAddr = fmt.Sprintf("%x", dataBytes[offset+108:offset+128])
+		tokenID = new(big.Int).SetBytes(dataBytes[offset+128 : offset+160]).String()
+		makerAmt = new(big.Int).SetBytes(dataBytes[offset+160 : offset+192])
+		takerAmt = new(big.Int).SetBytes(dataBytes[offset+192 : offset+224])
+		sideValue := dataBytes[offset+320+31]
+		if sideValue == 0 {
+			side = "BUY"
+		} else {
+			side = "SELL"
+		}
+		valid = true
+		return
+	}
+
+	if selector == "2287e350" { // fillOrders
+		// fillOrders ABI:
+		// Word 0: offset to orders[]
+		// Word 1: offset to fillAmounts[]
+		// Word 2: takerFillAmountUsdc (TOTAL)
+		// Word 3: takerFillAmountShares (TOTAL)
+		if len(dataBytes) < 128 {
+			return DecodedOrder{}, functionSig, 0
+		}
+
+		ordersOffset := int(new(big.Int).SetBytes(dataBytes[0:32]).Int64())
+		fillAmountsOffset := int(new(big.Int).SetBytes(dataBytes[32:64]).Int64())
+		totalFill := new(big.Int).SetBytes(dataBytes[96:128])
+
+		// Parse orders array
+		if ordersOffset+32 > len(dataBytes) {
+			return DecodedOrder{}, functionSig, 0
+		}
+		ordersLen := int(new(big.Int).SetBytes(dataBytes[ordersOffset : ordersOffset+32]).Int64())
+		if ordersLen <= 0 || ordersLen > 50 {
+			return DecodedOrder{}, functionSig, 0
+		}
+		orderCount = ordersLen
+
+		// Parse fillAmounts array
+		var fillAmounts []*big.Int
+		if fillAmountsOffset+32 <= len(dataBytes) {
+			fillLen := int(new(big.Int).SetBytes(dataBytes[fillAmountsOffset : fillAmountsOffset+32]).Int64())
+			for i := 0; i < fillLen && i < 50; i++ {
+				elemOff := fillAmountsOffset + 32 + i*32
+				if elemOff+32 <= len(dataBytes) {
+					fillAmounts = append(fillAmounts, new(big.Int).SetBytes(dataBytes[elemOff:elemOff+32]))
+				}
+			}
+		}
+
+		// Find target's order in the orders array
+		for i := 0; i < ordersLen; i++ {
+			orderStart := ordersOffset + 32 + i*orderStructSize
+			makerAddr, signerAddr, takerAddr, tokenID, makerAmt, takerAmt, side, valid := parseOrderAt(orderStart)
+			if !valid {
+				continue
+			}
+
+			// Check if this order matches target
+			if targetClean == "" || strings.Contains(makerAddr, targetClean) || strings.Contains(signerAddr, targetClean) || strings.Contains(takerAddr, targetClean) {
+				order.Decoded = true
+				order.OrderIndex = i
+				order.TokenID = tokenID
+				order.MakerAmount = makerAmt
+				order.TakerAmount = takerAmt
+				order.Side = side
+				order.MakerAddress = "0x" + makerAddr
+				order.SignerAddress = "0x" + signerAddr
+				order.TakerAddress = "0x" + takerAddr
+				order.TotalFill = totalFill
+
+				// Get the CORRECT per-order fill amount
+				if i < len(fillAmounts) {
+					order.FillAmount = fillAmounts[i]
+				} else if ordersLen == 1 {
+					order.FillAmount = totalFill
+				}
+				return order, functionSig, orderCount
+			}
+		}
+
+	} else if selector == "a4a6c5a5" { // matchOrders
+		// matchOrders ABI:
+		// Word 0: takerOrder offset
+		// Word 1: makerOrders[] offset
+		// Word 2: takerFillAmount (USDC)
+		// Word 3: takerReceiveAmount (shares - for TAKER only)
+		// Word 4: makerFillAmounts[] offset
+		if len(dataBytes) < 160 {
+			return DecodedOrder{}, functionSig, 0
+		}
+
+		takerOrderOffset := int(new(big.Int).SetBytes(dataBytes[0:32]).Int64())
+		makerOrdersOffset := int(new(big.Int).SetBytes(dataBytes[32:64]).Int64())
+		takerReceiveAmount := new(big.Int).SetBytes(dataBytes[96:128]) // Word 3 - taker's shares
+		makerFillAmountsOffset := int(new(big.Int).SetBytes(dataBytes[128:160]).Int64())
+
+		// Parse makerFillAmounts array
+		var makerFillAmounts []*big.Int
+		if makerFillAmountsOffset+32 <= len(dataBytes) {
+			fillLen := int(new(big.Int).SetBytes(dataBytes[makerFillAmountsOffset : makerFillAmountsOffset+32]).Int64())
+			for i := 0; i < fillLen && i < 50; i++ {
+				elemOff := makerFillAmountsOffset + 32 + i*32
+				if elemOff+32 <= len(dataBytes) {
+					makerFillAmounts = append(makerFillAmounts, new(big.Int).SetBytes(dataBytes[elemOff:elemOff+32]))
+				}
+			}
+		}
+
+		// Check if target is the TAKER
+		if takerOrderOffset+orderStructSize <= len(dataBytes) {
+			makerAddr, signerAddr, takerAddr, tokenID, makerAmt, takerAmt, side, valid := parseOrderAt(takerOrderOffset)
+			if valid && (targetClean == "" || strings.Contains(makerAddr, targetClean) || strings.Contains(signerAddr, targetClean)) {
+				order.Decoded = true
+				order.OrderIndex = -1 // Taker
+				order.TokenID = tokenID
+				order.MakerAmount = makerAmt
+				order.TakerAmount = takerAmt
+				order.Side = side
+				order.MakerAddress = "0x" + makerAddr
+				order.SignerAddress = "0x" + signerAddr
+				order.TakerAddress = "0x" + takerAddr
+				order.FillAmount = takerReceiveAmount // Taker uses Word 3
+				order.TotalFill = takerReceiveAmount
+				orderCount = 1 + len(makerFillAmounts)
+				return order, functionSig, orderCount
+			}
+		}
+
+		// Check if target is in makerOrders[]
+		if makerOrdersOffset+32 <= len(dataBytes) {
+			makersLen := int(new(big.Int).SetBytes(dataBytes[makerOrdersOffset : makerOrdersOffset+32]).Int64())
+			orderCount = 1 + makersLen // 1 taker + N makers
+
+			for i := 0; i < makersLen && i < 50; i++ {
+				orderStart := makerOrdersOffset + 32 + i*orderStructSize
+				makerAddr, signerAddr, takerAddr, tokenID, makerAmt, takerAmt, side, valid := parseOrderAt(orderStart)
+				if !valid {
+					continue
+				}
+
+				if strings.Contains(makerAddr, targetClean) || strings.Contains(signerAddr, targetClean) || strings.Contains(takerAddr, targetClean) {
+					order.Decoded = true
+					order.OrderIndex = i
+					order.TokenID = tokenID
+					order.MakerAmount = makerAmt
+					order.TakerAmount = takerAmt
+					order.Side = side
+					order.MakerAddress = "0x" + makerAddr
+					order.SignerAddress = "0x" + signerAddr
+					order.TakerAddress = "0x" + takerAddr
+					order.TotalFill = takerReceiveAmount
+
+					// Get the CORRECT per-maker fill amount
+					if i < len(makerFillAmounts) {
+						order.FillAmount = makerFillAmounts[i]
+					}
+					return order, functionSig, orderCount
+				}
+			}
+		}
+	}
+
+	// Fallback: use old scanning method for unknown function types
+	return decodeTradeInputLegacy(dataBytes, targetClean, functionSig)
+}
+
+// decodeTradeInputLegacy is the old scanning-based decoder for unknown function types
+func decodeTradeInputLegacy(dataBytes []byte, targetClean, functionSig string) (order DecodedOrder, sig string, orderCount int) {
+	sig = functionSig
+	var totalFill *big.Int
+	if len(dataBytes) >= 128 {
+		totalFill = new(big.Int).SetBytes(dataBytes[96:128])
+	}
+
+	type foundOrder struct {
+		index            int
+		saltOffset       int
+		makerOffset      int
+		signerOffset     int
+		takerOffset      int
+		tokenOffset      int
+		makerAmtOffset   int
+		takerAmtOffset   int
+		expirationOffset int
+		nonceOffset      int
+		feeOffset        int
+		sideOffset       int
+		makerAddr        string
+		signerAddr       string
+		takerAddr        string
+	}
+	var orders []foundOrder
+
+	for offset := 32; offset+384 <= len(dataBytes); offset += 32 {
+		saltOffset := offset
+		makerOffset := offset + 32
+		signerOffset := offset + 64
+		takerOffset := offset + 96
+		tokenOffset := offset + 128
+		makerAmtOffset := offset + 160
+		takerAmtOffset := offset + 192
+		expirationOffset := offset + 224
+		nonceOffset := offset + 256
+		feeOffset := offset + 288
+		sideOffset := offset + 320
+
+		if sideOffset+32 > len(dataBytes) {
+			continue
+		}
+		if !isValidAddressField(dataBytes[makerOffset : makerOffset+32]) {
+			continue
+		}
+		potentialTokenID := new(big.Int).SetBytes(dataBytes[tokenOffset : tokenOffset+32])
+		if potentialTokenID.Sign() == 0 {
+			continue
+		}
+		makerAmt := new(big.Int).SetBytes(dataBytes[makerAmtOffset : makerAmtOffset+32])
+		takerAmt := new(big.Int).SetBytes(dataBytes[takerAmtOffset : takerAmtOffset+32])
+		minAmt := big.NewInt(100_000)
+		maxAmt := big.NewInt(100_000_000_000)
+		if makerAmt.Cmp(minAmt) < 0 || makerAmt.Cmp(maxAmt) > 0 {
+			continue
+		}
+		if takerAmt.Cmp(minAmt) < 0 || takerAmt.Cmp(maxAmt) > 0 {
+			continue
+		}
+		sideValue := dataBytes[sideOffset+31]
+		if sideValue > 1 {
+			continue
+		}
+
+		makerAddr := fmt.Sprintf("%x", dataBytes[makerOffset+12:makerOffset+32])
+		signerAddr := fmt.Sprintf("%x", dataBytes[signerOffset+12:signerOffset+32])
+		takerAddr := fmt.Sprintf("%x", dataBytes[takerOffset+12:takerOffset+32])
+
+		orders = append(orders, foundOrder{
+			index: len(orders), saltOffset: saltOffset, makerOffset: makerOffset, signerOffset: signerOffset,
+			takerOffset: takerOffset, tokenOffset: tokenOffset, makerAmtOffset: makerAmtOffset,
+			takerAmtOffset: takerAmtOffset, expirationOffset: expirationOffset, nonceOffset: nonceOffset,
+			feeOffset: feeOffset, sideOffset: sideOffset, makerAddr: makerAddr, signerAddr: signerAddr, takerAddr: takerAddr,
+		})
+	}
+
+	orderCount = len(orders)
+	if orderCount == 0 {
+		return DecodedOrder{}, sig, 0
+	}
+
+	selectedIdx := 0
+	if targetClean != "" {
+		for _, o := range orders {
+			if strings.Contains(o.makerAddr, targetClean) || strings.Contains(o.signerAddr, targetClean) || strings.Contains(o.takerAddr, targetClean) {
+				selectedIdx = o.index
+				break
+			}
+		}
+	}
+
+	if selectedIdx >= len(orders) {
+		return DecodedOrder{}, sig, orderCount
+	}
+
+	o := orders[selectedIdx]
+	order.Decoded = true
+	order.OrderIndex = selectedIdx
+	order.TokenID = new(big.Int).SetBytes(dataBytes[o.tokenOffset : o.tokenOffset+32]).String()
+	order.MakerAmount = new(big.Int).SetBytes(dataBytes[o.makerAmtOffset : o.makerAmtOffset+32])
+	order.TakerAmount = new(big.Int).SetBytes(dataBytes[o.takerAmtOffset : o.takerAmtOffset+32])
+	order.TotalFill = totalFill
+	order.FillAmount = totalFill // Legacy: use total fill as fallback
+
+	sideValue := dataBytes[o.sideOffset+31]
+	if sideValue == 0 {
+		order.Side = "BUY"
+	} else {
+		order.Side = "SELL"
+	}
+
+	order.MakerAddress = "0x" + o.makerAddr
+	order.SignerAddress = "0x" + o.signerAddr
+	order.TakerAddress = "0x" + o.takerAddr
+	order.Salt = new(big.Int).SetBytes(dataBytes[o.saltOffset : o.saltOffset+32])
+	order.Expiration = new(big.Int).SetBytes(dataBytes[o.expirationOffset : o.expirationOffset+32]).Uint64()
+	order.OrderNonce = new(big.Int).SetBytes(dataBytes[o.nonceOffset : o.nonceOffset+32])
+	order.FeeRateBps = new(big.Int).SetBytes(dataBytes[o.feeOffset : o.feeOffset+32]).Uint64()
+
+	sigTypeOffset := o.sideOffset + 32
+	if sigTypeOffset+32 <= len(dataBytes) {
+		order.SignatureType = dataBytes[sigTypeOffset+31]
+	}
+
+	return order, sig, orderCount
 }
 
 // DecodeTradeInput attempts to decode trade details from transaction input

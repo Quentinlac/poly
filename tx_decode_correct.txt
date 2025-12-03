@@ -1,0 +1,69 @@
+================================================================================
+matchOrders DECODE
+================================================================================
+TX: 0x5a56cb8b9ceca03b4dae7fab7d674a18a95700f2a6b51651313fa4d5d426d642
+
+HEADER:
+  Word 0: takerOrder offset = 224
+  Word 1: makerOrders[] offset = 768
+  Word 2: takerFillAmount = 20.000000 USDC
+  Word 3: takerReceiveAmount = 12.000000 SHARES (TOTAL for taker)
+  Word 4: makerFillAmounts[] offset = 1952
+  Word 5: takerFeeAmount = 0.000000
+  Word 6: makerFeeAmounts[] offset = 2048
+
+================================================================================
+TAKER ORDER (single)
+================================================================================
+  maker:        0xa20b482f97063f4f88ef621c9203e60814399940 
+  signer:       0x6a5ef2f1c4c97a183e48c2d3c2657577d9f53ff0
+  taker:        0x0000000000000000000000000000000000000000
+  tokenId:      68922602220537972017850526410493309568265569031145995144948303833113557426885
+  side:         SELL
+  makerAmount:  20.000000
+  takerAmount:  12.000000
+  fee_bps:      0
+
+================================================================================
+makerFillAmounts[] (at offset 1952)
+================================================================================
+  Array length: 2
+  makerFillAmounts[0] = 7.800000 SHARES
+  makerFillAmounts[1] = 4.200000 SHARES
+  SUM = 12.000000 SHARES
+  (Should match Word 3 = 12.000000)
+
+================================================================================
+makerOrders[] (at offset 768)
+================================================================================
+  Array length: 2
+
+--- Maker Order 0 <<< TARGET ---
+  maker:          0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  signer:         0xa801c456d654454b285b3a7d413e12b74838d045
+  side:           BUY
+  makerAmount:    7.800000
+  takerAmount:    13.000000
+  fee_bps:        0
+  FILL:           7.800000 SHARES
+
+--- Maker Order 1  ---
+  maker:          0xd44e29936409019f93993de8bd603ef6cb1bb15e
+  signer:         0xc8c04a4717da77e8f10c08f88bd836dfa7be8fbd
+  side:           BUY
+  makerAmount:    12.000000
+  takerAmount:    20.000000
+  fee_bps:        0
+  FILL:           4.200000 SHARES
+
+================================================================================
+SUMMARY FOR TARGET
+================================================================================
+Target wallet: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+
+TARGET IS A MAKER (index 0)
+  Target's fill = makerFillAmounts[0] = 7.800000 SHARES
+
+COMPARISON:
+  Word 3 (WRONG if using for makers) = 12.000000
+  Correct fill for target           = 7.800000
