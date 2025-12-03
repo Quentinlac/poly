@@ -951,38 +951,14 @@ func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Si
 		}
 	}
 
-	// Try FOK first with stricter precision (immediate execution)
-	// FOK BUY orders require: maker (USDC) = 2 decimals, taker (tokens) = 4 decimals
-	// We need to adjust size so that size*price rounds cleanly to 2 decimals
-	fokSize := size
-	fokUsdc := fokSize * price
-	// Round USDC to 2 decimals
-	fokUsdcRounded := float64(int(fokUsdc*100+0.5)) / 100
-	// Calculate adjusted size that produces exact 2-decimal USDC
-	if fokUsdcRounded > 0 && price > 0 {
-		fokSize = fokUsdcRounded / price
-		// Round fokSize to 4 decimals (FOK taker amount precision)
-		fokSize = float64(int(fokSize*10000+0.5)) / 10000
-	}
-
-	order, err := c.createSignedOrderFOK(tokenID, side, fokSize, price, negRisk)
+	// Use GTC directly - more reliable than FOK
+	// FOK has stricter validation (5 share minimum on some markets) and same speed
+	// GTC will still match immediately if there's liquidity at our price
+	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
 	if err != nil {
-		log.Printf("[CLOB] FOK order creation failed: %v, trying GTC", err)
-	} else {
-		resp, err := c.postOrder(ctx, order, OrderTypeFOK)
-		if err == nil && resp.Success {
-			log.Printf("[CLOB] FOK order succeeded! (size=%.4f, price=%.4f)", fokSize, price)
-			return resp, nil
-		}
-		log.Printf("[CLOB] FOK failed (err=%v, success=%v), falling back to GTC", err, resp != nil && resp.Success)
+		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
-
-	// FOK failed - try GTC (more flexible, better fill rate)
-	order2, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GTC order: %w", err)
-	}
-	return c.postOrder(ctx, order2, OrderTypeGTC)
+	return c.postOrder(ctx, order, OrderTypeGTC)
 }
 
 // createSignedOrderFOK creates an order with FOK-compatible precision

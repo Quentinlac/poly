@@ -322,11 +322,19 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	d.metrics.BlockchainEvents++
 	d.metricsMu.Unlock()
 
+	// Check if we already processed this transaction via mempool
+	// Mempool uses TxHash only as key, so check that first to avoid duplicate processing
+	d.processedTxsMu.Lock()
+	if d.processedTxs[event.TxHash] {
+		d.processedTxsMu.Unlock()
+		log.Printf("[RealtimeDetector] Skipping polygon tx %s (already processed via mempool)", event.TxHash[:16])
+		return
+	}
+
 	// Check if we already processed this specific log event
 	// Use TxHash+LogIndex as key because one tx can have MULTIPLE OrderFilled events
 	// (e.g., market order filling against multiple limit orders)
 	eventKey := event.TxHash + ":" + event.LogIndex
-	d.processedTxsMu.Lock()
 	if d.processedTxs[eventKey] {
 		d.processedTxsMu.Unlock()
 		return

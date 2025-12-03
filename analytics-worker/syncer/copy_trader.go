@@ -435,7 +435,9 @@ func (ct *CopyTrader) Stop() {
 }
 
 func (ct *CopyTrader) run(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(ct.config.CheckIntervalSec) * time.Second)
+	// Poll for new trades from Data API every 150ms
+	// This is a backup detection method - mempool/polygon are faster
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -453,11 +455,6 @@ func (ct *CopyTrader) run(ctx context.Context) {
 }
 
 func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
-	// DISABLED: This backup polling mechanism is no longer needed.
-	// Trades are now detected in real-time via blockchain WebSocket (~300ms latency).
-	// This query was scanning 221k+ rows every 2 seconds, causing DB bottleneck.
-	return nil
-
 	// Get followed user addresses for filtered query
 	followedUsers, _ := ct.store.GetFollowedUserAddresses(ctx)
 
@@ -471,7 +468,7 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[CopyTrader] Processing %d new trades in parallel", len(trades))
+	log.Printf("[CopyTrader] Processing %d new trades from Data API", len(trades))
 
 	// Process trades in parallel with worker pool
 	const maxWorkers = 5
@@ -485,6 +482,10 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for trade := range tradeChan {
+				// Set detection source for trades from Data API polling
+				if trade.DetectionSource == "" {
+					trade.DetectionSource = "data_api"
+				}
 				if err := ct.processTrade(ctx, trade); err != nil {
 					log.Printf("[CopyTrader] Error processing trade %s: %v", trade.ID, err)
 				}
@@ -1222,7 +1223,7 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		"maxFillPrice":    maxFillPrice,
 	}
 
-	// Polymarket requires minimum $1 order
+	// Polymarket minimum $1 USDC requirement
 	const polymarketMinOrder = 1.0
 
 	if totalSize < 0.01 {
@@ -1263,7 +1264,7 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		}
 	}
 
-	// Ensure we meet minimum order size
+	// Ensure we meet minimum USDC order size
 	if totalCost < effectiveMinUSDC {
 		log.Printf("[CopyTrader-Bot] BUY: calculated $%.4f, bumping to $%.2f minimum", totalCost, effectiveMinUSDC)
 		originalCost := totalCost
@@ -1278,6 +1279,7 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 			"adjustedSize": totalSize,
 		}
 	}
+
 	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f, orderPrice=%.4f (max fill)",
 		totalSize, totalCost, avgPrice, orderPrice)
 
@@ -1417,6 +1419,14 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	if sellSize > ourPosition {
 		sellSize = ourPosition
 		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
+	}
+
+	// Polymarket requires minimum 5 shares - can't bump up for SELL (we may not have more)
+	const polymarketMinShares = 5.0
+	if sellSize < polymarketMinShares {
+		log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.0f shares, skipping", sellSize, polymarketMinShares)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped",
+			fmt.Sprintf("size %.2f below minimum %d shares", sellSize, int(polymarketMinShares)), "", userSettings.StrategyType, nil, nil, timestamps)
 	}
 
 	// Use dynamic slippage based on price (lower prices are more volatile)

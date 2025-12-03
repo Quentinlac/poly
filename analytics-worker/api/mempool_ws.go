@@ -11,12 +11,21 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// getQuickNodeRPC returns the QuickNode RPC URL from env or default
+func getQuickNodeRPC() string {
+	if url := os.Getenv("QUICKNODE_RPC_URL"); url != "" {
+		return url
+	}
+	return quickNodeRPCDefault
+}
 
 const (
 	// Polygon WebSocket RPC endpoints for mempool monitoring
@@ -29,7 +38,8 @@ const (
 	polygonHTTPRPCBackup = "https://polygon.drpc.org"
 
 	// QuickNode RPC for trace_call (faster than Alchemy simulation)
-	quickNodeRPC = "https://wider-clean-scion.matic.quiknode.pro/147dd05f2eb43a0db2a87bb0a2bbeaf13780fc71/"
+	// Set via QUICKNODE_RPC_URL env var, fallback to default
+	quickNodeRPCDefault = "https://wider-clean-scion.matic.quiknode.pro/147dd05f2eb43a0db2a87bb0a2bbeaf13780fc71/"
 
 	// OrderFilled event signature (for fallback/legacy)
 	orderFilledEventSig = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
@@ -1676,7 +1686,7 @@ func tryQuickNodeTrace(client *http.Client, from, to, input, targetClean, blockT
 	}
 	jsonBody, _ := json.Marshal(reqBody)
 
-	resp, err := client.Post(quickNodeRPC, "application/json", strings.NewReader(string(jsonBody)))
+	resp, err := client.Post(getQuickNodeRPC(), "application/json", strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return &TraceTradeResult{Error: fmt.Sprintf("trace_call request failed: %v", err)}
 	}
