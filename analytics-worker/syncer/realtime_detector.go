@@ -1,4 +1,39 @@
 // Package syncer provides real-time trade detection for copy trading.
+//
+// =============================================================================
+// REALTIME DETECTOR - ENTRY POINT FOR TRADE DETECTION
+// =============================================================================
+//
+// This is the MAIN COORDINATOR for detecting trades from followed users.
+// It monitors the Polygon blockchain via WebSocket and notifies the CopyTrader
+// when a followed user executes a trade.
+//
+// DETECTION FLOW OVERVIEW:
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  1. Polygon Blockchain emits "OrderFilled" event (~1-2s after block)       │
+// │     ↓                                                                       │
+// │  2. PolygonWSClient receives event via WebSocket subscription              │
+// │     ↓                                                                       │
+// │  3. RealtimeDetector.handleBlockchainTrade() processes the event           │
+// │     ↓                                                                       │
+// │  4. Check if maker/taker is a followed user (in-memory cache lookup)       │
+// │     ↓                                                                       │
+// │  5. Decode trade details (tokenID, side, price, size) from blockchain data │
+// │     ↓                                                                       │
+// │  6. Look up market title/outcome from token cache (or fetch sync from API) │
+// │     ↓                                                                       │
+// │  7. Call onNewTrade callback → CopyTrader.handleRealtimeTrade()            │
+// │     ↓                                                                       │
+// │  8. CopyTrader fetches order book and places copy order                    │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// KEY CONCEPTS:
+// - Followed Users: Addresses we monitor (stored in user_copy_settings table)
+// - Deduplication: Uses TxHash:LogIndex to prevent processing same trade twice
+// - Settings Cache: Refreshes every 30s to avoid DB queries on critical path
+// - Detection Latency: ~1-2 seconds after the block containing the trade
+//
+// =============================================================================
 package syncer
 
 import (
@@ -20,12 +55,15 @@ import (
 	"polymarket-analyzer/utils"
 )
 
-// RealtimeDetector uses Polygon blockchain WebSocket for trade detection.
-// This is the most reliable method - detects OrderFilled events ~1-2s after block confirmation.
+// RealtimeDetector uses multiple WebSocket sources for trade detection.
+// Detection methods (first one wins, others are deduplicated):
+//   - Mempool WS: ~3-5s BEFORE block (pending transactions)
+//   - Polygon WS: ~1-2s AFTER block (confirmed OrderFilled events)
 type RealtimeDetector struct {
 	apiClient *api.Client
 	store     *storage.PostgresStore
-	polygonWS *api.PolygonWSClient // Blockchain WebSocket for trade detection
+	polygonWS *api.PolygonWSClient  // Blockchain WebSocket for trade detection (~1-2s after block)
+	mempoolWS *api.MempoolWSClient  // Mempool WebSocket for early detection (~3-5s before block)
 
 	// Our own address (to track blockchain confirmations of our trades)
 	myAddress string
@@ -66,6 +104,8 @@ type DetectorMetrics struct {
 	SlowestDetection    time.Duration
 	BlockchainEvents    int64 // Events from Polygon WebSocket
 	BlockchainMatches   int64 // Matched followed users on blockchain
+	MempoolEvents       int64 // Events from Mempool WebSocket
+	MempoolMatches      int64 // Matched followed users in mempool
 	LastDetectionTime   time.Time
 }
 
@@ -97,14 +137,18 @@ func NewRealtimeDetector(apiClient *api.Client, clobClient *api.ClobClient, stor
 		stopCh:            make(chan struct{}),
 	}
 
-	// Create Polygon WebSocket client - this is the ONLY detection method
+	// Create Polygon WebSocket client for blockchain events (~1-2s after block)
 	d.polygonWS = api.NewPolygonWSClient(d.handleBlockchainTrade)
-	log.Printf("[RealtimeDetector] Polygon WebSocket detection ENABLED (primary ~1-2s after block)")
+	log.Printf("[RealtimeDetector] Polygon WebSocket detection ENABLED (~1-2s after block)")
+
+	// Create Mempool WebSocket client for early detection (~3-5s before block)
+	d.mempoolWS = api.NewMempoolWSClient(d.handleMempoolTrade)
+	log.Printf("[RealtimeDetector] Mempool WebSocket detection ENABLED (~3-5s before block)")
 
 	return d
 }
 
-// Start begins real-time trade detection via Polygon WebSocket
+// Start begins real-time trade detection via multiple WebSocket sources
 func (d *RealtimeDetector) Start(ctx context.Context) error {
 	if d.running {
 		return fmt.Errorf("detector already running")
@@ -115,11 +159,22 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 		log.Printf("[RealtimeDetector] Warning: failed to load followed users: %v", err)
 	}
 
-	// Start Polygon WebSocket for trade detection
+	// Sync followed addresses to mempool client
+	d.syncFollowedAddressesToMempool()
+
+	// Start Mempool WebSocket for early detection (~3-5s before block)
+	if err := d.mempoolWS.Start(ctx); err != nil {
+		// Mempool is optional - log warning but continue
+		log.Printf("[RealtimeDetector] ⚠ Mempool WebSocket failed to start: %v (continuing without)", err)
+	} else {
+		log.Printf("[RealtimeDetector] ✓ Mempool WebSocket started (early detection ~3-5s before block)")
+	}
+
+	// Start Polygon WebSocket for trade detection (~1-2s after block)
 	if err := d.polygonWS.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start Polygon WebSocket: %w", err)
 	}
-	log.Printf("[RealtimeDetector] ✓ Polygon blockchain WebSocket started (primary detection)")
+	log.Printf("[RealtimeDetector] ✓ Polygon blockchain WebSocket started (~1-2s after block)")
 
 	d.running = true
 
@@ -127,7 +182,7 @@ func (d *RealtimeDetector) Start(ctx context.Context) error {
 	d.wg.Add(1)
 	go d.userRefreshLoop(ctx)
 
-	log.Printf("[RealtimeDetector] Started with %d followed users (Polygon WS only)", len(d.followedUsers))
+	log.Printf("[RealtimeDetector] Started with %d followed users (Mempool + Polygon WS)", len(d.followedUsers))
 	return nil
 }
 
@@ -139,6 +194,10 @@ func (d *RealtimeDetector) Stop() {
 
 	d.running = false
 	close(d.stopCh)
+
+	if d.mempoolWS != nil {
+		d.mempoolWS.Stop()
+	}
 
 	if d.polygonWS != nil {
 		d.polygonWS.Stop()
@@ -155,8 +214,106 @@ func (d *RealtimeDetector) GetMetrics() DetectorMetrics {
 	return *d.metrics
 }
 
-// handleBlockchainTrade is called when Polygon WebSocket detects a followed user's trade
-// This is the PRIMARY detection method - ~1-2 seconds after block confirmation
+// =============================================================================
+// handleBlockchainTrade - PRIMARY TRADE DETECTION HANDLER
+// =============================================================================
+//
+// Called by PolygonWSClient when an OrderFilled event is received.
+// This is the CRITICAL PATH - every millisecond counts for copy trading!
+//
+// INPUT: PolygonTradeEvent containing:
+//   - TxHash, LogIndex: Unique identifier for this specific fill
+//   - Maker, Taker: Addresses involved in the trade
+//   - MakerAssetID, TakerAssetID: Which asset each party gave
+//   - MakerAmount, TakerAmount: How much each party gave (in wei, 6 decimals)
+//   - BlockNumber: Which block this trade was confirmed in
+//
+// PROCESSING STEPS:
+//   1. Deduplication check (skip if TxHash:LogIndex already processed)
+//   2. Identify if maker or taker is a followed user
+//   3. Determine trade direction (BUY vs SELL) based on asset types
+//   4. Convert hex tokenID to decimal format (APIs expect decimal)
+//   5. Calculate price and size from blockchain amounts
+//   6. Look up market title/outcome (from cache or Gamma API)
+//   7. Build TradeDetail model and notify callback
+//
+// LATENCY: ~1-2 seconds from trade execution to detection
+// OUTPUT: Calls onNewTrade callback with populated TradeDetail
+// =============================================================================
+
+// =============================================================================
+// handleMempoolTrade - EARLY DETECTION FROM PENDING TRANSACTIONS
+// =============================================================================
+//
+// Called by MempoolWSClient when a pending trade from a followed user is detected.
+// This is ~3-5 seconds FASTER than blockchain detection because we see the
+// transaction while it's still in the mempool (before block confirmation).
+//
+// IMPORTANT: Mempool trades may have decoded data that needs verification.
+// The copy_trader.go handles Alchemy verification for accurate data.
+//
+// DEDUP: Uses TxHash as key - if this trade is later detected via Polygon WS,
+// the copy_trader will deduplicate using TransactionHash.
+// =============================================================================
+func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
+	detectedAt := time.Now()
+
+	// Update metrics
+	d.metricsMu.Lock()
+	d.metrics.MempoolEvents++
+	d.metricsMu.Unlock()
+
+	// Dedup check using TxHash
+	d.processedTxsMu.Lock()
+	if d.processedTxs[event.TxHash] {
+		d.processedTxsMu.Unlock()
+		return
+	}
+	d.processedTxs[event.TxHash] = true
+	// Cleanup old entries (keep last 1000)
+	if len(d.processedTxs) > 1000 {
+		for k := range d.processedTxs {
+			delete(d.processedTxs, k)
+			if len(d.processedTxs) <= 500 {
+				break
+			}
+		}
+	}
+	d.processedTxsMu.Unlock()
+
+	// Update metrics for matched trades
+	d.metricsMu.Lock()
+	d.metrics.MempoolMatches++
+	d.metrics.TradesDetected++
+	d.metrics.LastDetectionTime = detectedAt
+	d.metricsMu.Unlock()
+
+	log.Printf("[RealtimeDetector] ⚡ MEMPOOL TRADE DETECTED! from=%s side=%s size=%.4f price=%.4f tx=%s",
+		utils.ShortAddress(event.From), event.Side, event.Size, event.Price, event.TxHash[:16])
+
+	// Convert to TradeDetail
+	// Note: Mempool decoded data may be inaccurate - copy_trader will verify via Alchemy
+	detail := models.TradeDetail{
+		ID:              event.TxHash, // Use TxHash as ID (matches dedup key)
+		UserID:          utils.NormalizeAddress(event.From),
+		MarketID:        event.TokenID, // May need verification in copy_trader
+		Type:            "TRADE",
+		Side:            event.Side,
+		Role:            event.Role,
+		Size:            event.Size,
+		Price:           event.Price,
+		TransactionHash: event.TxHash,
+		Timestamp:       event.DetectedAt,
+		DetectedAt:      detectedAt,
+		DetectionSource: "mempool", // Detected via mempool monitoring
+	}
+
+	// Notify callback - copy trader will verify and execute
+	if d.onNewTrade != nil {
+		d.onNewTrade(detail)
+	}
+}
+
 func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	detectedAt := time.Now()
 
@@ -238,14 +395,26 @@ func (d *RealtimeDetector) handleBlockchainTrade(event api.PolygonTradeEvent) {
 	// Log actual latency asynchronously (doesn't block detection path)
 	go logBlockchainLatency(event.BlockNumber, detectedAt, event.TxHash)
 
-	// Determine token ID and side based on role
-	// In CTF Exchange OrderFilled:
-	// - MakerAssetID = what the maker gave
-	// - TakerAssetID = what the taker gave
+	// =========================================================================
+	// TRADE DIRECTION DECODING - Understanding BUY vs SELL
+	// =========================================================================
 	//
-	// Trade direction logic:
-	// - MakerAssetID = token (non-zero): Maker SOLD tokens, Taker BOUGHT tokens
-	// - MakerAssetID = 0 (USDC): Maker BOUGHT tokens, Taker SOLD tokens
+	// In Polymarket's CTF Exchange OrderFilled events:
+	//   - MakerAssetID = the asset the MAKER gave away
+	//   - TakerAssetID = the asset the TAKER gave away
+	//   - Zero asset (0x000...000) = USDC (collateral)
+	//   - Non-zero asset = outcome token (the prediction market position)
+	//
+	// Logic to determine trade direction:
+	//   IF MakerAssetID = 0 (USDC):
+	//       → Maker gave USDC to receive tokens → Maker BOUGHT
+	//       → Taker gave tokens to receive USDC → Taker SOLD
+	//   IF MakerAssetID = token (non-zero):
+	//       → Maker gave tokens to receive USDC → Maker SOLD
+	//       → Taker gave USDC to receive tokens → Taker BOUGHT
+	//
+	// The token ID is always the NON-ZERO asset ID (the actual market token)
+	// =========================================================================
 
 	var tokenID string
 	var side string
@@ -457,10 +626,29 @@ func (d *RealtimeDetector) refreshFollowedUsers(ctx context.Context) error {
 	}
 	d.polygonWS.SetFollowedAddresses(allAddrs)
 
+	// Also sync to Mempool WebSocket
+	d.syncFollowedAddressesToMempool()
+
 	log.Printf("[RealtimeDetector] Refreshed: %d followed users, %d settings cached",
 		len(d.followedUsers), len(newSettingsCache))
 
 	return nil
+}
+
+// syncFollowedAddressesToMempool updates the mempool client with current followed addresses
+func (d *RealtimeDetector) syncFollowedAddressesToMempool() {
+	if d.mempoolWS == nil {
+		return
+	}
+
+	d.followedUsersMu.RLock()
+	addrs := make([]string, 0, len(d.followedUsers))
+	for addr := range d.followedUsers {
+		addrs = append(addrs, addr)
+	}
+	d.followedUsersMu.RUnlock()
+
+	d.mempoolWS.SetFollowedAddresses(addrs)
 }
 
 // GetCachedUserSettings returns cached user settings (nil if not found)

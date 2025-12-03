@@ -1,0 +1,21 @@
+TX: 0xa2139121ef112d55673f196e5e6c72118e2187e545be25a2d39bd3ee3da48ab1
+User: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+Time: Wed  3 Dec 2025 15:16:24 CET
+----------------------------------------
+
+Direction: BUY
+Tokens: 72.00
+USDC: 50.400000
+Price: .700000 USDC/token
+Order: 0x4219fb9eb04853b5...
+
+========================================
+SUMMARY
+========================================
+
+TOTAL BUY (1 trades):
+  Tokens: 72.00
+  USDC spent: 50.400000
+  Avg Price: .700000 USDC/token
+
+----------------------------------------

@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"encoding/csv"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,12 +19,25 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"polymarket-analyzer/api"
 )
 
 const (
 	// Polygon RPC
 	PolygonWSRPC   = "wss://polygon-bor-rpc.publicnode.com"
 	PolygonHTTPRPC = "https://polygon-bor-rpc.publicnode.com"
+
+	// QuickNode RPC for trace_call (faster than Alchemy)
+	QuickNodeRPC = "https://wider-clean-scion.matic.quiknode.pro/147dd05f2eb43a0db2a87bb0a2bbeaf13780fc71/"
+
+	// Contract addresses for trace parsing
+	USDCContract = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+	CTFContract  = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045"
+
+	// Transfer signatures
+	TransferSig         = "0xa9059cbb"
+	TransferFromSig     = "0x23b872dd"
+	SafeTransferFromSig = "0xf242432a"
 
 	// Polymarket endpoints
 	LiveDataWSURL = "wss://ws-live-data.polymarket.com/"
@@ -36,8 +48,11 @@ const (
 	CTFExchangeAddr    = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 	NegRiskCTFExchange = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 
+	// OrderFilled event signature (for fallback/legacy)
+	OrderFilledEventSig = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
+
 	// Test duration
-	TestDuration = 5 * time.Minute
+	TestDuration = 90 * time.Second
 
 	// Data API polling interval
 	DataAPIPollInterval = 2 * time.Second
@@ -94,6 +109,16 @@ type TradeDetection struct {
 	DataAPISide  string
 	DataAPISize  float64
 	DataAPIPrice float64
+
+	// === ALCHEMY EXTRACTION (simulation or receipt) ===
+	AlchemyExtractedAt time.Time
+	AlchemyMethod      string  // "simulation" or "receipt"
+	AlchemySide        string  // BUY/SELL from OrderFilled events
+	AlchemySize        float64 // tokens from OrderFilled
+	AlchemyPrice       float64 // usdc/tokens
+	AlchemyUSDC        float64 // total USDC
+	AlchemyTokenID     string  // from non-zero assetId
+	AlchemyError       string  // if extraction failed
 
 	// === DERIVED ===
 	FirstMethod        string
@@ -226,7 +251,7 @@ func runMempoolMonitor(ctx context.Context) error {
 	}
 	log.Printf("[MEMPOOL] ✓ Subscribed (ID: %s)", subResp.Result)
 
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 	targetAddrClean := strings.TrimPrefix(targetAddress, "0x")
 
 	for {
@@ -289,13 +314,46 @@ func processMempoolTx(httpClient *http.Client, txHash, targetAddrClean string) {
 		MempoolInputLen:     (len(tx.Input) - 2) / 2,
 	}
 
-	// Decode the order data
+	// Decode the order data using our current decoder (for comparison)
 	decodeFullOrder(tx.Input, det)
+
+	// IMMEDIATELY call Alchemy simulation for pending TX
+	alchemyClient := &http.Client{Timeout: 10 * time.Second}
+	alchemyResult := tryAlchemySimulation(alchemyClient, tx.From, tx.To, tx.Input)
+	if alchemyResult != nil && alchemyResult.Error == "" {
+		alchemyResult.Method = "simulation"
+	}
+	if alchemyResult != nil {
+		det.AlchemyExtractedAt = time.Now()
+		det.AlchemyMethod = alchemyResult.Method
+		det.AlchemySide = alchemyResult.Direction
+		det.AlchemySize = alchemyResult.Tokens
+		det.AlchemyPrice = alchemyResult.Price
+		det.AlchemyUSDC = alchemyResult.USDC
+		det.AlchemyTokenID = alchemyResult.TokenID
+		det.AlchemyError = alchemyResult.Error
+	}
 
 	// Record detection
 	recordMempoolDetection(det)
-	log.Printf("[MEMPOOL] 🎯 %s | %.2f @ %.4f | Role:%s | TX: %s",
-		det.MempoolSide, det.MempoolSize, det.MempoolPrice, det.MempoolRole, txHash[:16])
+
+	// Log comparison
+	if alchemyResult != nil && alchemyResult.Error == "" {
+		sideMatch := det.MempoolSide == alchemyResult.Direction
+		sizeDiff := det.MempoolSize - alchemyResult.Tokens
+		log.Printf("[MEMPOOL] 🎯 %s | Mempool: %s %.2f | Alchemy(%s): %s %.2f | Match:%v Diff:%.2f | TX: %s",
+			det.MempoolRole,
+			det.MempoolSide, det.MempoolSize,
+			alchemyResult.Method, alchemyResult.Direction, alchemyResult.Tokens,
+			sideMatch, sizeDiff, txHash[:16])
+	} else {
+		errMsg := ""
+		if alchemyResult != nil {
+			errMsg = alchemyResult.Error
+		}
+		log.Printf("[MEMPOOL] 🎯 %s | %.2f @ %.4f | Role:%s | Alchemy: %s | TX: %s",
+			det.MempoolSide, det.MempoolSize, det.MempoolPrice, det.MempoolRole, errMsg, txHash[:16])
+	}
 }
 
 func decodeFullOrder(input string, det *TradeDetection) {
@@ -306,47 +364,39 @@ func decodeFullOrder(input string, det *TradeDetection) {
 	selector := input[2:10]
 	det.MempoolFunctionSig = getFunctionName(selector)
 
-	bytes, err := hex.DecodeString(input[10:])
-	if err != nil || len(bytes) < 256 {
+	// Use the improved decoder from api package
+	// This correctly handles TAKER vs MAKER detection and fillAmounts
+	order, _, orderCount := api.DecodeTradeInputForTarget(input, targetAddress)
+	if !order.Decoded {
 		return
 	}
 
-	// Find user address and order data
-	targetClean := strings.TrimPrefix(targetAddress, "0x")
+	det.MempoolDecoded = true
+	det.MempoolSide = order.Side
+	det.MempoolTokenID = order.TokenID
+	det.MempoolMakerAddress = order.MakerAddress
+	det.MempoolTakerAddress = order.TakerAddress
+	det.MempoolSignerAddress = order.SignerAddress
+	det.MempoolExpiration = order.Expiration
+	det.MempoolFeeRateBps = order.FeeRateBps
+	det.MempoolSignatureType = order.SignatureType
+	det.MempoolOrderCount = orderCount
 
-	for offset := 0; offset+384 <= len(bytes); offset += 32 {
-		// Try to parse Order struct
-		order := tryParseOrderAt(bytes, offset)
-		if order == nil {
-			continue
-		}
-
-		// Check if this order involves our target
-		makerLower := strings.ToLower(order.Maker)
-		takerLower := strings.ToLower(order.Taker)
-		signerLower := strings.ToLower(order.Signer)
-
-		if !strings.Contains(makerLower, targetClean) &&
-			!strings.Contains(takerLower, targetClean) &&
-			!strings.Contains(signerLower, targetClean) {
-			continue
-		}
-
-		det.MempoolDecoded = true
-		det.MempoolSide = order.Side
-		det.MempoolTokenID = order.TokenID
+	if order.MakerAmount != nil {
 		det.MempoolMakerAmount = order.MakerAmount.String()
+	}
+	if order.TakerAmount != nil {
 		det.MempoolTakerAmount = order.TakerAmount.String()
-		det.MempoolMakerAddress = order.Maker
-		det.MempoolTakerAddress = order.Taker
-		det.MempoolSignerAddress = order.Signer
-		det.MempoolExpiration = order.Expiration
-		det.MempoolOrderNonce = order.Nonce.String()
-		det.MempoolFeeRateBps = order.FeeRateBps
-		det.MempoolSignatureType = order.SignatureType
-		det.MempoolSaltHex = order.Salt
+	}
+	if order.OrderNonce != nil {
+		det.MempoolOrderNonce = order.OrderNonce.String()
+	}
+	if order.Salt != nil {
+		det.MempoolSaltHex = fmt.Sprintf("0x%x", order.Salt)
+	}
 
-		// Calculate price from Order maker/taker amounts ratio
+	// Calculate price from Order maker/taker amounts ratio
+	if order.MakerAmount != nil && order.TakerAmount != nil {
 		makerF := new(big.Float).SetInt(order.MakerAmount)
 		takerF := new(big.Float).SetInt(order.TakerAmount)
 
@@ -355,167 +405,30 @@ func decodeFullOrder(input string, det *TradeDetection) {
 		} else {
 			det.MempoolPrice, _ = new(big.Float).Quo(takerF, makerF).Float64()
 		}
-
-		// Size comes from fillAmount (Word 3 = takerFillAmountShares), NOT Order amounts
-		// This is calculated later after findFillAmount is called
-
-		// Determine role
-		if strings.Contains(makerLower, targetClean) || strings.Contains(signerLower, targetClean) {
-			det.MempoolRole = "MAKER"
-		} else {
-			det.MempoolRole = "TAKER"
-		}
-
-		// Determine outcome (Up if price < 0.5, Down if price >= 0.5)
-		if det.MempoolPrice < 0.5 {
-			det.Outcome = "Up"
-		} else {
-			det.Outcome = "Down"
-		}
-
-		det.MempoolOrderCount++
-		break // Found our order
 	}
 
-	// Try to find fill amount (Word 3 = takerFillAmountShares)
-	det.MempoolFillAmount = findFillAmount(bytes, det.MempoolMakerAmount)
-
-	// Calculate Size from FillAmount (shares with 6 decimals)
-	if det.MempoolFillAmount != "" {
-		fillAmt, ok := new(big.Int).SetString(det.MempoolFillAmount, 10)
-		if ok && fillAmt.Sign() > 0 {
-			fillF := new(big.Float).SetInt(fillAmt)
-			det.MempoolSize, _ = new(big.Float).Quo(fillF, big.NewFloat(1e6)).Float64()
-		}
-	}
-}
-
-type OrderData struct {
-	Salt          string
-	Maker         string
-	Signer        string
-	Taker         string
-	TokenID       string
-	MakerAmount   *big.Int
-	TakerAmount   *big.Int
-	Expiration    uint64
-	Nonce         *big.Int
-	FeeRateBps    uint64
-	Side          string
-	SignatureType uint8
-}
-
-func tryParseOrderAt(data []byte, offset int) *OrderData {
-	if offset+352 > len(data) {
-		return nil
+	// Set role based on IsTaker flag from improved decoder
+	if order.IsTaker {
+		det.MempoolRole = "TAKER"
+	} else {
+		det.MempoolRole = "MAKER"
 	}
 
-	// Field 1: maker (address in last 20 bytes)
-	makerField := data[offset+32 : offset+64]
-	if !isAddressField(makerField) {
-		return nil
-	}
-	maker := fmt.Sprintf("0x%x", makerField[12:32])
-
-	// Field 2: signer
-	signerField := data[offset+64 : offset+96]
-	if !isAddressField(signerField) {
-		return nil
-	}
-	signer := fmt.Sprintf("0x%x", signerField[12:32])
-
-	// Field 3: taker
-	takerField := data[offset+96 : offset+128]
-	if !isAddressField(takerField) {
-		return nil
-	}
-	taker := fmt.Sprintf("0x%x", takerField[12:32])
-
-	// Field 4: tokenId
-	tokenId := new(big.Int).SetBytes(data[offset+128 : offset+160])
-	if tokenId.Sign() == 0 {
-		return nil
+	// FillAmount is now correctly set by the improved decoder
+	// - For TAKER: uses Word 3 (takerFillAmountShares)
+	// - For MAKER: uses fillAmounts[orderIndex] from the correct offset
+	if order.FillAmount != nil {
+		det.MempoolFillAmount = order.FillAmount.String()
+		fillF := new(big.Float).SetInt(order.FillAmount)
+		det.MempoolSize, _ = new(big.Float).Quo(fillF, big.NewFloat(1e6)).Float64()
 	}
 
-	// Field 5-6: amounts
-	makerAmount := new(big.Int).SetBytes(data[offset+160 : offset+192])
-	takerAmount := new(big.Int).SetBytes(data[offset+192 : offset+224])
-
-	minAmt := big.NewInt(100_000)
-	maxAmt := big.NewInt(100_000_000_000)
-	if makerAmount.Cmp(minAmt) < 0 || makerAmount.Cmp(maxAmt) > 0 {
-		return nil
+	// Determine outcome (Up if price < 0.5, Down if price >= 0.5)
+	if det.MempoolPrice < 0.5 {
+		det.Outcome = "Up"
+	} else {
+		det.Outcome = "Down"
 	}
-	if takerAmount.Cmp(minAmt) < 0 || takerAmount.Cmp(maxAmt) > 0 {
-		return nil
-	}
-
-	// Field 7: expiration
-	expiration := new(big.Int).SetBytes(data[offset+224 : offset+256]).Uint64()
-
-	// Field 8: nonce
-	nonce := new(big.Int).SetBytes(data[offset+256 : offset+288])
-
-	// Field 9: feeRateBps
-	feeRateBps := new(big.Int).SetBytes(data[offset+288 : offset+320]).Uint64()
-
-	// Field 10: side
-	sideField := data[offset+320 : offset+352]
-	sideValue := sideField[31]
-	if sideValue > 1 {
-		return nil
-	}
-
-	side := "BUY"
-	if sideValue == 1 {
-		side = "SELL"
-	}
-
-	return &OrderData{
-		Salt:        fmt.Sprintf("0x%x", data[offset:offset+32]),
-		Maker:       maker,
-		Signer:      signer,
-		Taker:       taker,
-		TokenID:     tokenId.String(),
-		MakerAmount: makerAmount,
-		TakerAmount: takerAmount,
-		Expiration:  expiration,
-		Nonce:       nonce,
-		FeeRateBps:  feeRateBps,
-		Side:        side,
-	}
-}
-
-func isAddressField(field []byte) bool {
-	if len(field) != 32 {
-		return false
-	}
-	for i := 0; i < 12; i++ {
-		if field[i] != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func findFillAmount(data []byte, makerAmtStr string) string {
-	// For fillOrders (0x2287e350), the ABI layout is:
-	// [0] offset to orders array (32 bytes)
-	// [1] offset to fillAmounts array (32 bytes)
-	// [2] takerFillAmountUsdc (32 bytes) - USDC amount
-	// [3] takerFillAmountShares (32 bytes) - THIS IS THE FILL SIZE IN SHARES
-	if len(data) >= 128 {
-		// Word 3 (bytes 96-128) = takerFillAmountShares
-		fillAmountShares := new(big.Int).SetBytes(data[96:128])
-		if fillAmountShares.Sign() > 0 {
-			return fillAmountShares.String()
-		}
-	}
-	// Fallback to maker amount if can't extract
-	if makerAmtStr != "" {
-		return makerAmtStr
-	}
-	return ""
 }
 
 func getFunctionName(selector string) string {
@@ -669,8 +582,6 @@ func recordLiveDataDetection(txHash, side string, size, price float64) {
 	txHashLower := strings.ToLower(txHash)
 
 	detectionsMu.Lock()
-	defer detectionsMu.Unlock()
-
 	det, exists := detections[txHashLower]
 	if !exists {
 		det = &TradeDetection{
@@ -680,6 +591,8 @@ func recordLiveDataDetection(txHash, side string, size, price float64) {
 		detections[txHashLower] = det
 		liveDataFirst++
 	}
+
+	needsAlchemy := det.LiveDataAt.IsZero() && det.AlchemyExtractedAt.IsZero()
 
 	if det.LiveDataAt.IsZero() {
 		det.LiveDataAt = now
@@ -692,6 +605,48 @@ func recordLiveDataDetection(txHash, side string, size, price float64) {
 		// Calculate mempool to confirm latency
 		if !det.MempoolDetectedAt.IsZero() {
 			det.MempoolToConfirmMs = now.Sub(det.MempoolDetectedAt).Milliseconds()
+		}
+	}
+	detectionsMu.Unlock()
+
+	// Trigger Alchemy extraction for confirmed TX (outside lock)
+	if needsAlchemy {
+		go extractAlchemyForTx(txHash)
+	}
+}
+
+// extractAlchemyForTx gets Alchemy receipt data for a confirmed TX
+func extractAlchemyForTx(txHash string) {
+	alchemyClient := &http.Client{Timeout: 15 * time.Second}
+	result := tryTransactionReceipt(alchemyClient, txHash)
+
+	txHashLower := strings.ToLower(txHash)
+	detectionsMu.Lock()
+	defer detectionsMu.Unlock()
+
+	det, exists := detections[txHashLower]
+	if !exists || det.AlchemyExtractedAt.After(time.Time{}) {
+		return
+	}
+
+	det.AlchemyExtractedAt = time.Now()
+	if result != nil {
+		det.AlchemyMethod = "receipt"
+		det.AlchemySide = result.Direction
+		det.AlchemySize = result.Tokens
+		det.AlchemyPrice = result.Price
+		det.AlchemyUSDC = result.USDC
+		det.AlchemyTokenID = result.TokenID
+		det.AlchemyError = result.Error
+
+		// Log comparison if we have mempool data
+		if det.MempoolDecoded && result.Error == "" {
+			sideMatch := det.MempoolSide == result.Direction
+			sizeDiff := det.MempoolSize - result.Tokens
+			log.Printf("[ALCHEMY] TX %s | Match:%v | Mempool: %s %.2f | Receipt: %s %.2f | Diff: %.2f",
+				txHash[:16], sideMatch,
+				det.MempoolSide, det.MempoolSize,
+				result.Direction, result.Tokens, sizeDiff)
 		}
 	}
 }
@@ -962,6 +917,362 @@ func parseHexUint64(s string) uint64 {
 	return val.Uint64()
 }
 
+// ============================================================================
+// ALCHEMY EXTRACTION (simulation for pending, receipt for confirmed)
+// ============================================================================
+
+type alchemyTradeResult struct {
+	Direction string  // BUY or SELL
+	Tokens    float64 // token amount
+	USDC      float64 // usdc amount
+	Price     float64 // usdc per token
+	TokenID   string  // the token being traded
+	Method    string  // "simulation" or "receipt"
+	Error     string
+}
+
+// extractViaAlchemy tries receipt first (for confirmed), falls back to simulation (for pending)
+func extractViaAlchemy(client *http.Client, txHash, from, to, input string) *alchemyTradeResult {
+	// Try receipt first (TX already confirmed - most accurate)
+	result := tryTransactionReceipt(client, txHash)
+	if result != nil && result.Error == "" {
+		result.Method = "receipt"
+		return result
+	}
+
+	// Fall back to simulation (works for pending TXs)
+	result = tryAlchemySimulation(client, from, to, input)
+	if result != nil && result.Error == "" {
+		result.Method = "simulation"
+		return result
+	}
+
+	// Return the receipt error if both failed
+	if result == nil {
+		return &alchemyTradeResult{Error: "both receipt and simulation failed"}
+	}
+	return result
+}
+
+// tryAlchemySimulation now uses QuickNode trace_call (faster than Alchemy)
+func tryAlchemySimulation(client *http.Client, from, to, input string) *alchemyTradeResult {
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "trace_call",
+		"params": []interface{}{
+			map[string]string{"from": from, "to": to, "data": input},
+			[]string{"trace"},
+			"latest",
+		},
+	}
+	jsonBody, _ := json.Marshal(reqBody)
+
+	resp, err := client.Post(QuickNodeRPC, "application/json", strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return &alchemyTradeResult{Error: fmt.Sprintf("trace_call request failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var traceResult struct {
+		Result struct {
+			Trace []struct {
+				Action struct {
+					To    string `json:"to"`
+					Input string `json:"input"`
+				} `json:"action"`
+				Error string `json:"error"`
+			} `json:"trace"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &traceResult); err != nil {
+		return &alchemyTradeResult{Error: fmt.Sprintf("trace parse failed: %v", err)}
+	}
+
+	if traceResult.Error != nil {
+		return &alchemyTradeResult{Error: traceResult.Error.Message}
+	}
+
+	// Check if first trace reverted (state changed - TX already confirmed)
+	if len(traceResult.Result.Trace) > 0 && traceResult.Result.Trace[0].Error == "Reverted" {
+		return &alchemyTradeResult{Error: "trace reverted - TX may be confirmed, use receipt"}
+	}
+
+	return parseTraceForTransfers(traceResult.Result.Trace, targetAddress)
+}
+
+// parseTraceForTransfers extracts USDC and CTF token transfers from QuickNode trace
+func parseTraceForTransfers(traces []struct {
+	Action struct {
+		To    string `json:"to"`
+		Input string `json:"input"`
+	} `json:"action"`
+	Error string `json:"error"`
+}, target string) *alchemyTradeResult {
+	var usdcIn, usdcOut, tokensIn, tokensOut float64
+	var tokenID string
+	targetClean := strings.ToLower(strings.TrimPrefix(target, "0x"))
+
+	for _, t := range traces {
+		toAddr := strings.ToLower(t.Action.To)
+		inp := strings.ToLower(t.Action.Input)
+
+		if len(inp) < 10 {
+			continue
+		}
+
+		sig := inp[:10]
+
+		// USDC transfer(address recipient, uint256 amount)
+		if toAddr == USDCContract && sig == TransferSig && len(inp) >= 138 {
+			recipient := inp[34:74]
+			amountHex := inp[74:138]
+			amount := parseHexToFloat(amountHex) / 1e6
+
+			if strings.Contains(recipient, targetClean) {
+				usdcIn += amount
+			}
+		}
+
+		// USDC transferFrom(address from, address to, uint256 amount)
+		if toAddr == USDCContract && sig == TransferFromSig && len(inp) >= 202 {
+			fromAddr := inp[34:74]
+			amountHex := inp[138:202]
+			amount := parseHexToFloat(amountHex) / 1e6
+
+			if strings.Contains(fromAddr, targetClean) {
+				usdcOut += amount
+			}
+		}
+
+		// CTF safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)
+		if toAddr == CTFContract && sig == SafeTransferFromSig && len(inp) >= 266 {
+			sender := inp[34:74]
+			recipient := inp[98:138]
+			tokenIDHex := inp[138:202]
+			amountHex := inp[202:266]
+			amount := parseHexToFloat(amountHex) / 1e6
+
+			if strings.Contains(sender, targetClean) {
+				tokensOut += amount
+				if tokenID == "" {
+					tokenIDBig := new(big.Int)
+					tokenIDBig.SetString(tokenIDHex, 16)
+					tokenID = tokenIDBig.String()
+				}
+			}
+			if strings.Contains(recipient, targetClean) {
+				tokensIn += amount
+				if tokenID == "" {
+					tokenIDBig := new(big.Int)
+					tokenIDBig.SetString(tokenIDHex, 16)
+					tokenID = tokenIDBig.String()
+				}
+			}
+		}
+	}
+
+	// Determine direction based on token flow
+	var direction string
+	var tokens, usdc float64
+
+	if tokensOut > 0 && usdcIn > 0 {
+		direction = "SELL"
+		tokens = tokensOut
+		usdc = usdcIn
+	} else if tokensIn > 0 && usdcOut > 0 {
+		direction = "BUY"
+		tokens = tokensIn
+		usdc = usdcOut
+	} else if tokensIn > 0 {
+		direction = "BUY"
+		tokens = tokensIn
+		usdc = usdcOut
+	} else if tokensOut > 0 {
+		direction = "SELL"
+		tokens = tokensOut
+		usdc = usdcIn
+	} else {
+		return &alchemyTradeResult{Error: "no token transfers found for target user"}
+	}
+
+	price := float64(0)
+	if tokens > 0 {
+		price = usdc / tokens
+	}
+
+	return &alchemyTradeResult{
+		Direction: direction,
+		Tokens:    tokens,
+		USDC:      usdc,
+		Price:     price,
+		TokenID:   tokenID,
+	}
+}
+
+func tryTransactionReceipt(client *http.Client, txHash string) *alchemyTradeResult {
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_getTransactionReceipt",
+		"params":  []string{txHash},
+		"id":      1,
+	}
+	jsonBody, _ := json.Marshal(reqBody)
+
+	resp, err := client.Post(PolygonHTTPRPC, "application/json", strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return &alchemyTradeResult{Error: fmt.Sprintf("receipt request failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	var receiptResult struct {
+		Result struct {
+			Status string `json:"status"`
+			Logs   []struct {
+				Topics []string `json:"topics"`
+				Data   string   `json:"data"`
+			} `json:"logs"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&receiptResult); err != nil {
+		return &alchemyTradeResult{Error: fmt.Sprintf("receipt parse failed: %v", err)}
+	}
+
+	if receiptResult.Result.Status != "0x1" {
+		return &alchemyTradeResult{Error: "transaction failed or not found"}
+	}
+
+	return parseOrderFilledLogs(receiptResult.Result.Logs)
+}
+
+type logEntry struct {
+	Topics []string `json:"topics"`
+	Data   string   `json:"data"`
+}
+
+func parseOrderFilledLogs(logs []struct {
+	Topics []string `json:"topics"`
+	Data   string   `json:"data"`
+}) *alchemyTradeResult {
+	var totalTokens, totalUSDC float64
+	var direction, tokenID string
+
+	for _, log := range logs {
+		if len(log.Topics) < 4 {
+			continue
+		}
+		// Check for OrderFilled event
+		if strings.ToLower(log.Topics[0]) != OrderFilledEventSig {
+			continue
+		}
+
+		// Extract maker and taker addresses from topics
+		maker := "0x" + strings.ToLower(log.Topics[2][26:])
+		taker := "0x" + strings.ToLower(log.Topics[3][26:])
+
+		// Check if target is involved (either as maker or taker)
+		isMaker := maker == targetAddress
+		isTaker := taker == targetAddress
+
+		if !isMaker && !isTaker {
+			continue
+		}
+
+		// Parse data field: makerAssetId(32) | takerAssetId(32) | makerAmount(32) | takerAmount(32)
+		data := strings.TrimPrefix(log.Data, "0x")
+		if len(data) < 256 {
+			continue
+		}
+
+		makerAssetID := data[0:64]
+		takerAssetID := data[64:128]
+		makerAmount := parseHexToFloat(data[128:192])
+		takerAmount := parseHexToFloat(data[192:256])
+
+		// Determine direction based on target's role and which asset is USDC
+		isUSDCMaker := isZeroAsset(makerAssetID)
+
+		if isMaker {
+			// Target is the MAKER in this fill
+			if isUSDCMaker {
+				// Maker gives USDC → BUY tokens
+				direction = "BUY"
+				totalUSDC += makerAmount
+				totalTokens += takerAmount
+				if tokenID == "" {
+					tokenID = "0x" + takerAssetID
+				}
+			} else {
+				// Maker gives tokens → SELL tokens
+				direction = "SELL"
+				totalTokens += makerAmount
+				totalUSDC += takerAmount
+				if tokenID == "" {
+					tokenID = "0x" + makerAssetID
+				}
+			}
+		} else {
+			// Target is the TAKER in this fill
+			// takerAssetId = what taker gives
+			isUSDCTaker := isZeroAsset(takerAssetID)
+			if isUSDCTaker {
+				// Taker gives USDC → taker is BUYING tokens
+				direction = "BUY"
+				totalUSDC += takerAmount
+				totalTokens += makerAmount
+				if tokenID == "" {
+					tokenID = "0x" + makerAssetID
+				}
+			} else {
+				// Taker gives tokens → taker is SELLING tokens
+				direction = "SELL"
+				totalTokens += takerAmount
+				totalUSDC += makerAmount
+				if tokenID == "" {
+					tokenID = "0x" + takerAssetID
+				}
+			}
+		}
+	}
+
+	if totalTokens == 0 {
+		return &alchemyTradeResult{Error: "no OrderFilled events for target user"}
+	}
+
+	price := totalUSDC / totalTokens
+
+	return &alchemyTradeResult{
+		Direction: direction,
+		Tokens:    totalTokens / 1e6,
+		USDC:      totalUSDC / 1e6,
+		Price:     price,
+		TokenID:   tokenID,
+	}
+}
+
+func parseHexToFloat(hex string) float64 {
+	val, ok := new(big.Int).SetString(hex, 16)
+	if !ok {
+		return 0
+	}
+	f, _ := new(big.Float).SetInt(val).Float64()
+	return f
+}
+
+func isZeroAsset(assetID string) bool {
+	for _, c := range assetID {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
+}
+
 func printStats() {
 	elapsed := time.Since(startTime)
 	detectionsMu.Lock()
@@ -1049,6 +1360,19 @@ func writeCSV() {
 		"data_api_side",
 		"data_api_size",
 		"data_api_price",
+		// Alchemy extraction (ground truth)
+		"alchemy_extracted_at",
+		"alchemy_method",
+		"alchemy_side",
+		"alchemy_size",
+		"alchemy_price",
+		"alchemy_usdc",
+		"alchemy_token_id",
+		"alchemy_error",
+		// Comparison
+		"side_match",
+		"size_diff",
+		"price_diff",
 		// Derived
 		"first_detector",
 		"is_confirmed",
@@ -1109,6 +1433,20 @@ func writeCSV() {
 			det.DataAPISide,
 			fmt.Sprintf("%.6f", det.DataAPISize),
 			fmt.Sprintf("%.6f", det.DataAPIPrice),
+			// Alchemy extraction
+			formatTime(det.AlchemyExtractedAt),
+			det.AlchemyMethod,
+			det.AlchemySide,
+			fmt.Sprintf("%.6f", det.AlchemySize),
+			fmt.Sprintf("%.6f", det.AlchemyPrice),
+			fmt.Sprintf("%.6f", det.AlchemyUSDC),
+			det.AlchemyTokenID,
+			det.AlchemyError,
+			// Comparison columns
+			fmt.Sprintf("%t", det.MempoolSide == det.AlchemySide),
+			fmt.Sprintf("%.6f", det.MempoolSize-det.AlchemySize),
+			fmt.Sprintf("%.6f", det.MempoolPrice-det.AlchemyPrice),
+			// Derived
 			det.FirstMethod,
 			fmt.Sprintf("%t", det.IsConfirmed),
 			fmt.Sprintf("%d", det.MempoolToConfirmMs),

@@ -1,0 +1,12 @@
+TX: 0xd554996ca8c764a35cb0ae71d7aa956e7a18b2fc372ed4345f5d0377f56a9233
+User: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+Time: Wed  3 Dec 2025 15:00:45 CET
+----------------------------------------
+
+Direction: BUY
+Tokens: 60.00
+USDC: 10.800000
+Price: .180000 USDC/token
+Order: 0x7943e2b8eb9daf30...
+
+----------------------------------------

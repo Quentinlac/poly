@@ -1,4 +1,40 @@
 // Package api provides Polygon blockchain WebSocket client for real-time trade detection.
+//
+// =============================================================================
+// POLYGON BLOCKCHAIN WEBSOCKET - LISTENING FOR ORDERFILLED EVENTS
+// =============================================================================
+//
+// This file implements REAL-TIME trade detection by subscribing to Polygon
+// blockchain events. When a trade executes on Polymarket, the CTF Exchange
+// contract emits an "OrderFilled" event that we capture here.
+//
+// HOW IT WORKS:
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  1. Connect to Polygon WebSocket RPC (wss://polygon-bor-rpc.publicnode.com) │
+// │     ↓                                                                       │
+// │  2. Subscribe to "logs" with filter:                                        │
+// │     - address: CTFExchange OR NegRiskCTFExchange contracts                 │
+// │     - topics[0]: OrderFilled event signature                               │
+// │     ↓                                                                       │
+// │  3. When event received, decode from ABI format:                           │
+// │     - topics[1]: orderHash (not used)                                      │
+// │     - topics[2]: maker address (padded to 32 bytes)                        │
+// │     - topics[3]: taker address (padded to 32 bytes)                        │
+// │     - data: [makerAssetId, takerAssetId, makerAmount, takerAmount, fee]    │
+// │     ↓                                                                       │
+// │  4. Check if maker OR taker is a followed address                          │
+// │     ↓                                                                       │
+// │  5. If match → call onTrade callback → RealtimeDetector.handleBlockchain() │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// KEY CONSTANTS:
+// - CTFExchangeAddress: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E (regular markets)
+// - NegRiskCTFExchange: 0xC5d563A36AE78145C45a50134d48A1215220f80a (neg-risk markets)
+// - OrderFilledTopic: keccak256 hash of event signature
+//
+// DETECTION LATENCY: ~1-2 seconds after trade (depends on block propagation)
+//
+// =============================================================================
 package api
 
 import (
@@ -367,7 +403,30 @@ func (c *PolygonWSClient) handleMessage(data []byte) {
 	}
 }
 
-// decodeOrderFilledEvent decodes an OrderFilled event from topics and data
+// =============================================================================
+// decodeOrderFilledEvent - PARSE RAW BLOCKCHAIN EVENT INTO TRADE DATA
+// =============================================================================
+//
+// This function decodes the raw Ethereum log data into a usable trade event.
+//
+// ORDERFILLED EVENT ABI:
+//   event OrderFilled(
+//     bytes32 indexed orderHash,   ← topics[1]
+//     address indexed maker,       ← topics[2] (last 20 bytes = address)
+//     address indexed taker,       ← topics[3] (last 20 bytes = address)
+//     uint256 makerAssetId,        ← data[0:32] (token ID or 0 for USDC)
+//     uint256 takerAssetId,        ← data[32:64]
+//     uint256 makerAmountFilled,   ← data[64:96] (in 6-decimal format)
+//     uint256 takerAmountFilled,   ← data[96:128]
+//     uint256 fee                  ← data[128:160]
+//   );
+//
+// DATA LAYOUT (hex string, each field is 64 chars = 32 bytes):
+//   0x[makerAssetId][takerAssetId][makerAmount][takerAmount][fee]
+//      0:64          64:128        128:192      192:256      256:320
+//
+// OUTPUT: PolygonTradeEvent with decoded maker/taker addresses and amounts
+// =============================================================================
 func (c *PolygonWSClient) decodeOrderFilledEvent(topics []string, data string, txHash string, blockNum string, logIndex string) (PolygonTradeEvent, error) {
 	event := PolygonTradeEvent{
 		TxHash:    txHash,

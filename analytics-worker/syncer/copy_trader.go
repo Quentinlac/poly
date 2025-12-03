@@ -1,3 +1,51 @@
+// =============================================================================
+// COPY TRADER - EXECUTES TRADES BASED ON DETECTED FOLLOWED USER ACTIVITY
+// =============================================================================
+//
+// This is the EXECUTION ENGINE that places orders to copy followed users.
+// When RealtimeDetector detects a trade, it calls handleRealtimeTrade() here.
+//
+// EXECUTION FLOW (from detection to order placed):
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  1. handleRealtimeTrade() receives TradeDetail from detector               │
+// │     ↓                                                                       │
+// │  2. processTrade() validates and checks user settings                      │
+// │     - Skip if trade too old (>5 min)                                       │
+// │     - Skip if already processed (deduplication)                            │
+// │     - Check user copy settings (enabled, multiplier, min/max USDC)         │
+// │     ↓                                                                       │
+// │  3. Start order book fetch in PARALLEL (saves ~50-200ms)                   │
+// │     go func() { book = clobClient.GetOrderBook(tokenID) }                  │
+// │     ↓                                                                       │
+// │  4. Route to strategy handler based on settings:                           │
+// │     - Strategy 1 (Human): executeBuy() / executeSell() - via main app     │
+// │     - Strategy 2/3 (Bot): executeBotBuyWithBook() - direct CLOB order     │
+// │     ↓                                                                       │
+// │  5. Calculate copy size: followedUserSize × multiplier                     │
+// │     ↓                                                                       │
+// │  6. Wait for order book (from parallel fetch)                              │
+// │     ↓                                                                       │
+// │  7. Calculate max price (copied price + slippage based on price tier)     │
+// │     ↓                                                                       │
+// │  8. Sweep order book: accumulate shares up to target at acceptable prices │
+// │     ↓                                                                       │
+// │  9. Place order via clobClient.PlaceOrderFast() (FOK then GTC fallback)   │
+// │     ↓                                                                       │
+// │ 10. Log result to copy_trade_log table with timing breakdown              │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// KEY CONCEPTS:
+// - Multiplier: Fraction of followed user's trade (e.g., 0.05 = 5% = 1/20th)
+// - Dynamic Slippage: Lower prices allow more slippage (volatile markets)
+//   - Under $0.10: 200% slippage allowed
+//   - Under $0.20: 80%
+//   - $0.40+: 20%
+// - Order Book Sweeping: Buy at multiple price levels to fill target size
+// - FOK vs GTC: Try Fill-Or-Kill first (immediate), fall back to Good-Till-Cancel
+//
+// TIMING TARGET: ~600ms from detection to order placed on CLOB
+//
+// =============================================================================
 package syncer
 
 import (
@@ -292,9 +340,6 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	}
 	log.Printf("[CopyTrader] API credentials initialized successfully")
 
-	// Start order book caching for faster execution
-	ct.clobClient.StartOrderBookCaching()
-
 	// Start real-time detector for faster trade detection
 	// Pass clobClient for fast CLOB API detection (~50ms latency)
 	// EnableBlockchainWS should only be true in the worker (for backup ~1s detection)
@@ -373,7 +418,6 @@ func (ct *CopyTrader) GetMetrics() CopyTraderMetrics {
 func (ct *CopyTrader) Stop() {
 	if ct.running {
 		close(ct.stopCh)
-		ct.clobClient.StopOrderBookCaching()
 
 		// Stop realtime detector
 		if ct.detector != nil {
@@ -478,15 +522,24 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail) error {
 	processStart := time.Now()
 
+	// Use TxHash as dedup key (not trade.ID which may include :LogIndex)
+	// This ensures blockchain-detected trades (ID=TxHash:LogIndex) and API-detected
+	// trades (ID=TxHash) are properly deduplicated against each other.
+	// Multiple fills from the same tx = one trading decision = one copy trade.
+	dedupKey := trade.TransactionHash
+	if dedupKey == "" {
+		dedupKey = trade.ID // Fallback for trades without TransactionHash
+	}
+
 	// CRITICAL: Check if this trade is already being processed (prevents duplicate orders)
 	ct.inFlightTradesMu.Lock()
-	if startTime, exists := ct.inFlightTrades[trade.ID]; exists {
+	if startTime, exists := ct.inFlightTrades[dedupKey]; exists {
 		ct.inFlightTradesMu.Unlock()
 		log.Printf("[CopyTrader] Skipping duplicate trade %s (already in-flight since %s ago)",
-			trade.ID[:16], time.Since(startTime).Round(time.Millisecond))
+			dedupKey[:16], time.Since(startTime).Round(time.Millisecond))
 		return nil
 	}
-	ct.inFlightTrades[trade.ID] = time.Now()
+	ct.inFlightTrades[dedupKey] = time.Now()
 	// Cleanup old entries (older than 2 minutes)
 	for id, t := range ct.inFlightTrades {
 		if time.Since(t) > 2*time.Minute {
@@ -496,7 +549,8 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	ct.inFlightTradesMu.Unlock()
 
 	// DATABASE-LEVEL DEDUP: Check if this trade was already executed (prevents duplicates across pods)
-	alreadyExecuted, err := ct.store.IsTradeAlreadyExecuted(ctx, trade.ID)
+	// Use dedupKey (TxHash) to match across detection methods
+	alreadyExecuted, err := ct.store.IsTradeAlreadyExecuted(ctx, dedupKey)
 	if err != nil {
 		log.Printf("[CopyTrader] Warning: failed to check for duplicate trade %s: %v", trade.ID[:16], err)
 		// Continue anyway - better to risk a duplicate than miss a trade
@@ -537,34 +591,45 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		negRisk = false // Default, will be overridden by order book if needed
 		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, skipping API lookups, tokenID=%s", tokenID)
 	} else if trade.DetectionSource == "mempool" {
-		// Mempool trades: decoded tokenID/side from calldata is UNRELIABLE!
-		// Must look up token info to get correct outcome (Up/Down)
-		log.Printf("[CopyTrader] ⚡ Mempool trade: verifying tokenID=%s (decoded side=%s)", trade.MarketID, trade.Outcome)
+		// Mempool trades: use Alchemy simulation/receipt for ACCURATE data
+		// The decoded calldata is unreliable - Alchemy gives us real OrderFilled events
+		log.Printf("[CopyTrader] ⚡ Mempool trade: extracting accurate data via Alchemy (txHash=%s)", trade.TransactionHash)
 
-		// Look up the token info from cache to get the REAL outcome
-		tokenInfo, err := ct.store.GetTokenInfo(ctx, trade.MarketID)
+		// Call Alchemy to get accurate Side, Size, Price, TokenID
+		alchemyResult := api.ExtractViaAlchemySimple(trade.TransactionHash, trade.UserID)
+		if alchemyResult == nil || alchemyResult.Error != "" {
+			errMsg := "unknown error"
+			if alchemyResult != nil {
+				errMsg = alchemyResult.Error
+			}
+			log.Printf("[CopyTrader] ⚠️ Mempool: Alchemy extraction failed: %s", errMsg)
+			return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: Alchemy extraction failed: %s", errMsg), "")
+		}
+
+		log.Printf("[CopyTrader] ⚡ Mempool: Alchemy extracted (%s) - %s %.4f tokens @ %.4f, tokenID=%s",
+			alchemyResult.Method, alchemyResult.Direction, alchemyResult.Tokens, alchemyResult.Price, alchemyResult.TokenID)
+
+		// Update trade with accurate Alchemy data
+		trade.Side = alchemyResult.Direction
+		trade.Size = alchemyResult.Tokens
+		trade.Price = alchemyResult.Price
+		tokenID = alchemyResult.TokenID
+
+		// Look up outcome from token cache (tokenID is now accurate from Alchemy)
+		tokenInfo, err := ct.store.GetTokenInfo(ctx, tokenID)
 		if err == nil && tokenInfo != nil {
-			tokenID = trade.MarketID
-			// CRITICAL: Use the ACTUAL outcome from token cache, NOT the decoded "BUY"/"SELL"
-			if tokenInfo.Outcome != "" && tokenInfo.Outcome != trade.Outcome {
-				log.Printf("[CopyTrader] ⚠️ Mempool: Correcting outcome from '%s' to '%s'", trade.Outcome, tokenInfo.Outcome)
-				trade.Outcome = tokenInfo.Outcome
-			}
-			log.Printf("[CopyTrader] ⚡ Mempool: verified tokenID=%s, outcome=%s", tokenID, trade.Outcome)
+			trade.Outcome = tokenInfo.Outcome
+			log.Printf("[CopyTrader] ⚡ Mempool: outcome from cache = %s", trade.Outcome)
 		} else {
-			// Token not in cache - fetch from Gamma API
-			log.Printf("[CopyTrader] ⚡ Mempool: token not in cache, fetching from Gamma API...")
-			gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, trade.MarketID)
+			// Fetch from Gamma API
+			gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, tokenID)
 			if err != nil {
-				// If we can't verify, skip this trade - safety first
-				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: failed to verify tokenID %s: %v", trade.MarketID, err), "")
+				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: failed to get token info for %s: %v", tokenID, err), "")
 			}
-			tokenID = trade.MarketID
 			trade.Outcome = gammaInfo.Outcome
 			negRisk = gammaInfo.NegRisk
-			// Cache for next time
-			ct.store.SaveTokenInfo(ctx, trade.MarketID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
-			log.Printf("[CopyTrader] ⚡ Mempool: verified from Gamma - tokenID=%s, outcome=%s", tokenID, trade.Outcome)
+			ct.store.SaveTokenInfo(ctx, tokenID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
+			log.Printf("[CopyTrader] ⚡ Mempool: outcome from Gamma = %s", trade.Outcome)
 		}
 	} else if trade.DetectionSource == "live_ws" {
 		// LiveData WebSocket: MarketID is conditionID, need to look up tokenID
@@ -923,8 +988,36 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 	return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, nil)
 }
 
-// executeBotBuyWithBook is the same as executeBotBuy but accepts a pre-fetched order book channel
-// for parallel execution optimization
+// =============================================================================
+// executeBotBuyWithBook - MAIN BUY EXECUTION FOR BOT STRATEGY
+// =============================================================================
+//
+// This is the CRITICAL PATH for copy trade execution. Every millisecond matters!
+//
+// EXECUTION STEPS:
+//   1. Load user settings (multiplier, min/max USDC)
+//   2. Calculate target shares: copiedTradeSize × multiplier
+//   3. Calculate max acceptable price: copiedPrice × (1 + slippage)
+//   4. Fetch order book (or use pre-fetched from parallel channel)
+//   5. Scan asks to find affordable liquidity within price limit
+//   6. Sweep through asks: accumulate shares until target reached
+//   7. Apply minimum order size ($1 or user's minUSDC)
+//   8. Place order at maxFillPrice (sweeps all acceptable levels)
+//   9. Update position tracking in database
+//
+// ORDER BOOK SWEEPING EXAMPLE:
+//   Target: 100 shares, Max price: $0.55
+//   Order book asks:
+//     50 @ $0.50 → Take all 50, cost $25
+//     30 @ $0.52 → Take all 30, cost $15.60
+//     40 @ $0.54 → Take 20 (reach target), cost $10.80
+//   Result: Order for 100 shares at $0.54 (max fill price)
+//
+// WHY maxFillPrice INSTEAD OF avgPrice?
+//   If we use avgPrice ($0.514), the order only matches $0.50 and $0.52 levels.
+//   Using maxFillPrice ($0.54) ensures we sweep ALL acceptable levels.
+//
+// =============================================================================
 func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult) error {
 	// Initialize timing tracking
 	startTime := time.Now()
@@ -994,12 +1087,7 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 	log.Printf("[CopyTrader-Bot] BUY: Copied shares=%.4f, targetShares=%.4f, copiedPrice=%.4f, maxPrice=%.4f (+%.0f%%), market=%s",
 		trade.Size, targetShares, copiedPrice, maxPrice, slippagePct, trade.Title)
 
-	// Step 3: Add token to cache
-	cacheStart := time.Now()
-	ct.clobClient.AddTokenToCache(tokenID)
-	timing["3_token_cache_ms"] = float64(time.Since(cacheStart).Microseconds()) / 1000
-
-	// Step 4: Get order book (use pre-fetched if available, otherwise fetch now)
+	// Step 3: Get order book (use pre-fetched if available, otherwise fetch now)
 	orderBookStart := time.Now()
 	var book *api.OrderBook
 	var err error
@@ -1350,9 +1438,6 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f, sellSize=%.4f, market=%s",
 		copiedPrice, minPrice, sellSize, trade.Title)
 
-	// Add token to cache
-	ct.clobClient.AddTokenToCache(tokenID)
-
 	// Get order book (use pre-fetched if available, otherwise fetch now)
 	var book *api.OrderBook
 	var bookErr error
@@ -1599,9 +1684,15 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		followerPrice = &price
 	}
 
+	// Use TxHash for dedup (not trade.ID which may include :LogIndex)
+	followingTradeID := trade.TransactionHash
+	if followingTradeID == "" {
+		followingTradeID = trade.ID
+	}
+
 	logEntry := storage.CopyTradeLogEntry{
 		FollowingAddress: trade.UserID,
-		FollowingTradeID: trade.ID,
+		FollowingTradeID: followingTradeID,
 		FollowingTime:    trade.Timestamp,
 		FollowingShares:  followingShares,
 		FollowingPrice:   trade.Price,

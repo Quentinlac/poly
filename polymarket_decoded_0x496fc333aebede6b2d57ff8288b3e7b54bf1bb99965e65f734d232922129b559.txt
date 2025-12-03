@@ -1,0 +1,172 @@
+==============================================
+POLYMARKET TRANSACTION DECODER
+==============================================
+Transaction: 0x496fc333aebede6b2d57ff8288b3e7b54bf1bb99965e65f734d232922129b559
+Decoded at: Wed  3 Dec 2025 15:03:30 CET
+
+=== BASIC TRANSACTION INFO ===
+Block: 0x4c2268b
+From: 0x0c802c7429d3e2c5994db49bf6a7a6af2deaa998
+To: 0xe3f18acc55091e2c48d883fc8c8413319d4ab7b0
+Gas: 0x1b7740
+
+=== TRANSACTION STATUS ===
+Status: SUCCESS
+Gas Used: 0x7be2e
+
+=== POLYMARKET EVENTS DETECTED ===
+
+--- Log #0x29b ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+
+--- Log #0x29c ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Amount: 4.340000 USDC
+
+--- Log #0x29d ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Unknown
+  Signature: 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
+
+--- Log #0x29e ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+
+--- Log #0x29f ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0x439c85b0051c0518dc84a6ec700f67f1fbd2702350ddeaf61e21f75e6acbb38c
+  Maker: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+  Taker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Maker gives: 4.340000 USDC
+  Taker gives: 14000000 outcome tokens
+  Fee: 0 USDC
+
+--- Log #0x2a0 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Amount: 4.340000 USDC
+
+--- Log #0x2a1 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Unknown
+  Signature: 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
+
+--- Log #0x2a2 ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+
+--- Log #0x2a3 ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0x01fd25b4ca617bbc27c46dac5c04583f26006f39d7e0c5597a5ea0d9923dcfa4
+  Maker: 0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+  Taker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Maker gives: 4.340000 USDC
+  Taker gives: 14000000 outcome tokens
+  Fee: 0 USDC
+
+--- Log #0x2a4 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Amount: 15.870000 USDC
+
+--- Log #0x2a5 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Unknown
+  Signature: 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
+
+--- Log #0x2a6 ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+
+--- Log #0x2a7 ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0x621430c8842b60fbb437675864edada653b2c6a7f94157d7a4c1e569ffea582c
+  Maker: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+  Taker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Maker gives: 15.870000 USDC
+  Taker gives: 52900000 outcome tokens
+  Fee: 0 USDC
+
+--- Log #0x2a8 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x203f6f1fa096197f735434c7000758964beb521e
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Amount: 2.130000 USDC
+
+--- Log #0x2a9 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Unknown
+  Signature: 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
+
+--- Log #0x2aa ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x203f6f1fa096197f735434c7000758964beb521e
+
+--- Log #0x2ab ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0x31c007bd4d96b329533991ddc1a2d29afaa043b9c3a792ae85a8389bb1499eaf
+  Maker: 0x203f6f1fa096197f735434c7000758964beb521e
+  Taker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Maker gives: 2.130000 USDC
+  Taker gives: 7100000 outcome tokens
+  Fee: 0 USDC
+
+--- Log #0x2ac ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Amount: 26.680000 USDC
+
+--- Log #0x2ad ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0x4e309a52f62e914c730faa19345de7bf58a6bdad4ecc80270e610076ef8a60f9
+  Maker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+  Taker: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Maker gives: 88000000 outcome tokens
+  Taker gives: 26.680000 USDC
+  Fee: 0 USDC
+
+--- Log #0x2ae ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrdersMatched
+  Taker Order Hash: 0x4e309a52f62e914c730faa19345de7bf58a6bdad4ecc80270e610076ef8a60f9
+  Taker Order Maker: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+
+--- Log #0x2af ---
+Contract: 0x0000000000000000000000000000000000001010
+Event: Unknown
+  Signature: 0x4dfe1bbbcf077ddc3e01291eea2d5c70c2b422b415d95645b9adcfd678cb1d63
+
+==============================================
+DECODING COMPLETE
+==============================================

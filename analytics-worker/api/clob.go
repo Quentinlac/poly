@@ -1,3 +1,56 @@
+// =============================================================================
+// CLOB CLIENT - ORDER BOOK FETCHING & ORDER PLACEMENT
+// =============================================================================
+//
+// This file handles all interactions with Polymarket's CLOB (Central Limit
+// Order Book) API. It's responsible for:
+//   - Fetching order books (liquidity available for buying/selling)
+//   - Placing orders (FOK, GTC, market orders)
+//   - Managing API credentials (L1/L2 authentication)
+//   - Caching order books for faster execution
+//
+// ORDER BOOK FLOW:
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  GetOrderBook(tokenID)                                                      │
+// │     ↓                                                                       │
+// │  HTTP GET https://clob.polymarket.com/book?token_id={tokenID}              │
+// │     ↓                                                                       │
+// │  Response: { bids: [[price, size]...], asks: [[price, size]...] }          │
+// │     ↓                                                                       │
+// │  Sort asks ascending (best/lowest price first)                             │
+// │  Sort bids descending (best/highest price first)                           │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// ORDER PLACEMENT FLOW:
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  PlaceOrderFast(tokenID, side, size, price, negRisk)                       │
+// │     ↓                                                                       │
+// │  1. createSignedOrder() - Build Order struct with amounts                  │
+// │     - BUY: makerAmount=USDC, takerAmount=tokens                            │
+// │     - SELL: makerAmount=tokens, takerAmount=USDC                           │
+// │     ↓                                                                       │
+// │  2. signOrder() - EIP-712 typed data signature                             │
+// │     - Domain: "Polymarket CTF Exchange" on chain 137 (Polygon)             │
+// │     - Contract: CTFExchange or NegRiskCTFExchange based on market          │
+// │     ↓                                                                       │
+// │  3. postOrder() - HTTP POST to /order endpoint                             │
+// │     - Add L2 auth headers (POLY_API_KEY, POLY_SIGNATURE, etc.)            │
+// │     - Try FOK first (immediate execution or fail)                          │
+// │     - Fall back to GTC (stays in book until filled/cancelled)             │
+// │     ↓                                                                       │
+// │  4. Response: { success, orderId, status }                                 │
+// │     - status: "matched" (filled), "live" (in book), "delayed", "unmatched"│
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// KEY CONCEPTS:
+// - Token amounts: 6 decimal places (1.00 token = 1000000)
+// - USDC amounts: 6 decimal places (1.00 USDC = 1000000)
+// - Tick size: 0.01 (prices like 0.50, 0.51, 0.52...)
+// - FOK (Fill-Or-Kill): Execute immediately at specified price or fail
+// - GTC (Good-Till-Cancel): Stay in order book until filled or cancelled
+// - negRisk: Markets where "No" outcome uses NegRiskCTFExchange contract
+//
+// =============================================================================
 package api
 
 import (
@@ -18,7 +71,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -36,20 +88,6 @@ type ClobClient struct {
 	chainID       int64
 	funder        common.Address
 	signatureType int // 0=EOA, 1=Magic/Email, 2=Browser proxy
-
-	// Order book cache for faster copy trading
-	orderBookCache     map[string]*CachedOrderBook
-	orderBookCacheMu   sync.RWMutex
-	cacheRefreshStop   chan struct{}
-	cacheRefreshTokens []string
-	cacheRefreshMu     sync.RWMutex
-}
-
-// CachedOrderBook holds a cached order book with timestamp
-type CachedOrderBook struct {
-	Book      *OrderBook
-	CachedAt  time.Time
-	ExpiresAt time.Time
 }
 
 // APICreds holds API credentials for CLOB
@@ -165,12 +203,10 @@ func NewClobClient(baseURL string, auth *Auth) (*ClobClient, error) {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		auth:             auth,
-		chainID:          137, // Polygon mainnet
-		funder:           auth.GetAddress(),
-		signatureType:    0, // Default to EOA
-		orderBookCache:   make(map[string]*CachedOrderBook),
-		cacheRefreshStop: make(chan struct{}),
+		auth:          auth,
+		chainID:       137, // Polygon mainnet
+		funder:        auth.GetAddress(),
+		signatureType: 0, // Default to EOA
 	}
 
 	return client, nil
@@ -316,7 +352,29 @@ func (c *ClobClient) createAPICreds(ctx context.Context) (*APICreds, error) {
 	return &creds, nil
 }
 
-// GetOrderBook fetches the order book for a token
+// =============================================================================
+// GetOrderBook - FETCH CURRENT LIQUIDITY FOR A MARKET
+// =============================================================================
+//
+// Retrieves the order book from Polymarket's CLOB API.
+//
+// INPUT: tokenID - The market token ID (decimal string, e.g., "123456789...")
+//
+// OUTPUT: OrderBook containing:
+//   - Bids: Price levels where people want to BUY (sorted highest first)
+//   - Asks: Price levels where people want to SELL (sorted lowest first)
+//
+// USAGE FOR COPY TRADING:
+//   - When copying a BUY: Look at Asks (we need to buy from sellers)
+//   - When copying a SELL: Look at Bids (we need to sell to buyers)
+//
+// EXAMPLE ORDER BOOK:
+//   Bids (buyers):           Asks (sellers):
+//   $0.48 - 500 shares       $0.52 - 200 shares  ← Best ask (buy here first)
+//   $0.47 - 300 shares       $0.53 - 150 shares
+//   $0.45 - 1000 shares      $0.55 - 500 shares
+//
+// =============================================================================
 func (c *ClobClient) GetOrderBook(ctx context.Context, tokenID string) (*OrderBook, error) {
 	values := url.Values{}
 	values.Set("token_id", tokenID)
@@ -357,122 +415,6 @@ func (c *ClobClient) GetOrderBook(ctx context.Context, tokenID string) (*OrderBo
 	})
 
 	return &book, nil
-}
-
-// GetCachedOrderBook returns an order book from cache if available and fresh,
-// otherwise fetches a new one and caches it
-func (c *ClobClient) GetCachedOrderBook(ctx context.Context, tokenID string) (*OrderBook, error) {
-	// Try to get from cache first
-	c.orderBookCacheMu.RLock()
-	cached, exists := c.orderBookCache[tokenID]
-	c.orderBookCacheMu.RUnlock()
-
-	if exists && time.Now().Before(cached.ExpiresAt) {
-		return cached.Book, nil
-	}
-
-	// Cache miss or expired - fetch fresh
-	book, err := c.GetOrderBook(ctx, tokenID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Cache it with 1-second TTL
-	c.orderBookCacheMu.Lock()
-	c.orderBookCache[tokenID] = &CachedOrderBook{
-		Book:      book,
-		CachedAt:  time.Now(),
-		ExpiresAt: time.Now().Add(1 * time.Second),
-	}
-	c.orderBookCacheMu.Unlock()
-
-	return book, nil
-}
-
-// AddTokenToCache adds a token ID to the list of tokens to cache
-func (c *ClobClient) AddTokenToCache(tokenID string) {
-	c.cacheRefreshMu.Lock()
-	defer c.cacheRefreshMu.Unlock()
-
-	// Check if already exists
-	for _, t := range c.cacheRefreshTokens {
-		if t == tokenID {
-			return
-		}
-	}
-	c.cacheRefreshTokens = append(c.cacheRefreshTokens, tokenID)
-	log.Printf("[ClobClient] Added token %s to order book cache (total: %d)", tokenID[:16], len(c.cacheRefreshTokens))
-}
-
-// RemoveTokenFromCache removes a token ID from the cache list
-func (c *ClobClient) RemoveTokenFromCache(tokenID string) {
-	c.cacheRefreshMu.Lock()
-	defer c.cacheRefreshMu.Unlock()
-
-	for i, t := range c.cacheRefreshTokens {
-		if t == tokenID {
-			c.cacheRefreshTokens = append(c.cacheRefreshTokens[:i], c.cacheRefreshTokens[i+1:]...)
-			break
-		}
-	}
-}
-
-// StartOrderBookCaching starts background goroutine to refresh order books
-func (c *ClobClient) StartOrderBookCaching() {
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond) // Refresh every 500ms for freshness
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-c.cacheRefreshStop:
-				return
-			case <-ticker.C:
-				c.refreshOrderBookCache()
-			}
-		}
-	}()
-	log.Printf("[ClobClient] Started order book caching (500ms refresh)")
-}
-
-// StopOrderBookCaching stops the background caching goroutine
-func (c *ClobClient) StopOrderBookCaching() {
-	select {
-	case <-c.cacheRefreshStop:
-		// Already closed
-	default:
-		close(c.cacheRefreshStop)
-	}
-}
-
-// refreshOrderBookCache refreshes all tracked order books
-func (c *ClobClient) refreshOrderBookCache() {
-	c.cacheRefreshMu.RLock()
-	tokens := make([]string, len(c.cacheRefreshTokens))
-	copy(tokens, c.cacheRefreshTokens)
-	c.cacheRefreshMu.RUnlock()
-
-	if len(tokens) == 0 {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	for _, tokenID := range tokens {
-		book, err := c.GetOrderBook(ctx, tokenID)
-		if err != nil {
-			continue // Skip on error, will retry next tick
-		}
-
-		c.orderBookCacheMu.Lock()
-		c.orderBookCache[tokenID] = &CachedOrderBook{
-			Book:      book,
-			CachedAt:  time.Now(),
-			ExpiresAt: time.Now().Add(1 * time.Second),
-		}
-		c.orderBookCacheMu.Unlock()
-	}
 }
 
 // GetMarket fetches market information
@@ -965,8 +907,43 @@ func (c *ClobClient) PlaceOrderFOK(ctx context.Context, tokenID string, side Sid
 	return c.postOrder(ctx, order, OrderTypeFOK)
 }
 
-// PlaceOrderFast tries FOK first (immediate execution), falls back to GTC if FOK fails
-// FOK can fail due to precision limits or no liquidity at exact price
+// =============================================================================
+// PlaceOrderFast - PRIMARY ORDER PLACEMENT (FOK → GTC FALLBACK)
+// =============================================================================
+//
+// This is the main function used by CopyTrader to place orders. It tries two
+// strategies to maximize fill rate while maintaining speed:
+//
+// STRATEGY 1: FOK (Fill-Or-Kill) - Immediate execution only
+//   - Executes immediately if liquidity available at price
+//   - Fails completely if can't fill (no partial fills)
+//   - Requires stricter precision (2 decimal USDC, 4 decimal tokens)
+//   - Fastest when it works
+//
+// STRATEGY 2: GTC (Good-Till-Cancel) - Falls back if FOK fails
+//   - Stays in order book until filled
+//   - More flexible precision requirements
+//   - Better fill rate for larger orders
+//
+// INPUT PARAMETERS:
+//   - tokenID: Market token ID (decimal string)
+//   - side: SideBuy or SideSell
+//   - size: Number of shares to buy/sell
+//   - price: Price per share (e.g., 0.55 for 55 cents)
+//   - negRisk: true if this is a negative-risk market
+//
+// PRECISION REQUIREMENTS (enforced internally):
+//   - Price: Rounded to tick size (0.01)
+//   - Size: Rounded to 2 or 4 decimal places
+//   - Minimum: $1 USDC for marketable orders
+//   - Minimum: 0.1 tokens
+//
+// OUTPUT: OrderResponse containing:
+//   - Success: true if order accepted
+//   - OrderID: Unique identifier for tracking
+//   - Status: "matched", "live", "delayed", or "unmatched"
+//
+// =============================================================================
 func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
 	if c.apiCreds == nil {
 		if _, err := c.DeriveAPICreds(ctx); err != nil {
@@ -1017,11 +994,6 @@ func (c *ClobClient) createSignedOrderFOK(tokenID string, side Side, size float6
 
 	// For FOK: size can have up to 4 decimals
 	size = float64(int(size*10000+0.5)) / 10000
-
-	// Enforce minimum order size
-	if size < 0.01 {
-		size = 0.01
-	}
 
 	// Polymarket requires minimum token sizes (0.1 tokens based on testing)
 	const minTokenSize = 0.1
@@ -1102,6 +1074,41 @@ func (c *ClobClient) createSignedOrderFOK(tokenID string, side Side, size float6
 	return order, nil
 }
 
+// =============================================================================
+// createSignedOrder - BUILD AND SIGN AN ORDER FOR SUBMISSION
+// =============================================================================
+//
+// Creates a signed order ready for submission to the CLOB API.
+//
+// ORDER STRUCTURE (Polymarket EIP-712 typed data):
+//   - salt: Random nonce for uniqueness
+//   - maker: Address that provides liquidity (funder for Magic wallets)
+//   - signer: Address that signs the order (EOA private key)
+//   - taker: Who can fill (0x0 = anyone)
+//   - tokenId: Market token ID
+//   - makerAmount: What maker gives (USDC for buy, tokens for sell)
+//   - takerAmount: What maker receives (tokens for buy, USDC for sell)
+//   - expiration: 0 for GTC (no expiration)
+//   - nonce, feeRateBps: Usually 0
+//   - side: 0=BUY, 1=SELL
+//   - signatureType: 0=EOA, 1=Magic/Email wallet
+//
+// AMOUNT CALCULATION:
+//   BUY ORDER: "I want to pay X USDC to get Y tokens"
+//     makerAmount = USDC (what I give) = size × price × 10^6
+//     takerAmount = tokens (what I get) = size × 10^6
+//
+//   SELL ORDER: "I want to sell Y tokens to get X USDC"
+//     makerAmount = tokens (what I give) = size × 10^6
+//     takerAmount = USDC (what I get) = size × price × 10^6
+//
+// PRECISION HANDLING:
+//   - Price rounded to 0.01 (tick size)
+//   - Size rounded to 0.01 (2 decimals)
+//   - USDC: 4 decimal precision in 6-decimal format
+//   - Tokens: 2 decimal precision in 6-decimal format
+//
+// =============================================================================
 func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, price float64, negRisk bool) (*Order, error) {
 	// Round price to tick size (0.01 for most markets)
 	tickSize := 0.01
@@ -1109,12 +1116,6 @@ func (c *ClobClient) createSignedOrder(tokenID string, side Side, size float64, 
 
 	// Round size to 2 decimal places
 	size = float64(int(size*100+0.5)) / 100
-
-	// Enforce minimum order size
-	if size < 0.01 {
-		size = 0.01
-	}
-
 
 	// Convert to base units
 	// USDC: 6 decimals

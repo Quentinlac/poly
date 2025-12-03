@@ -1,0 +1,85 @@
+==============================================
+POLYMARKET TRANSACTION DECODER
+==============================================
+Transaction: 0xcc0259acd6afad0aa543434586f1e9937459d02fb883b986c4d005dbc2ee83ba
+Decoded at: Wed  3 Dec 2025 14:48:36 CET
+
+=== BASIC TRANSACTION INFO ===
+Block: 0x4c21eda
+From: 0xae5d7147ed7c1c312cd2762613442ee0f2c3124d
+To: 0xe3f18acc55091e2c48d883fc8c8413319d4ab7b0
+Gas: 0xdbba0
+
+=== TRANSACTION STATUS ===
+Status: SUCCESS
+Gas Used: 0x382fb
+
+=== POLYMARKET EVENTS DETECTED ===
+
+--- Log #0x41b ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x203f6f1fa096197f735434c7000758964beb521e
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+
+--- Log #0x41c ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+  To: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Amount: 6.900000 USDC
+
+--- Log #0x41d ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Unknown
+  Signature: 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925
+
+--- Log #0x41e ---
+Contract: 0x4d97dcd97ec945f40cf65f87097ace5ea0476045
+Event: TransferSingle (ERC1155 - Outcome Token)
+  Operator: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+
+--- Log #0x41f ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0xa9fd5217a58ee0473dc8e026d2596aed92d1d1a0e03a6d558df272decc6e5a27
+  Maker: 0x818f214c7f3e479cce1d964d53fe3db7297558cb
+  Taker: 0x203f6f1fa096197f735434c7000758964beb521e
+  Maker gives: 6.900000 USDC
+  Taker gives: 10000000 outcome tokens
+  Fee: 0 USDC
+
+--- Log #0x420 ---
+Contract: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+Event: Transfer (ERC20 - likely USDC)
+  From: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  To: 0x203f6f1fa096197f735434c7000758964beb521e
+  Amount: 6.900000 USDC
+
+--- Log #0x421 ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrderFilled
+  Order Hash: 0xa4b0126557b1ef9c54af82b97152c860aa47694d3c27cf61c838f3cfc882a897
+  Maker: 0x203f6f1fa096197f735434c7000758964beb521e
+  Taker: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+  Maker gives: 10000000 outcome tokens
+  Taker gives: 6.900000 USDC
+  Fee: 0 USDC
+
+--- Log #0x422 ---
+Contract: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e
+Event: OrdersMatched
+  Taker Order Hash: 0xa4b0126557b1ef9c54af82b97152c860aa47694d3c27cf61c838f3cfc882a897
+  Taker Order Maker: 0x203f6f1fa096197f735434c7000758964beb521e
+
+--- Log #0x423 ---
+Contract: 0x0000000000000000000000000000000000001010
+Event: Unknown
+  Signature: 0x4dfe1bbbcf077ddc3e01291eea2d5c70c2b422b415d95645b9adcfd678cb1d63
+
+==============================================
+DECODING COMPLETE
+==============================================

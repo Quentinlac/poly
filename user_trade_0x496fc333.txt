@@ -1,0 +1,21 @@
+TX: 0x496fc333aebede6b2d57ff8288b3e7b54bf1bb99965e65f734d232922129b559
+User: 0x05c1882212a41aa8d7df5b70eebe03d9319345b7
+Time: Wed  3 Dec 2025 15:16:04 CET
+----------------------------------------
+
+Direction: SELL
+Tokens: 88.00
+USDC: 26.680000
+Price: .303181 USDC/token
+Order: 0x4e309a52f62e914c...
+
+========================================
+SUMMARY
+========================================
+
+TOTAL SELL (1 trades):
+  Tokens: 88.00
+  USDC received: 26.680000
+  Avg Price: .303181 USDC/token
+
+----------------------------------------

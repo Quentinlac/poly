@@ -161,14 +161,6 @@ func (m *MockClobClient) PlaceOrder(ctx context.Context, order OrderRequest) (*O
 	}, nil
 }
 
-func (m *MockClobClient) StartOrderBookCaching() {
-	m.trackCall("StartOrderBookCaching")
-}
-
-func (m *MockClobClient) StopOrderBookCaching() {
-	m.trackCall("StopOrderBookCaching")
-}
-
 func (m *MockClobClient) SetFunder(address string) {
 	m.trackCall("SetFunder")
 }

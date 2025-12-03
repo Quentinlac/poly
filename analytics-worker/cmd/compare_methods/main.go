@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"polymarket-analyzer/api"
 )
 
 const (
@@ -338,19 +339,24 @@ func processMempoolTx(txHash, targetAddrClean string) {
 
 	now := time.Now()
 
-	decoded, side, tokenID, makerAmount, takerAmount, fillAmount, _ := decodeOrderFullDebug(tx.Input, targetAddrClean)
+	// Use the improved decoder from api package
+	// This correctly handles TAKER vs MAKER detection and fillAmounts
+	order, _, _ := api.DecodeTradeInputForTarget(tx.Input, targetAddress)
+	if !order.Decoded {
+		return
+	}
 
 	var shares, price float64
 
-	if decoded && fillAmount != nil && fillAmount.Sign() > 0 {
-		fillF := new(big.Float).SetInt(fillAmount)
+	if order.FillAmount != nil && order.FillAmount.Sign() > 0 {
+		fillF := new(big.Float).SetInt(order.FillAmount)
 		shares, _ = new(big.Float).Quo(fillF, big.NewFloat(1e6)).Float64()
 	}
 
-	if decoded && makerAmount != nil && takerAmount != nil && makerAmount.Sign() > 0 && takerAmount.Sign() > 0 {
-		makerF := new(big.Float).SetInt(makerAmount)
-		takerF := new(big.Float).SetInt(takerAmount)
-		if side == "BUY" {
+	if order.MakerAmount != nil && order.TakerAmount != nil && order.MakerAmount.Sign() > 0 && order.TakerAmount.Sign() > 0 {
+		makerF := new(big.Float).SetInt(order.MakerAmount)
+		takerF := new(big.Float).SetInt(order.TakerAmount)
+		if order.Side == "BUY" {
 			price, _ = new(big.Float).Quo(makerF, takerF).Float64()
 		} else {
 			price, _ = new(big.Float).Quo(takerF, makerF).Float64()
@@ -362,13 +368,13 @@ func processMempoolTx(txHash, targetAddrClean string) {
 		TimestampDetected: now,
 		Method:            "MEMPOOL",
 		Shares:            shares,
-		Side:              side,
-		TokenID:           tokenID,
+		Side:              order.Side,
+		TokenID:           order.TokenID,
 		Price:             price,
 	})
 
 	log.Printf("[MEMPOOL] %s | %.2f shares @ %.4f | TX: %s",
-		side, shares, price, txHash[:16])
+		order.Side, shares, price, txHash[:16])
 }
 
 func decodeOrderFullDebug(input string, targetAddrClean string) (decoded bool, side string, tokenID string, makerAmount *big.Int, takerAmount *big.Int, fillAmount *big.Int, debugInfo string) {
