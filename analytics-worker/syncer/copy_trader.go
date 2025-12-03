@@ -1287,6 +1287,20 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		}
 	}
 
+	// Ensure we meet minimum 5 shares
+	const minShares = 5.0
+	if totalSize < minShares {
+		log.Printf("[CopyTrader-Bot] BUY: size %.4f below minimum, bumping to %.0f shares", totalSize, minShares)
+		originalSize := totalSize
+		totalSize = minShares
+		totalCost = totalSize * orderPrice
+		debugLog["minSharesAdjustment"] = map[string]interface{}{
+			"originalSize": originalSize,
+			"adjustedSize": minShares,
+			"adjustedCost": totalCost,
+		}
+	}
+
 	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f, orderPrice=%.4f (max fill)",
 		totalSize, totalCost, avgPrice, orderPrice)
 
@@ -1428,12 +1442,18 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
 	}
 
-	// Minimum sell size - can't bump up for SELL (we may not have more shares)
-	const minSellSize = 0.1
-	if sellSize < minSellSize {
-		log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.2f shares, skipping", sellSize, minSellSize)
-		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped",
-			fmt.Sprintf("size %.4f below minimum %.2f shares", sellSize, minSellSize), "", userSettings.StrategyType, nil, nil, timestamps)
+	// Ensure minimum 5 shares for SELL
+	const minSellShares = 5.0
+	if sellSize < minSellShares {
+		if ourPosition >= minSellShares {
+			// We have enough - bump up to minimum
+			log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum, bumping to %.0f shares (position=%.4f)", sellSize, minSellShares, ourPosition)
+			sellSize = minSellShares
+		} else {
+			// We don't have enough - sell entire position
+			log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.0f, selling entire position %.4f", sellSize, minSellShares, ourPosition)
+			sellSize = ourPosition
+		}
 	}
 
 	// Use dynamic slippage based on price (lower prices are more volatile)
