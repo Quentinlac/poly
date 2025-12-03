@@ -1421,12 +1421,12 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
 	}
 
-	// Polymarket requires minimum 5 shares - can't bump up for SELL (we may not have more)
-	const polymarketMinShares = 5.0
-	if sellSize < polymarketMinShares {
-		log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.0f shares, skipping", sellSize, polymarketMinShares)
+	// Minimum sell size - can't bump up for SELL (we may not have more shares)
+	const minSellSize = 0.1
+	if sellSize < minSellSize {
+		log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.2f shares, skipping", sellSize, minSellSize)
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "skipped",
-			fmt.Sprintf("size %.2f below minimum %d shares", sellSize, int(polymarketMinShares)), "", userSettings.StrategyType, nil, nil, timestamps)
+			fmt.Sprintf("size %.4f below minimum %.2f shares", sellSize, minSellSize), "", userSettings.StrategyType, nil, nil, timestamps)
 	}
 
 	// Use dynamic slippage based on price (lower prices are more volatile)
