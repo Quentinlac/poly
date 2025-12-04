@@ -454,6 +454,22 @@ func (c *ClobClient) GetOrderBook(ctx context.Context, tokenID string) (*OrderBo
 		return priceI > priceJ
 	})
 
+	// Log best 2 asks and bids
+	var askStr, bidStr string
+	for i := 0; i < 2 && i < len(book.Asks); i++ {
+		if i > 0 {
+			askStr += ", "
+		}
+		askStr += fmt.Sprintf("%s@$%s", book.Asks[i].Size, book.Asks[i].Price)
+	}
+	for i := 0; i < 2 && i < len(book.Bids); i++ {
+		if i > 0 {
+			bidStr += ", "
+		}
+		bidStr += fmt.Sprintf("%s@$%s", book.Bids[i].Size, book.Bids[i].Price)
+	}
+	log.Printf("[OrderBook] asks(%d): %s | bids(%d): %s", len(book.Asks), askStr, len(book.Bids), bidStr)
+
 	return &book, nil
 }
 
