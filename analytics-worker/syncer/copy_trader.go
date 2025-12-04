@@ -1854,14 +1854,87 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 			totalFilledCost += foSize * foPrice
 			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, foSize*foPrice, foPrice, foSize, "executed", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
 		} else {
-			// Order is pending - cancel it (we want immediate fills only)
-			cancelFoStart := time.Now()
-			ct.clobClient.CancelOrder(ctx, foResp.OrderID)
-			cancelFoMs := float64(time.Since(cancelFoStart).Microseconds()) / 1000
-			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | PENDING → cancelled in %.0fms", txRef, elapsed(), i+1, foMs, cancelFoMs)
-			foDebugLog["cancelled"] = true
-			foTiming["cancel_ms"] = cancelFoMs
-			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "cancelled", "no immediate fill", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			// Order is pending - wait up to 15 seconds for it to fill
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | PENDING, waiting up to 15s for fill...", txRef, elapsed(), i+1, foMs)
+
+			const followUpWaitTime = 15 * time.Second
+			const pollInterval = 500 * time.Millisecond
+			waitStart := time.Now()
+			var finalFilled float64
+			var finalStatus string
+
+			for time.Since(waitStart) < followUpWaitTime {
+				time.Sleep(pollInterval)
+				order, getErr := ct.clobClient.GetOrder(ctx, foResp.OrderID)
+				if getErr != nil {
+					continue
+				}
+				if order == nil {
+					continue
+				}
+
+				sizeMatched, _ := strconv.ParseFloat(order.SizeMatched, 64)
+				finalStatus = order.Status
+
+				// Check if fully filled or order is no longer active
+				if sizeMatched >= foSize*0.99 || order.Status == "matched" || order.Status == "filled" {
+					finalFilled = sizeMatched
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: FILLED %.4f after %dms wait", txRef, elapsed(), i+1, finalFilled, time.Since(waitStart).Milliseconds())
+					break
+				}
+
+				// If order was cancelled externally or expired
+				if order.Status == "canceled" || order.Status == "cancelled" || order.Status == "expired" {
+					finalFilled = sizeMatched
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: %s with %.4f filled after %dms", txRef, elapsed(), i+1, order.Status, finalFilled, time.Since(waitStart).Milliseconds())
+					break
+				}
+
+				// Partial fill - keep waiting
+				if sizeMatched > 0 {
+					finalFilled = sizeMatched
+				}
+			}
+
+			waitMs := float64(time.Since(waitStart).Milliseconds())
+			foTiming["wait_ms"] = waitMs
+
+			// Check final status one more time
+			if finalFilled < foSize*0.99 {
+				order, _ := ct.clobClient.GetOrder(ctx, foResp.OrderID)
+				if order != nil {
+					sizeMatched, _ := strconv.ParseFloat(order.SizeMatched, 64)
+					finalFilled = sizeMatched
+					finalStatus = order.Status
+				}
+			}
+
+			if finalFilled >= 0.01 {
+				// Got some fill
+				totalFilledSize += finalFilled
+				totalFilledCost += finalFilled * foPrice
+				foDebugLog["filled_after_wait"] = finalFilled
+				foTiming["total_wait_ms"] = waitMs
+
+				if finalFilled >= foSize*0.99 {
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: COMPLETE %.4f @ $%.4f after %.0fms wait", txRef, elapsed(), i+1, finalFilled, foPrice, waitMs)
+					ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, finalFilled*foPrice, foPrice, finalFilled, "executed", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+				} else {
+					// Partial fill - cancel remainder
+					ct.clobClient.CancelOrder(ctx, foResp.OrderID)
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: PARTIAL %.4f/%.4f @ $%.4f after %.0fms, cancelled rest", txRef, elapsed(), i+1, finalFilled, foSize, foPrice, waitMs)
+					ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, finalFilled*foPrice, foPrice, finalFilled, "partial", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+				}
+			} else {
+				// No fill after waiting - cancel
+				cancelFoStart := time.Now()
+				ct.clobClient.CancelOrder(ctx, foResp.OrderID)
+				cancelFoMs := float64(time.Since(cancelFoStart).Microseconds()) / 1000
+				log.Printf("[%s] [%s] 📊 FollowUp#%d: NO FILL after %.0fms → cancelled in %.0fms (status=%s)", txRef, elapsed(), i+1, waitMs, cancelFoMs, finalStatus)
+				foDebugLog["cancelled"] = true
+				foTiming["cancel_ms"] = cancelFoMs
+				ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "cancelled", fmt.Sprintf("no fill after %.0fms", waitMs), foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			}
 		}
 	}
 
@@ -2357,14 +2430,87 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 			totalSoldValue += foSize * foPrice
 			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, foSize*foPrice, foPrice, foSize, "executed", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
 		} else {
-			// Order is pending - cancel it (we want immediate fills only)
-			cancelFoStart := time.Now()
-			ct.clobClient.CancelOrder(ctx, foResp.OrderID)
-			cancelFoMs := float64(time.Since(cancelFoStart).Microseconds()) / 1000
-			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | PENDING → cancelled in %.0fms", txRef, elapsed(), i+1, foMs, cancelFoMs)
-			foDebugLog["cancelled"] = true
-			foTiming["cancel_ms"] = cancelFoMs
-			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "cancelled", "no immediate fill", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			// Order is pending - wait up to 15 seconds for it to fill
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | PENDING, waiting up to 15s for fill...", txRef, elapsed(), i+1, foMs)
+
+			const followUpWaitTime = 15 * time.Second
+			const pollInterval = 500 * time.Millisecond
+			waitStart := time.Now()
+			var finalFilled float64
+			var finalStatus string
+
+			for time.Since(waitStart) < followUpWaitTime {
+				time.Sleep(pollInterval)
+				order, getErr := ct.clobClient.GetOrder(ctx, foResp.OrderID)
+				if getErr != nil {
+					continue
+				}
+				if order == nil {
+					continue
+				}
+
+				sizeMatched, _ := strconv.ParseFloat(order.SizeMatched, 64)
+				finalStatus = order.Status
+
+				// Check if fully filled or order is no longer active
+				if sizeMatched >= foSize*0.99 || order.Status == "matched" || order.Status == "filled" {
+					finalFilled = sizeMatched
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: SOLD %.4f after %dms wait", txRef, elapsed(), i+1, finalFilled, time.Since(waitStart).Milliseconds())
+					break
+				}
+
+				// If order was cancelled externally or expired
+				if order.Status == "canceled" || order.Status == "cancelled" || order.Status == "expired" {
+					finalFilled = sizeMatched
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: %s with %.4f sold after %dms", txRef, elapsed(), i+1, order.Status, finalFilled, time.Since(waitStart).Milliseconds())
+					break
+				}
+
+				// Partial fill - keep waiting
+				if sizeMatched > 0 {
+					finalFilled = sizeMatched
+				}
+			}
+
+			waitMs := float64(time.Since(waitStart).Milliseconds())
+			foTiming["wait_ms"] = waitMs
+
+			// Check final status one more time
+			if finalFilled < foSize*0.99 {
+				order, _ := ct.clobClient.GetOrder(ctx, foResp.OrderID)
+				if order != nil {
+					sizeMatched, _ := strconv.ParseFloat(order.SizeMatched, 64)
+					finalFilled = sizeMatched
+					finalStatus = order.Status
+				}
+			}
+
+			if finalFilled >= 0.01 {
+				// Got some fill
+				totalSoldSize += finalFilled
+				totalSoldValue += finalFilled * foPrice
+				foDebugLog["filled_after_wait"] = finalFilled
+				foTiming["total_wait_ms"] = waitMs
+
+				if finalFilled >= foSize*0.99 {
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: COMPLETE SELL %.4f @ $%.4f after %.0fms wait", txRef, elapsed(), i+1, finalFilled, foPrice, waitMs)
+					ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, finalFilled*foPrice, foPrice, finalFilled, "executed", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+				} else {
+					// Partial fill - cancel remainder
+					ct.clobClient.CancelOrder(ctx, foResp.OrderID)
+					log.Printf("[%s] [%s] 📊 FollowUp#%d: PARTIAL SELL %.4f/%.4f @ $%.4f after %.0fms, cancelled rest", txRef, elapsed(), i+1, finalFilled, foSize, foPrice, waitMs)
+					ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, finalFilled*foPrice, foPrice, finalFilled, "partial", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+				}
+			} else {
+				// No fill after waiting - cancel
+				cancelFoStart := time.Now()
+				ct.clobClient.CancelOrder(ctx, foResp.OrderID)
+				cancelFoMs := float64(time.Since(cancelFoStart).Microseconds()) / 1000
+				log.Printf("[%s] [%s] 📊 FollowUp#%d: NO FILL after %.0fms → cancelled in %.0fms (status=%s)", txRef, elapsed(), i+1, waitMs, cancelFoMs, finalStatus)
+				foDebugLog["cancelled"] = true
+				foTiming["cancel_ms"] = cancelFoMs
+				ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "cancelled", fmt.Sprintf("no fill after %.0fms", waitMs), foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			}
 		}
 	}
 
