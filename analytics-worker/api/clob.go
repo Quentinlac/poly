@@ -1535,3 +1535,103 @@ func CalculateOptimalFill(book *OrderBook, side Side, amountUSDC float64) (total
 
 	return
 }
+
+// =============================================================================
+// ORDER STATUS & CANCELLATION
+// =============================================================================
+
+// OpenOrder represents the status of an order from GET /data/order/{id}
+type OpenOrder struct {
+	ID              string   `json:"id"`
+	Status          string   `json:"status"`
+	Market          string   `json:"market"`
+	OriginalSize    string   `json:"original_size"`
+	SizeMatched     string   `json:"size_matched"`
+	Outcome         string   `json:"outcome"`
+	MakerAddress    string   `json:"maker_address"`
+	Owner           string   `json:"owner"`
+	Price           string   `json:"price"`
+	Side            string   `json:"side"`
+	AssetID         string   `json:"asset_id"`
+	Expiration      string   `json:"expiration"`
+	Type            string   `json:"type"`
+	CreatedAt       string   `json:"created_at"`
+	AssociateTrades []string `json:"associate_trades"`
+}
+
+// GetOrder retrieves order status by order ID
+// Returns the order with original_size, size_matched, status, etc.
+func (c *ClobClient) GetOrder(ctx context.Context, orderID string) (*OpenOrder, error) {
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return nil, fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/data/order/"+orderID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add browser-like headers
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+
+	// Add L2 headers
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get order failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	var order OpenOrder
+	if err := json.Unmarshal(respBody, &order); err != nil {
+		return nil, fmt.Errorf("failed to decode order: %w", err)
+	}
+
+	return &order, nil
+}
+
+// CancelOrder cancels an order by ID
+// Returns nil on success
+func (c *ClobClient) CancelOrder(ctx context.Context, orderID string) error {
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.baseURL+"/order/"+orderID, nil)
+	if err != nil {
+		return err
+	}
+
+	// Add browser-like headers
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+
+	// Add L2 headers
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("cancel order failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}

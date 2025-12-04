@@ -60,6 +60,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -744,7 +745,8 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	if trade.Side == "BUY" {
 		log.Printf("[%s] [%s] 🛒 routing to BUY execution...", txRef, elapsed())
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh, txRef, detectedAt)
+			// Use immediate execution (no order book fetch) - place at same price, wait 15s
+			return ct.executeBotBuyImmediate(ctx, trade, tokenID, negRisk, userSettings, txRef, detectedAt)
 		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
@@ -1384,6 +1386,308 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 	}
 
 	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, totalCost, avgPrice, totalSize, "executed", "", resp.OrderID, userSettings.StrategyType, debugLog, timing, timestamps)
+}
+
+// =============================================================================
+// IMMEDIATE BUY EXECUTION (NO ORDER BOOK)
+// =============================================================================
+//
+// This strategy places an order at the EXACT SAME PRICE as the followed user,
+// without fetching the order book first. The order stays open for 15 seconds,
+// then any unfilled portion is cancelled and logged.
+//
+// FLOW:
+//   1. Calculate target size based on multiplier
+//   2. Apply minimum size constraints (5 shares, $1 minimum)
+//   3. Place GTC order at followed user's exact price
+//   4. Start goroutine to handle 15s timeout
+//   5. After 15s: get order status, cancel remaining, log result
+//
+// =============================================================================
+func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, txRef string, detectedAt time.Time) error {
+	// Elapsed time helper
+	elapsed := func() string {
+		return fmt.Sprintf("+%dms", time.Since(detectedAt).Milliseconds())
+	}
+
+	log.Printf("[%s] [%s] ⚡ IMMEDIATE BUY: starting (no order book)", txRef, elapsed())
+
+	// Initialize timing tracking
+	startTime := time.Now()
+	timing := map[string]interface{}{}
+
+	// Initialize timestamps
+	timestamps := &CopyTradeTimestamps{
+		ProcessingStartedAt: &startTime,
+	}
+	if !trade.DetectedAt.IsZero() {
+		timestamps.DetectedAt = &trade.DetectedAt
+	}
+
+	// Initialize debug log
+	debugLog := map[string]interface{}{
+		"action":    "IMMEDIATE_BUY",
+		"timestamp": startTime.Format(time.RFC3339),
+	}
+
+	// Step 1: Get settings
+	multiplier := ct.config.Multiplier
+	minUSDC := ct.config.MinOrderUSDC
+	var maxUSD *float64
+	if userSettings != nil {
+		multiplier = userSettings.Multiplier
+		minUSDC = userSettings.MinUSDC
+		maxUSD = userSettings.MaxUSD
+	}
+	debugLog["settings"] = map[string]interface{}{
+		"multiplier": multiplier,
+		"minUSDC":    minUSDC,
+		"maxUSD":     maxUSD,
+	}
+	log.Printf("[%s] [%s] ✓ settings (mult=%.2f)", txRef, elapsed(), multiplier)
+
+	// Step 2: Calculate target size at SAME PRICE as followed user
+	targetShares := trade.Size * multiplier
+	orderPrice := trade.Price // Use exact same price!
+
+	if orderPrice <= 0 || orderPrice >= 1 {
+		log.Printf("[%s] [%s] ❌ invalid price: %.4f", txRef, elapsed(), orderPrice)
+		debugLog["decision"] = fmt.Sprintf("failed - invalid price: %.4f", orderPrice)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("invalid price: %.4f", orderPrice), "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Calculate cost
+	totalSize := targetShares
+	totalCost := totalSize * orderPrice
+
+	debugLog["calculation"] = map[string]interface{}{
+		"copiedTradeShares": trade.Size,
+		"targetShares":      targetShares,
+		"copiedPrice":       orderPrice,
+	}
+
+	// Step 3: Apply minimum constraints
+	const polymarketMinOrder = 1.0
+	effectiveMinUSDC := polymarketMinOrder
+	if minUSDC > effectiveMinUSDC {
+		effectiveMinUSDC = minUSDC
+	}
+
+	// Apply max cap if set
+	if maxUSD != nil && totalCost > *maxUSD {
+		log.Printf("[%s] [%s] ⚠️ cost $%.4f exceeds max $%.2f, capping", txRef, elapsed(), totalCost, *maxUSD)
+		totalCost = *maxUSD
+		totalSize = totalCost / orderPrice
+		debugLog["maxCapAdjustment"] = map[string]interface{}{
+			"maxCap":       *maxUSD,
+			"adjustedCost": totalCost,
+			"adjustedSize": totalSize,
+		}
+	}
+
+	// Ensure minimum USDC
+	if totalCost < effectiveMinUSDC {
+		log.Printf("[%s] [%s] ⚠️ cost $%.4f < min $%.2f, bumping", txRef, elapsed(), totalCost, effectiveMinUSDC)
+		originalCost := totalCost
+		totalCost = effectiveMinUSDC
+		totalSize = totalCost / orderPrice
+		debugLog["minOrderAdjustment"] = map[string]interface{}{
+			"originalCost": originalCost,
+			"adjustedCost": effectiveMinUSDC,
+			"adjustedSize": totalSize,
+		}
+	}
+
+	// Ensure minimum 5 shares
+	const minShares = 5.0
+	if totalSize < minShares {
+		log.Printf("[%s] [%s] ⚠️ size %.4f < min %.0f, bumping", txRef, elapsed(), totalSize, minShares)
+		originalSize := totalSize
+		totalSize = minShares
+		totalCost = totalSize * orderPrice
+		debugLog["minSharesAdjustment"] = map[string]interface{}{
+			"originalSize": originalSize,
+			"adjustedSize": minShares,
+			"adjustedCost": totalCost,
+		}
+	}
+
+	log.Printf("[%s] [%s] 📤 placing order: %.4f shares @ $%.4f (cost=$%.4f) - SAME PRICE AS USER", txRef, elapsed(), totalSize, orderPrice, totalCost)
+
+	debugLog["order"] = map[string]interface{}{
+		"type":       "immediate_limit",
+		"side":       "BUY",
+		"size":       totalSize,
+		"cost":       totalCost,
+		"orderPrice": orderPrice,
+	}
+
+	// Step 4: Place GTC order at exact same price
+	orderStart := time.Now()
+	timestamps.OrderPlacedAt = &orderStart
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
+	orderConfirmed := time.Now()
+	timing["place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
+
+	if err != nil {
+		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
+		log.Printf("[%s] [%s] ❌ order failed: %v", txRef, elapsed(), err)
+		debugLog["orderResponse"] = map[string]interface{}{"error": err.Error()}
+		debugLog["decision"] = fmt.Sprintf("failed - order error: %v", err)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	timestamps.OrderConfirmedAt = &orderConfirmed
+
+	debugLog["orderResponse"] = map[string]interface{}{
+		"success": resp.Success,
+		"orderID": resp.OrderID,
+		"status":  resp.Status,
+	}
+
+	if !resp.Success {
+		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
+		log.Printf("[%s] [%s] ❌ order rejected: %s", txRef, elapsed(), resp.ErrorMsg)
+		debugLog["decision"] = fmt.Sprintf("failed - rejected: %s", resp.ErrorMsg)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", resp.ErrorMsg, "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Check if immediately matched
+	if resp.Status == "matched" {
+		log.Printf("[%s] [%s] ✅ IMMEDIATE FILL! status=%s, size=%.4f @ $%.4f", txRef, elapsed(), resp.Status, totalSize, orderPrice)
+		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
+		debugLog["decision"] = "executed - immediate fill"
+
+		// Update position
+		if err := ct.store.UpdateMyPosition(ctx, MyPosition{
+			MarketID:  trade.MarketID,
+			TokenID:   tokenID,
+			Outcome:   trade.Outcome,
+			Title:     trade.Title,
+			Size:      totalSize,
+			AvgPrice:  orderPrice,
+			TotalCost: totalCost,
+		}); err != nil {
+			log.Printf("[%s] Warning: failed to update position: %v", txRef, err)
+		}
+
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, totalCost, orderPrice, totalSize, "executed", "", resp.OrderID, userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Order is live/pending - start 15s timeout goroutine
+	log.Printf("[%s] [%s] ⏳ ORDER PENDING (status=%s), waiting 15s for fill...", txRef, elapsed(), resp.Status)
+
+	// Store values for goroutine
+	orderID := resp.OrderID
+	tradeCopy := trade
+	tokenIDCopy := tokenID
+	txRefCopy := txRef
+	userSettingsCopy := userSettings
+	totalSizeCopy := totalSize
+	totalCostCopy := totalCost
+	orderPriceCopy := orderPrice
+	timingCopy := timing
+	debugLogCopy := debugLog
+	timestampsCopy := timestamps
+	startTimeCopy := startTime
+	detectedAtCopy := detectedAt
+
+	// Launch goroutine to handle timeout
+	go func() {
+		time.Sleep(15 * time.Second)
+
+		elapsedG := func() string {
+			return fmt.Sprintf("+%dms", time.Since(detectedAtCopy).Milliseconds())
+		}
+
+		ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Get order status
+		order, err := ct.clobClient.GetOrder(ctx2, orderID)
+		if err != nil {
+			log.Printf("[%s] [%s] ⚠️ failed to get order status: %v", txRefCopy, elapsedG(), err)
+			// Log as partial with unknown fill
+			debugLogCopy["decision"] = fmt.Sprintf("timeout - failed to get status: %v", err)
+			timingCopy["total_ms"] = float64(time.Since(startTimeCopy).Microseconds()) / 1000
+			ct.logCopyTradeWithStrategy(ctx2, tradeCopy, tokenIDCopy, totalCostCopy, 0, orderPriceCopy, 0, "failed", fmt.Sprintf("timeout - status check failed: %v", err), orderID, userSettingsCopy.StrategyType, debugLogCopy, timingCopy, timestampsCopy)
+			return
+		}
+
+		// Parse fill amounts
+		originalSize, _ := strconv.ParseFloat(order.OriginalSize, 64)
+		sizeMatched, _ := strconv.ParseFloat(order.SizeMatched, 64)
+		unfilledSize := originalSize - sizeMatched
+		filledCost := sizeMatched * orderPriceCopy
+
+		log.Printf("[%s] [%s] 📊 ORDER STATUS after 15s: original=%.4f, filled=%.4f, unfilled=%.4f, status=%s",
+			txRefCopy, elapsedG(), originalSize, sizeMatched, unfilledSize, order.Status)
+
+		// Cancel remaining if any unfilled
+		if unfilledSize > 0.01 && (order.Status == "live" || order.Status == "open") {
+			log.Printf("[%s] [%s] ❌ CANCELLING unfilled portion: %.4f shares", txRefCopy, elapsedG(), unfilledSize)
+			if err := ct.clobClient.CancelOrder(ctx2, orderID); err != nil {
+				log.Printf("[%s] [%s] ⚠️ cancel failed: %v", txRefCopy, elapsedG(), err)
+			} else {
+				log.Printf("[%s] [%s] ✓ cancelled", txRefCopy, elapsedG())
+			}
+		}
+
+		// Determine final status
+		var status string
+		var failReason string
+		if sizeMatched >= totalSizeCopy*0.99 { // 99% fill = success
+			status = "executed"
+			debugLogCopy["decision"] = "executed - filled after wait"
+		} else if sizeMatched > 0.01 {
+			status = "partial"
+			failReason = fmt.Sprintf("partial fill: %.4f/%.4f shares (%.1f%%), unfilled=%.4f", sizeMatched, totalSizeCopy, (sizeMatched/totalSizeCopy)*100, unfilledSize)
+			debugLogCopy["decision"] = failReason
+		} else {
+			status = "failed"
+			failReason = fmt.Sprintf("no fill after 15s, cancelled %.4f shares", unfilledSize)
+			debugLogCopy["decision"] = failReason
+		}
+
+		debugLogCopy["finalStatus"] = map[string]interface{}{
+			"orderStatus":  order.Status,
+			"originalSize": originalSize,
+			"sizeMatched":  sizeMatched,
+			"unfilledSize": unfilledSize,
+			"filledCost":   filledCost,
+		}
+
+		timingCopy["total_ms"] = float64(time.Since(startTimeCopy).Microseconds()) / 1000
+		timingCopy["wait_time_ms"] = 15000
+
+		// Update position only if we got fills
+		if sizeMatched > 0.01 {
+			if err := ct.store.UpdateMyPosition(ctx2, MyPosition{
+				MarketID:  tradeCopy.MarketID,
+				TokenID:   tokenIDCopy,
+				Outcome:   tradeCopy.Outcome,
+				Title:     tradeCopy.Title,
+				Size:      sizeMatched,
+				AvgPrice:  orderPriceCopy,
+				TotalCost: filledCost,
+			}); err != nil {
+				log.Printf("[%s] Warning: failed to update position: %v", txRefCopy, err)
+			}
+		}
+
+		if status == "executed" {
+			log.Printf("[%s] [%s] ✅ SUCCESS: filled %.4f shares @ $%.4f (cost=$%.4f)", txRefCopy, elapsedG(), sizeMatched, orderPriceCopy, filledCost)
+		} else if status == "partial" {
+			log.Printf("[%s] [%s] ⚠️ PARTIAL: filled %.4f/%.4f shares, unfilled=%.4f", txRefCopy, elapsedG(), sizeMatched, totalSizeCopy, unfilledSize)
+		} else {
+			log.Printf("[%s] [%s] ❌ FAILED: no fills, cancelled order", txRefCopy, elapsedG())
+		}
+
+		ct.logCopyTradeWithStrategy(ctx2, tradeCopy, tokenIDCopy, totalCostCopy, filledCost, orderPriceCopy, sizeMatched, status, failReason, orderID, userSettingsCopy.StrategyType, debugLogCopy, timingCopy, timestampsCopy)
+	}()
+
+	// Return immediately - the goroutine will handle the rest
+	return nil
 }
 
 // executeBotSell implements the bot following strategy for sells.
