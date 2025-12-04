@@ -2083,8 +2083,8 @@ func (ct *CopyTrader) logCopyTradeWithStrategy(ctx context.Context, trade models
 		}
 	}()
 
-	// For executed trades, spawn async goroutine to fetch real tx hash after 60s
-	if (status == "executed" || status == "success") && tokenID != "" && ct.myAddress != "" {
+	// For executed/partial trades, spawn async goroutine to fetch real tx hash after 60s
+	if (status == "executed" || status == "success" || status == "partial") && tokenID != "" && ct.myAddress != "" {
 		followerTimeVal := time.Now()
 		if followerTime != nil {
 			followerTimeVal = *followerTime
