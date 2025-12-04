@@ -523,63 +523,69 @@ func (ct *CopyTrader) processNewTrades(ctx context.Context) error {
 func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail) error {
 	processStart := time.Now()
 
-	// Use TxHash as dedup key (not trade.ID which may include :LogIndex)
-	// This ensures blockchain-detected trades (ID=TxHash:LogIndex) and API-detected
-	// trades (ID=TxHash) are properly deduplicated against each other.
-	// Multiple fills from the same tx = one trading decision = one copy trade.
-	dedupKey := trade.TransactionHash
-	if dedupKey == "" {
-		dedupKey = trade.ID // Fallback for trades without TransactionHash
+	// Helper to log with tx reference and elapsed time
+	txRef := trade.TransactionHash
+	if len(txRef) > 16 {
+		txRef = txRef[:16]
+	}
+	detectedAt := trade.DetectedAt
+	if detectedAt.IsZero() {
+		detectedAt = processStart
+	}
+	elapsed := func() string {
+		return fmt.Sprintf("+%dms", time.Since(detectedAt).Milliseconds())
 	}
 
-	// CRITICAL: Check if this trade is already being processed (prevents duplicate orders)
+	log.Printf("[%s] [%s] 🚀 START processTrade (source=%s, side=%s, size=%.2f)",
+		txRef, elapsed(), trade.DetectionSource, trade.Side, trade.Size)
+
+	// Use TxHash as dedup key (not trade.ID which may include :LogIndex)
+	dedupKey := trade.TransactionHash
+	if dedupKey == "" {
+		dedupKey = trade.ID
+	}
+
+	// CRITICAL: Check if this trade is already being processed
 	ct.inFlightTradesMu.Lock()
 	if startTime, exists := ct.inFlightTrades[dedupKey]; exists {
 		ct.inFlightTradesMu.Unlock()
-		log.Printf("[CopyTrader] Skipping duplicate trade %s (already in-flight since %s ago)",
-			dedupKey[:16], time.Since(startTime).Round(time.Millisecond))
+		log.Printf("[%s] [%s] ⏭️ SKIP: already in-flight since %s ago", txRef, elapsed(), time.Since(startTime).Round(time.Millisecond))
 		return nil
 	}
 	ct.inFlightTrades[dedupKey] = time.Now()
-	// Cleanup old entries (older than 2 minutes)
 	for id, t := range ct.inFlightTrades {
 		if time.Since(t) > 2*time.Minute {
 			delete(ct.inFlightTrades, id)
 		}
 	}
 	ct.inFlightTradesMu.Unlock()
+	log.Printf("[%s] [%s] ✓ in-flight check passed", txRef, elapsed())
 
-	// DATABASE-LEVEL DEDUP: Check if this trade was already executed (prevents duplicates across pods)
-	// Use dedupKey (TxHash) to match across detection methods
+	// DATABASE-LEVEL DEDUP
 	alreadyExecuted, err := ct.store.IsTradeAlreadyExecuted(ctx, dedupKey)
 	if err != nil {
-		log.Printf("[CopyTrader] Warning: failed to check for duplicate trade %s: %v", trade.ID[:16], err)
-		// Continue anyway - better to risk a duplicate than miss a trade
+		log.Printf("[%s] [%s] ⚠️ DB dedup check failed: %v", txRef, elapsed(), err)
 	} else if alreadyExecuted {
-		log.Printf("[CopyTrader] Skipping trade %s (already executed in DB)", trade.ID[:16])
+		log.Printf("[%s] [%s] ⏭️ SKIP: already executed in DB", txRef, elapsed())
 		return nil
 	}
+	log.Printf("[%s] [%s] ✓ DB dedup check passed", txRef, elapsed())
 
-	// Skip trades that are too old (e.g., server restart catch-up)
-	// These are stale - markets have moved, prices changed, no point copying
+	// Skip stale trades
 	const maxTradeAge = 5 * time.Minute
 	tradeAge := time.Since(trade.Timestamp)
 	if tradeAge > maxTradeAge {
-		log.Printf("[CopyTrader] Skipping stale trade %s (%.1f min old, max=%.1f min)",
-			trade.ID[:16], tradeAge.Minutes(), maxTradeAge.Minutes())
+		log.Printf("[%s] [%s] ⏭️ SKIP: stale trade (%.1f min old)", txRef, elapsed(), tradeAge.Minutes())
 		return nil
 	}
 
-	// Skip non-TRADE types (REDEEM, SPLIT, MERGE)
+	// Skip non-TRADE types
 	if trade.Type != "" && trade.Type != "TRADE" {
-		log.Printf("[CopyTrader] Skipping non-trade: %s (type=%s)", trade.ID, trade.Type)
+		log.Printf("[%s] [%s] ⏭️ SKIP: non-trade type=%s", txRef, elapsed(), trade.Type)
 		return nil
 	}
 
-	// FAST PATH: For blockchain-detected trades, we already have the token ID
-	// Skip all the Gamma/CLOB lookups - they just slow us down
-	// NOTE: LiveData WebSocket trades have conditionID, not tokenID - need to look it up
-	// NOTE: Mempool trades have UNRELIABLE decoded tokenID/side - MUST verify!
+	// Determine trade type for token resolution
 	isBlockchainTrade := trade.TransactionHash != "" && trade.DetectedAt != (time.Time{}) &&
 		trade.DetectionSource != "live_ws" && trade.DetectionSource != "mempool"
 
@@ -587,57 +593,50 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	var negRisk bool
 
 	if isBlockchainTrade {
-		// Fast path: use token ID directly (already in decimal format from realtime_detector)
+		// Fast path: use token ID directly
 		tokenID = trade.MarketID
-		negRisk = false // Default, will be overridden by order book if needed
-		// Quick cache lookup for title (no API call - speed is critical)
+		negRisk = false
 		if tokenInfo, err := ct.store.GetTokenInfo(ctx, tokenID); err == nil && tokenInfo != nil {
 			trade.Title = tokenInfo.Title
 			trade.Outcome = tokenInfo.Outcome
 		}
-		log.Printf("[CopyTrader] ⚡ FAST PATH: blockchain trade, tokenID=%s, title=%s", tokenID, trade.Title)
+		log.Printf("[%s] [%s] ✓ blockchain fast path, tokenID=%s", txRef, elapsed(), tokenID[:20])
 	} else if trade.DetectionSource == "mempool" {
-		// Mempool trades: use Alchemy simulation/receipt for ACCURATE data
-		// The decoded calldata is unreliable - Alchemy gives us real OrderFilled events
-		log.Printf("[CopyTrader] ⚡ Mempool trade: extracting accurate data via Alchemy (txHash=%s)", trade.TransactionHash)
-
-		// Call Alchemy to get accurate Side, Size, Price, TokenID
+		log.Printf("[%s] [%s] 📡 mempool: calling QuickNode trace...", txRef, elapsed())
 		alchemyResult := api.ExtractViaAlchemySimple(trade.TransactionHash, trade.UserID)
 		if alchemyResult == nil || alchemyResult.Error != "" {
 			errMsg := "unknown error"
 			if alchemyResult != nil {
 				errMsg = alchemyResult.Error
 			}
-			log.Printf("[CopyTrader] ⚠️ Mempool: Alchemy extraction failed: %s", errMsg)
-			return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: Alchemy extraction failed: %s", errMsg), "")
+			log.Printf("[%s] [%s] ❌ mempool trace failed: %s", txRef, elapsed(), errMsg)
+			return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: trace failed: %s", errMsg), "")
 		}
+		log.Printf("[%s] [%s] ✓ mempool trace: %s %.4f @ %.4f", txRef, elapsed(), alchemyResult.Direction, alchemyResult.Tokens, alchemyResult.Price)
 
-		log.Printf("[CopyTrader] ⚡ Mempool: Alchemy extracted (%s) - %s %.4f tokens @ %.4f, tokenID=%s",
-			alchemyResult.Method, alchemyResult.Direction, alchemyResult.Tokens, alchemyResult.Price, alchemyResult.TokenID)
-
-		// Update trade with accurate Alchemy data
 		trade.Side = alchemyResult.Direction
 		trade.Size = alchemyResult.Tokens
 		trade.Price = alchemyResult.Price
 		tokenID = alchemyResult.TokenID
 
-		// Look up outcome and title from token cache (tokenID is now accurate from Alchemy)
+		// Look up title from cache
 		tokenInfo, err := ct.store.GetTokenInfo(ctx, tokenID)
 		if err == nil && tokenInfo != nil {
 			trade.Outcome = tokenInfo.Outcome
 			trade.Title = tokenInfo.Title
-			log.Printf("[CopyTrader] ⚡ Mempool: from cache - outcome=%s, title=%s", trade.Outcome, trade.Title)
+			log.Printf("[%s] [%s] ✓ token info from cache", txRef, elapsed())
 		} else {
-			// Fetch from Gamma API
+			log.Printf("[%s] [%s] 📡 fetching token info from Gamma...", txRef, elapsed())
 			gammaInfo, err := ct.clobClient.GetTokenInfoByID(ctx, tokenID)
 			if err != nil {
-				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: failed to get token info for %s: %v", tokenID, err), "")
+				log.Printf("[%s] [%s] ❌ Gamma API failed: %v", txRef, elapsed(), err)
+				return ct.logCopyTrade(ctx, trade, "", 0, 0, 0, 0, "failed", fmt.Sprintf("mempool: Gamma failed: %v", err), "")
 			}
 			trade.Outcome = gammaInfo.Outcome
 			trade.Title = gammaInfo.Title
 			negRisk = gammaInfo.NegRisk
 			ct.store.SaveTokenInfo(ctx, tokenID, gammaInfo.ConditionID, gammaInfo.Outcome, gammaInfo.Title, gammaInfo.Slug)
-			log.Printf("[CopyTrader] ⚡ Mempool: from Gamma - outcome=%s, title=%s", trade.Outcome, trade.Title)
+			log.Printf("[%s] [%s] ✓ token info from Gamma", txRef, elapsed())
 		}
 	} else if trade.DetectionSource == "live_ws" {
 		// LiveData WebSocket: MarketID is conditionID, need to look up tokenID
@@ -699,49 +698,48 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 		}
 	}
 
-	log.Printf("[CopyTrader] ⏱️ TIMING: preExecution=%dms", time.Since(processStart).Milliseconds())
+	log.Printf("[%s] [%s] 📡 starting order book fetch (parallel)...", txRef, elapsed())
 
 	// OPTIMIZATION: Start order book fetch NOW while we check settings
-	// This runs in parallel - saves ~50-200ms on the critical path
 	orderBookCh := make(chan orderBookResult, 1)
 	go func() {
 		book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
 		orderBookCh <- orderBookResult{book, err}
 	}()
 
-	// Get user settings - first try cached settings (faster, no DB query), then fall back to DB
-	// IMPORTANT: Users without explicit settings are DISABLED by default
+	// Get user settings
+	log.Printf("[%s] [%s] 🔍 checking user settings...", txRef, elapsed())
 	strategyType := storage.StrategyHuman
 	var userSettings *storage.UserCopySettings
 	if ct.detector != nil {
 		userSettings = ct.detector.GetCachedUserSettings(trade.UserID)
 	}
 	if userSettings == nil {
-		// Fall back to DB query if not in cache
 		var err error
 		userSettings, err = ct.store.GetUserCopySettings(ctx, trade.UserID)
 		if err != nil || userSettings == nil {
-			// No settings found - default to DISABLED (don't copy unknown users)
-			log.Printf("[CopyTrader] Skipping: user %s has no copy settings (disabled by default)", trade.UserID)
+			log.Printf("[%s] [%s] ⏭️ SKIP: no copy settings for user", txRef, elapsed())
 			return nil
 		}
 	}
 	if !userSettings.Enabled {
-		log.Printf("[CopyTrader] Skipping: user %s has copy trading disabled", trade.UserID)
+		log.Printf("[%s] [%s] ⏭️ SKIP: copy trading disabled", txRef, elapsed())
 		return nil
 	}
 	strategyType = userSettings.StrategyType
+	log.Printf("[%s] [%s] ✓ user settings OK (strategy=%d, mult=%.2f)", txRef, elapsed(), strategyType, userSettings.Multiplier)
 
-	// Route based on strategy type and side
-	// Strategy 3 (BTC 15m) uses the same execution as Strategy 2 (Bot)
+	// Route to execution
 	if trade.Side == "BUY" {
+		log.Printf("[%s] [%s] 🛒 routing to BUY execution...", txRef, elapsed())
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh)
+			return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh, txRef, detectedAt)
 		}
 		return ct.executeBuy(ctx, trade, tokenID, negRisk)
 	} else if trade.Side == "SELL" {
+		log.Printf("[%s] [%s] 💰 routing to SELL execution...", txRef, elapsed())
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh)
+			return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh, txRef, detectedAt)
 		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
 	}
@@ -993,7 +991,15 @@ func (ct *CopyTrader) executeSell(ctx context.Context, trade models.TradeDetail,
 // executeBotBuy implements the bot following strategy for buys.
 // It tries to buy at the copied user's exact price, then sweeps asks up to +10%.
 func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
-	return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, nil)
+	txRef := trade.TransactionHash
+	if len(txRef) > 16 {
+		txRef = txRef[:16]
+	}
+	detectedAt := trade.DetectedAt
+	if detectedAt.IsZero() {
+		detectedAt = time.Now()
+	}
+	return ct.executeBotBuyWithBook(ctx, trade, tokenID, negRisk, userSettings, nil, txRef, detectedAt)
 }
 
 // =============================================================================
@@ -1026,16 +1032,22 @@ func (ct *CopyTrader) executeBotBuy(ctx context.Context, trade models.TradeDetai
 //   Using maxFillPrice ($0.54) ensures we sweep ALL acceptable levels.
 //
 // =============================================================================
-func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult) error {
+func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult, txRef string, detectedAt time.Time) error {
+	// Elapsed time helper
+	elapsed := func() string {
+		return fmt.Sprintf("+%dms", time.Since(detectedAt).Milliseconds())
+	}
+
+	log.Printf("[%s] [%s] 🛒 BUY: starting execution", txRef, elapsed())
+
 	// Initialize timing tracking
 	startTime := time.Now()
 	timing := map[string]interface{}{}
 
-	// Initialize timestamps for full latency tracking
+	// Initialize timestamps
 	timestamps := &CopyTradeTimestamps{
 		ProcessingStartedAt: &startTime,
 	}
-	// Capture detected_at from trade if available
 	if !trade.DetectedAt.IsZero() {
 		timestamps.DetectedAt = &trade.DetectedAt
 	}
@@ -1047,7 +1059,6 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 	}
 
 	// Step 1: Get settings
-	settingsStart := time.Now()
 	multiplier := ct.config.Multiplier
 	minUSDC := ct.config.MinOrderUSDC
 	var maxUSD *float64
@@ -1056,57 +1067,46 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		minUSDC = userSettings.MinUSDC
 		maxUSD = userSettings.MaxUSD
 	}
-	timing["1_settings_ms"] = float64(time.Since(settingsStart).Microseconds()) / 1000
-
+	timing["1_settings_ms"] = 0
 	debugLog["settings"] = map[string]interface{}{
 		"multiplier": multiplier,
 		"minUSDC":    minUSDC,
 		"maxUSD":     maxUSD,
 	}
+	log.Printf("[%s] [%s] ✓ settings loaded (mult=%.2f)", txRef, elapsed(), multiplier)
 
-	// Step 2: Calculate target shares (we follow number of shares, not dollar amount)
-	calcStart := time.Now()
+	// Step 2: Calculate target shares
 	targetShares := trade.Size * multiplier
-
-	// Copied user's price is our target price
-	// Use dynamic slippage based on price (lower prices are more volatile)
 	copiedPrice := trade.Price
 	var maxPrice float64
 	if copiedPrice > 0 {
 		slippage := getMaxSlippage(copiedPrice)
 		maxPrice = copiedPrice * (1 + slippage)
-		log.Printf("[CopyTrader-Bot] BUY: Using dynamic slippage +%.0f%% for price $%.2f", slippage*100, copiedPrice)
 	} else {
-		// Blockchain trades don't have price - allow any price up to $1
 		maxPrice = 1.0
-		log.Printf("[CopyTrader-Bot] BUY: No price from blockchain, allowing any price up to $1.00")
 	}
-	timing["2_calculation_ms"] = float64(time.Since(calcStart).Microseconds()) / 1000
-
+	timing["2_calculation_ms"] = 0
 	slippagePct := getMaxSlippage(copiedPrice) * 100
 	debugLog["calculation"] = map[string]interface{}{
-		"copiedTradeShares":  trade.Size,
-		"targetShares":       targetShares,
-		"copiedPrice":        copiedPrice,
-		"maxPrice":           maxPrice,
-		"priceLimit":         fmt.Sprintf("+%.0f%%", slippagePct),
+		"copiedTradeShares": trade.Size,
+		"targetShares":      targetShares,
+		"copiedPrice":       copiedPrice,
+		"maxPrice":          maxPrice,
+		"priceLimit":        fmt.Sprintf("+%.0f%%", slippagePct),
 	}
+	log.Printf("[%s] [%s] ✓ target=%.2f shares @ max $%.4f", txRef, elapsed(), targetShares, maxPrice)
 
-	log.Printf("[CopyTrader-Bot] BUY: Copied shares=%.4f, targetShares=%.4f, copiedPrice=%.4f, maxPrice=%.4f (+%.0f%%), market=%s",
-		trade.Size, targetShares, copiedPrice, maxPrice, slippagePct, trade.Title)
-
-	// Step 3: Get order book (use pre-fetched if available, otherwise fetch now)
+	// Step 3: Get order book
+	log.Printf("[%s] [%s] 📖 waiting for order book...", txRef, elapsed())
 	orderBookStart := time.Now()
 	var book *api.OrderBook
 	var err error
 	if orderBookCh != nil {
-		// Use pre-fetched order book from parallel execution
 		result := <-orderBookCh
 		book, err = result.book, result.err
 		timing["4_get_orderbook_ms"] = float64(time.Since(orderBookStart).Microseconds()) / 1000
 		timing["4_orderbook_prefetched"] = true
 	} else {
-		// Fetch fresh order book
 		book, err = ct.clobClient.GetOrderBook(ctx, tokenID)
 		timing["4_get_orderbook_ms"] = float64(time.Since(orderBookStart).Microseconds()) / 1000
 	}
@@ -1114,13 +1114,15 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
 		debugLog["orderBook"] = map[string]interface{}{"error": err.Error()}
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "No orderbook exists") {
-			log.Printf("[CopyTrader-Bot] BUY: market closed/resolved, skipping")
+			log.Printf("[%s] [%s] ⏭️ market closed/resolved", txRef, elapsed())
 			debugLog["decision"] = "skipped - market closed/resolved"
 			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "skipped", "market closed/resolved", "", userSettings.StrategyType, debugLog, timing, timestamps)
 		}
+		log.Printf("[%s] [%s] ❌ order book error: %v", txRef, elapsed(), err)
 		debugLog["decision"] = fmt.Sprintf("failed - order book error: %v", err)
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("failed to get order book: %v", err), "", userSettings.StrategyType, debugLog, timing, timestamps)
 	}
+	log.Printf("[%s] [%s] ✓ order book received (%d asks)", txRef, elapsed(), len(book.Asks))
 
 	// Step 5: Analyze order book
 	analysisStart := time.Now()
@@ -1301,8 +1303,7 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		}
 	}
 
-	log.Printf("[CopyTrader-Bot] BUY: placing order - size=%.4f, cost=$%.4f, avgPrice=%.4f, orderPrice=%.4f (max fill)",
-		totalSize, totalCost, avgPrice, orderPrice)
+	log.Printf("[%s] [%s] 📤 placing order: %.4f shares @ $%.4f (cost=$%.4f)", txRef, elapsed(), totalSize, orderPrice, totalCost)
 
 	debugLog["order"] = map[string]interface{}{
 		"type":       "market",
@@ -1313,39 +1314,37 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		"orderPrice": orderPrice,
 	}
 
-	// Step 7: Place order at maxFillPrice to sweep all affordable levels
+	// Step 7: Place order
 	orderStart := time.Now()
-	timestamps.OrderPlacedAt = &orderStart // Track when we sent the order
+	timestamps.OrderPlacedAt = &orderStart
 	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
 	orderConfirmed := time.Now()
 	timing["7_place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
 	if err != nil {
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
-		log.Printf("[CopyTrader-Bot] BUY failed: %v", err)
+		log.Printf("[%s] [%s] ❌ BUY FAILED: %v", txRef, elapsed(), err)
 		debugLog["orderResponse"] = map[string]interface{}{"error": err.Error()}
 		debugLog["decision"] = fmt.Sprintf("failed - order error: %v", err)
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", err), "", userSettings.StrategyType, debugLog, timing, timestamps)
 	}
 
-	// Order confirmed by Polymarket
 	timestamps.OrderConfirmedAt = &orderConfirmed
 
 	debugLog["orderResponse"] = map[string]interface{}{
 		"success":  resp.Success,
 		"orderID":  resp.OrderID,
-		"status":   resp.Status, // matched, live, delayed, unmatched - CRITICAL for timing analysis
+		"status":   resp.Status,
 		"errorMsg": resp.ErrorMsg,
 	}
 
 	if !resp.Success {
 		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
-		log.Printf("[CopyTrader-Bot] BUY rejected: %s", resp.ErrorMsg)
+		log.Printf("[%s] [%s] ❌ BUY REJECTED: %s", txRef, elapsed(), resp.ErrorMsg)
 		debugLog["decision"] = fmt.Sprintf("failed - rejected: %s", resp.ErrorMsg)
 		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", resp.ErrorMsg, "", userSettings.StrategyType, debugLog, timing, timestamps)
 	}
 
-	log.Printf("[CopyTrader-Bot] BUY success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, Cost=$%.4f",
-		resp.OrderID, resp.Status, totalSize, avgPrice, totalCost)
+	log.Printf("[%s] [%s] ✅ BUY SUCCESS: status=%s, size=%.4f, cost=$%.4f", txRef, elapsed(), resp.Status, totalSize, totalCost)
 
 	debugLog["decision"] = "executed successfully"
 
@@ -1380,13 +1379,28 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 // It tries to sell at the copied user's exact price, then sweeps bids down to -10%.
 // If still not filled, creates limit orders at -3% and -5%, waits 3 min, then market sells remainder.
 func (ct *CopyTrader) executeBotSell(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings) error {
-	return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, nil)
+	txRef := trade.TransactionHash
+	if len(txRef) > 16 {
+		txRef = txRef[:16]
+	}
+	detectedAt := trade.DetectedAt
+	if detectedAt.IsZero() {
+		detectedAt = time.Now()
+	}
+	return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, nil, txRef, detectedAt)
 }
 
 // executeBotSellWithBook is the same as executeBotSell but accepts a pre-fetched order book channel
 // for parallel execution optimization
-func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult) error {
-	// Initialize timestamps for latency tracking
+func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, orderBookCh <-chan orderBookResult, txRef string, detectedAt time.Time) error {
+	// Elapsed time helper
+	elapsed := func() string {
+		return fmt.Sprintf("+%dms", time.Since(detectedAt).Milliseconds())
+	}
+
+	log.Printf("[%s] [%s] 💰 SELL: starting execution", txRef, elapsed())
+
+	// Initialize timestamps
 	startTime := time.Now()
 	timestamps := &CopyTradeTimestamps{
 		ProcessingStartedAt: &startTime,
@@ -1400,22 +1414,19 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	if userSettings != nil {
 		multiplier = userSettings.Multiplier
 	}
-
-	// Calculate how many tokens to sell based on copied trade
-	// Sell tokens = copied tokens × multiplier
 	targetTokens := trade.Size * multiplier
+	log.Printf("[%s] [%s] ✓ target=%.4f shares (mult=%.2f)", txRef, elapsed(), targetTokens, multiplier)
 
-	// Get actual position from Polymarket API
+	// Get actual position
+	log.Printf("[%s] [%s] 🔍 checking position...", txRef, elapsed())
 	var ourPosition float64
 	actualPositions, err := ct.client.GetOpenPositions(ctx, ct.myAddress)
 	if err != nil {
-		log.Printf("[CopyTrader-Bot] SELL: Warning: failed to fetch positions: %v", err)
+		log.Printf("[%s] [%s] ⚠️ position API failed: %v", txRef, elapsed(), err)
 	} else {
-		log.Printf("[CopyTrader-Bot] SELL: Found %d positions, looking for tokenID=%s", len(actualPositions), tokenID)
 		for _, pos := range actualPositions {
 			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
 				ourPosition = pos.Size.Float64()
-				log.Printf("[CopyTrader-Bot] SELL: Found matching position: %.4f shares", ourPosition)
 				break
 			}
 		}
@@ -1426,20 +1437,20 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
 		if err == nil && position.Size > 0 {
 			ourPosition = position.Size
-			log.Printf("[CopyTrader-Bot] SELL: Found position in local DB: %.4f shares", ourPosition)
 		}
 	}
 
 	if ourPosition <= 0 {
-		log.Printf("[CopyTrader-Bot] SELL: no position to sell for %s/%s (tokenID=%s)", trade.Title, trade.Outcome, tokenID)
+		log.Printf("[%s] [%s] ⏭️ no position to sell", txRef, elapsed())
 		return nil
 	}
+	log.Printf("[%s] [%s] ✓ position=%.4f shares", txRef, elapsed(), ourPosition)
 
 	// Sell the minimum of targetTokens or ourPosition
 	sellSize := targetTokens
 	if sellSize > ourPosition {
 		sellSize = ourPosition
-		log.Printf("[CopyTrader-Bot] SELL: target %.4f > position %.4f, selling entire position", targetTokens, ourPosition)
+		log.Printf("[%s] [%s] 📉 selling entire position (target > position)", txRef, elapsed())
 	}
 
 	// Ensure minimum 5 shares for SELL
