@@ -422,13 +422,17 @@ func (c *MempoolWSClient) handleMessage(ctx context.Context, data []byte) {
 
 	// Cache ALL transaction hashes immediately (no HTTP call needed)
 	// When LiveData reports a trade, we'll check if we saw its TX hash here
+	// CRITICAL: Also serves as dedup - if we already saw this tx, skip processing
+	txLower := strings.ToLower(txHash)
 	c.mempoolCacheMu.Lock()
-	if _, exists := c.mempoolCache[strings.ToLower(txHash)]; !exists {
-		c.mempoolCache[strings.ToLower(txHash)] = now
-		c.statsMu.Lock()
-		c.polymarketTxSeen++ // Count all cached (might be Polymarket or not)
-		c.statsMu.Unlock()
+	if _, exists := c.mempoolCache[txLower]; exists {
+		c.mempoolCacheMu.Unlock()
+		return // Already processing this tx - prevent duplicate orders!
 	}
+	c.mempoolCache[txLower] = now
+	c.statsMu.Lock()
+	c.polymarketTxSeen++
+	c.statsMu.Unlock()
 	// Cleanup old entries to prevent memory growth (keep last 5 minutes)
 	if count%10000 == 0 {
 		cutoff := now.Add(-5 * time.Minute)
