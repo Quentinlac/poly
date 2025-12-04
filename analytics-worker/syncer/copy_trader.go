@@ -1325,10 +1325,10 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		"orderPrice": orderPrice,
 	}
 
-	// Step 7: Place FAK order (Fill-And-Kill = taker only, partial fills OK)
+	// Step 7: Place GTC order
 	orderStart := time.Now()
 	timestamps.OrderPlacedAt = &orderStart
-	resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
 	orderConfirmed := time.Now()
 	timing["7_place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
 	if err != nil {
@@ -1577,10 +1577,10 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		orderPrice := minFillPrice
 		log.Printf("[%s] [%s] 📊 found bids: size=%.4f, avgPrice=%.4f, orderPrice=%.4f", txRef, elapsed(), totalSold, avgPrice, orderPrice)
 
-		log.Printf("[%s] [%s] 🚀 placing SELL FAK order...", txRef, elapsed())
+		log.Printf("[%s] [%s] 🚀 placing SELL order...", txRef, elapsed())
 		orderPlacedAt := time.Now()
 		timestamps.OrderPlacedAt = &orderPlacedAt
-		resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
+		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
 		orderConfirmedAt := time.Now()
 		if err != nil {
 			log.Printf("[%s] [%s] ❌ SELL failed: %v", txRef, elapsed(), err)
@@ -1628,10 +1628,10 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	var totalFilled float64
 	var totalValue float64
 
-	log.Printf("[%s] [%s] 🚀 placing SELL FAK order (limit fallback)...", txRef, elapsed())
+	log.Printf("[%s] [%s] 🚀 placing SELL order (limit fallback)...", txRef, elapsed())
 	orderPlacedAt := time.Now()
 	timestamps.OrderPlacedAt = &orderPlacedAt
-	resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
 	orderConfirmedAt := time.Now()
 
 	// Capture detailed error info
