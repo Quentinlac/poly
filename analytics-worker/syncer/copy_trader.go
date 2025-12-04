@@ -1553,8 +1553,17 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		orderCh <- orderResult{resp, err}
 	}()
 
-	// Start order book polling goroutine (every 50ms)
+	// Start order book polling goroutine (fetch immediately, then every 50ms)
 	go func() {
+		// Fetch immediately first (don't wait for ticker)
+		book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+		if err == nil {
+			bookMu.Lock()
+			latestBook = book
+			bookFetchCount++
+			bookMu.Unlock()
+		}
+
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -2007,8 +2016,17 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 		orderCh <- orderResult{resp, err}
 	}()
 
-	// Start order book polling goroutine (every 50ms)
+	// Start order book polling goroutine (fetch immediately, then every 50ms)
 	go func() {
+		// Fetch immediately first (don't wait for ticker)
+		book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+		if err == nil {
+			bookMu.Lock()
+			latestBook = book
+			bookFetchCount++
+			bookMu.Unlock()
+		}
+
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 

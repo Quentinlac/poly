@@ -1593,6 +1593,9 @@ func (c *ClobClient) GetOrder(ctx context.Context, orderID string) (*OpenOrder, 
 		return nil, fmt.Errorf("get order failed: %d %s", resp.StatusCode, string(respBody))
 	}
 
+	// Debug: log raw response to see actual field names
+	log.Printf("[GetOrder] raw response: %s", string(respBody))
+
 	var order OpenOrder
 	if err := json.Unmarshal(respBody, &order); err != nil {
 		return nil, fmt.Errorf("failed to decode order: %w", err)
@@ -1630,8 +1633,13 @@ func (c *ClobClient) CancelOrder(ctx context.Context, orderID string) error {
 
 	respBody, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	// 200, 204 = success; 404 = order already filled/cancelled (treat as success)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("cancel order failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		log.Printf("[CancelOrder] order %s not found (already filled/cancelled)", orderID)
 	}
 
 	return nil
