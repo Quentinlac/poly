@@ -1791,6 +1791,18 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 	totalFilledSize := sizeMatched
 	totalFilledCost := filledCost
 
+	// Log summary of planned follow-up orders
+	if len(followUpOrders) > 0 {
+		var orderSummary string
+		for i, fo := range followUpOrders {
+			if i > 0 {
+				orderSummary += ", "
+			}
+			orderSummary += fmt.Sprintf("%.2f@$%.4f", fo.size, fo.price)
+		}
+		log.Printf("[%s] [%s] 📋 PLANNED %d follow-up orders: %s", txRef, elapsed(), len(followUpOrders), orderSummary)
+	}
+
 	// Place follow-up orders and log each as separate row
 	for i, fo := range followUpOrders {
 		foSize := fo.size
@@ -2255,6 +2267,18 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 	// Track total sold for final position update
 	totalSoldSize := sizeMatched
 	totalSoldValue := filledCost
+
+	// Log summary of planned follow-up orders
+	if len(followUpOrders) > 0 {
+		var orderSummary string
+		for i, fo := range followUpOrders {
+			if i > 0 {
+				orderSummary += ", "
+			}
+			orderSummary += fmt.Sprintf("%.2f@$%.4f", fo.size, fo.price)
+		}
+		log.Printf("[%s] [%s] 📋 PLANNED %d follow-up SELL orders: %s", txRef, elapsed(), len(followUpOrders), orderSummary)
+	}
 
 	// Place follow-up orders and log each as separate row
 	for i, fo := range followUpOrders {
