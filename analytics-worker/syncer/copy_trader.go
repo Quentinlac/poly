@@ -752,7 +752,8 @@ func (ct *CopyTrader) processTrade(ctx context.Context, trade models.TradeDetail
 	} else if trade.Side == "SELL" {
 		log.Printf("[%s] [%s] 💰 routing to SELL execution...", txRef, elapsed())
 		if strategyType == storage.StrategyBot || strategyType == storage.StrategyBTC15m {
-			return ct.executeBotSellWithBook(ctx, trade, tokenID, negRisk, userSettings, orderBookCh, txRef, detectedAt)
+			// Use immediate execution (no order book fetch) - place at same price, then follow-up at bids
+			return ct.executeBotSellImmediate(ctx, trade, tokenID, negRisk, userSettings, txRef, detectedAt)
 		}
 		return ct.executeSell(ctx, trade, tokenID, negRisk)
 	}
@@ -1859,6 +1860,458 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		log.Printf("[%s] [%s] ⚠️ PARTIAL: %.4f/%.4f shares | total=%.0fms", txRef, elapsed(), totalFilledSize, totalSize, totalMs)
 	} else {
 		log.Printf("[%s] [%s] ❌ FAILED: no fills | total=%.0fms", txRef, elapsed(), totalMs)
+	}
+
+	return nil
+}
+
+// executeBotSellImmediate places SELL at same price as followed user, polls book in parallel,
+// then uses latest book for follow-up orders at bid prices.
+func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.TradeDetail, tokenID string, negRisk bool, userSettings *storage.UserCopySettings, txRef string, detectedAt time.Time) error {
+	// Elapsed time helper
+	elapsed := func() string {
+		return fmt.Sprintf("+%dms", time.Since(detectedAt).Milliseconds())
+	}
+
+	log.Printf("[%s] [%s] ⚡ IMMEDIATE SELL: starting (parallel order + book polling)", txRef, elapsed())
+
+	// Initialize timing tracking
+	startTime := time.Now()
+	timing := map[string]interface{}{}
+
+	// Initialize timestamps
+	timestamps := &CopyTradeTimestamps{
+		ProcessingStartedAt: &startTime,
+	}
+	if !trade.DetectedAt.IsZero() {
+		timestamps.DetectedAt = &trade.DetectedAt
+	}
+
+	// Initialize debug log
+	debugLog := map[string]interface{}{
+		"action":    "IMMEDIATE_SELL",
+		"timestamp": startTime.Format(time.RFC3339),
+	}
+
+	// Step 1: Get settings
+	multiplier := ct.config.Multiplier
+	if userSettings != nil {
+		multiplier = userSettings.Multiplier
+	}
+	debugLog["settings"] = map[string]interface{}{
+		"multiplier": multiplier,
+	}
+	log.Printf("[%s] [%s] ✓ settings (mult=%.2f)", txRef, elapsed(), multiplier)
+
+	// Step 2: Calculate target size at SAME PRICE as followed user
+	targetShares := trade.Size * multiplier
+	orderPrice := trade.Price // Use exact same price!
+
+	if orderPrice <= 0 || orderPrice >= 1 {
+		log.Printf("[%s] [%s] ❌ invalid price: %.4f", txRef, elapsed(), orderPrice)
+		debugLog["decision"] = fmt.Sprintf("failed - invalid price: %.4f", orderPrice)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, 0, "failed", fmt.Sprintf("invalid price: %.4f", orderPrice), "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Calculate min price we're willing to accept (20% slippage from copied price)
+	minPrice := orderPrice * 0.80
+
+	debugLog["calculation"] = map[string]interface{}{
+		"copiedTradeShares": trade.Size,
+		"targetShares":      targetShares,
+		"copiedPrice":       orderPrice,
+		"minPrice":          minPrice,
+	}
+
+	// Step 3: Check position - can't sell what we don't have
+	log.Printf("[%s] [%s] 🔍 checking position...", txRef, elapsed())
+	var ourPosition float64
+	actualPositions, err := ct.client.GetOpenPositions(ctx, ct.myAddress)
+	if err != nil {
+		log.Printf("[%s] [%s] ⚠️ position API failed: %v", txRef, elapsed(), err)
+	} else {
+		for _, pos := range actualPositions {
+			if pos.Asset == tokenID && pos.Size.Float64() > 0 {
+				ourPosition = pos.Size.Float64()
+				break
+			}
+		}
+	}
+
+	// Fall back to local tracking
+	if ourPosition <= 0 {
+		position, err := ct.store.GetMyPosition(ctx, trade.MarketID, trade.Outcome)
+		if err == nil && position.Size > 0 {
+			ourPosition = position.Size
+		}
+	}
+
+	if ourPosition <= 0 {
+		log.Printf("[%s] [%s] ⏭️ no position to sell", txRef, elapsed())
+		return nil
+	}
+	log.Printf("[%s] [%s] ✓ position=%.4f shares", txRef, elapsed(), ourPosition)
+
+	// Sell the minimum of targetShares or ourPosition
+	sellSize := targetShares
+	if sellSize > ourPosition {
+		sellSize = ourPosition
+		log.Printf("[%s] [%s] 📉 selling entire position (target > position)", txRef, elapsed())
+	}
+
+	// Ensure minimum 5 shares for SELL
+	const minShares = 5.0
+	if sellSize < minShares {
+		if ourPosition >= minShares {
+			log.Printf("[%s] [%s] 📈 size %.4f below min, bumping to %.0f", txRef, elapsed(), sellSize, minShares)
+			sellSize = minShares
+		} else {
+			log.Printf("[%s] [%s] 📈 size %.4f below min, selling entire %.4f", txRef, elapsed(), sellSize, ourPosition)
+			sellSize = ourPosition
+		}
+	}
+
+	totalSize := sellSize
+	totalCost := totalSize * orderPrice
+
+	debugLog["order"] = map[string]interface{}{
+		"type":       "immediate_limit",
+		"side":       "SELL",
+		"size":       totalSize,
+		"cost":       totalCost,
+		"orderPrice": orderPrice,
+	}
+
+	log.Printf("[%s] [%s] 📤 placing SELL: %.4f shares @ $%.4f + polling book", txRef, elapsed(), totalSize, orderPrice)
+
+	// Step 4: Start order placement AND order book polling in parallel
+	orderStart := time.Now()
+	timestamps.OrderPlacedAt = &orderStart
+
+	// Channel to receive order response
+	type orderResult struct {
+		resp *api.OrderResponse
+		err  error
+	}
+	orderCh := make(chan orderResult, 1)
+
+	// Latest order book (protected by mutex)
+	var latestBook *api.OrderBook
+	var bookMu sync.Mutex
+	var bookFetchCount int
+	stopPolling := make(chan struct{})
+
+	// Start order placement goroutine
+	go func() {
+		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSize, orderPrice, negRisk)
+		orderCh <- orderResult{resp, err}
+	}()
+
+	// Start order book polling goroutine (every 50ms)
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stopPolling:
+				return
+			case <-ticker.C:
+				book, err := ct.clobClient.GetOrderBook(ctx, tokenID)
+				if err == nil {
+					bookMu.Lock()
+					latestBook = book
+					bookFetchCount++
+					bookMu.Unlock()
+				}
+			}
+		}
+	}()
+
+	// Wait for order response
+	result := <-orderCh
+	close(stopPolling) // Stop book polling
+
+	orderConfirmed := time.Now()
+	placeOrderMs := float64(time.Since(orderStart).Microseconds()) / 1000
+	timing["place_order_ms"] = placeOrderMs
+
+	bookMu.Lock()
+	timing["book_fetch_count"] = bookFetchCount
+	currentBook := latestBook
+	bookMu.Unlock()
+
+	log.Printf("[%s] [%s] 📊 PlaceOrder: %.0fms | book_polls=%d | status=%s",
+		txRef, elapsed(), placeOrderMs, bookFetchCount, func() string {
+			if result.err != nil {
+				return "ERROR"
+			}
+			return result.resp.Status
+		}())
+
+	if result.err != nil {
+		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
+		log.Printf("[%s] [%s] ❌ order failed: %v", txRef, elapsed(), result.err)
+		debugLog["orderResponse"] = map[string]interface{}{"error": result.err.Error()}
+		debugLog["decision"] = fmt.Sprintf("failed - order error: %v", result.err)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", fmt.Sprintf("order failed: %v", result.err), "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	resp := result.resp
+	timestamps.OrderConfirmedAt = &orderConfirmed
+
+	debugLog["orderResponse"] = map[string]interface{}{
+		"success": resp.Success,
+		"orderID": resp.OrderID,
+		"status":  resp.Status,
+	}
+
+	if !resp.Success {
+		timing["total_ms"] = float64(time.Since(startTime).Microseconds()) / 1000
+		log.Printf("[%s] [%s] ❌ order rejected: %s", txRef, elapsed(), resp.ErrorMsg)
+		debugLog["decision"] = fmt.Sprintf("failed - rejected: %s", resp.ErrorMsg)
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, 0, 0, 0, "failed", resp.ErrorMsg, "", userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Check if immediately matched
+	if resp.Status == "matched" {
+		totalMs := float64(time.Since(startTime).Microseconds()) / 1000
+		timing["total_ms"] = totalMs
+		log.Printf("[%s] [%s] ✅ IMMEDIATE SELL! %.4f @ $%.4f | total=%.0fms", txRef, elapsed(), totalSize, orderPrice, totalMs)
+		debugLog["decision"] = "executed - immediate fill at same price"
+
+		// Clear position
+		if err := ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome); err != nil {
+			log.Printf("[%s] Warning: failed to clear position: %v", txRef, err)
+		}
+
+		return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, totalCost, orderPrice, totalSize, "executed", "", resp.OrderID, userSettings.StrategyType, debugLog, timing, timestamps)
+	}
+
+	// Order is live/pending - need to check fill and place follow-up orders
+	log.Printf("[%s] [%s] ⏳ ORDER PENDING (status=%s), checking fill status...", txRef, elapsed(), resp.Status)
+
+	// Get order status to see how much was filled
+	getOrderStart := time.Now()
+	order, err := ct.clobClient.GetOrder(ctx, resp.OrderID)
+	getOrderMs := float64(time.Since(getOrderStart).Microseconds()) / 1000
+	timing["get_order_ms"] = getOrderMs
+
+	if err != nil {
+		log.Printf("[%s] [%s] 📊 GetOrder: %.0fms | ERROR: %v", txRef, elapsed(), getOrderMs, err)
+	}
+
+	var sizeMatched float64
+	if order != nil {
+		sizeMatched, _ = strconv.ParseFloat(order.SizeMatched, 64)
+		log.Printf("[%s] [%s] 📊 GetOrder: %.0fms | filled=%.4f/%.4f | status=%s",
+			txRef, elapsed(), getOrderMs, sizeMatched, totalSize, order.Status)
+	}
+	unfilledSize := totalSize - sizeMatched
+	filledCost := sizeMatched * orderPrice
+
+	// Log initial order as first row
+	initialDebugLog := map[string]interface{}{
+		"order_type":       "initial",
+		"order_index":      0,
+		"target_size":      totalSize,
+		"target_price":     orderPrice,
+		"book_fetch_count": bookFetchCount,
+	}
+	initialTiming := map[string]interface{}{
+		"place_order_ms":   timing["place_order_ms"],
+		"book_fetch_count": bookFetchCount,
+	}
+
+	// Determine initial order status
+	var initialStatus string
+	if sizeMatched >= totalSize*0.99 {
+		initialStatus = "executed"
+	} else if sizeMatched > 0.01 {
+		initialStatus = "partial"
+	} else {
+		initialStatus = "pending" // Will try follow-up orders
+	}
+
+	// Log initial order row
+	ct.logCopyTradeWithStrategy(ctx, trade, tokenID, totalCost, filledCost, orderPrice, sizeMatched, initialStatus, "", resp.OrderID, userSettings.StrategyType, initialDebugLog, initialTiming, timestamps)
+
+	// If fully filled (within tolerance), we're done
+	if unfilledSize < 0.01 {
+		if err := ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome); err != nil {
+			log.Printf("[%s] Warning: failed to clear position: %v", txRef, err)
+		}
+		return nil
+	}
+
+	// Cancel the pending order - we'll place new orders at bid prices
+	cancelStart := time.Now()
+	cancelErr := ct.clobClient.CancelOrder(ctx, resp.OrderID)
+	cancelMs := float64(time.Since(cancelStart).Microseconds()) / 1000
+	timing["cancel_order_ms"] = cancelMs
+
+	if cancelErr != nil {
+		log.Printf("[%s] [%s] 📊 CancelOrder: %.0fms | ERROR: %v", txRef, elapsed(), cancelMs, cancelErr)
+	} else {
+		log.Printf("[%s] [%s] 📊 CancelOrder: %.0fms | OK | remaining=%.4f", txRef, elapsed(), cancelMs, unfilledSize)
+	}
+
+	// Check if we have an order book to use
+	if currentBook == nil || len(currentBook.Bids) == 0 {
+		log.Printf("[%s] [%s] ⚠️ no bids in order book for follow-up", txRef, elapsed())
+		// Update position to reflect partial sell
+		if sizeMatched > 0.01 {
+			remainingPos := ourPosition - sizeMatched
+			if remainingPos > 0.01 {
+				ct.store.UpdateMyPosition(ctx, MyPosition{
+					MarketID: trade.MarketID, TokenID: tokenID, Outcome: trade.Outcome,
+					Title: trade.Title, Size: remainingPos, AvgPrice: 0, TotalCost: 0,
+				})
+			} else {
+				ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
+			}
+		}
+		return nil
+	}
+
+	// Use order book BIDS to place follow-up SELL orders for remaining shares
+	log.Printf("[%s] [%s] 📖 using order book (%d bids) for remaining %.4f shares", txRef, elapsed(), len(currentBook.Bids), unfilledSize)
+
+	// Calculate how to fill remaining from order book bids
+	remainingShares := unfilledSize
+	var followUpOrders []struct {
+		price float64
+		size  float64
+	}
+
+	for _, bid := range currentBook.Bids {
+		if remainingShares < 0.01 {
+			break
+		}
+
+		bidPrice, _ := strconv.ParseFloat(bid.Price, 64)
+		bidSize, _ := strconv.ParseFloat(bid.Size, 64)
+
+		// Skip if price too low
+		if bidPrice < minPrice {
+			log.Printf("[%s] [%s] ⚠️ bid %.4f < min %.4f, stopping", txRef, elapsed(), bidPrice, minPrice)
+			break
+		}
+
+		// Calculate how much to sell at this level
+		takeSize := remainingShares
+		if takeSize > bidSize {
+			takeSize = bidSize
+		}
+
+		// Ensure minimum order size
+		if takeSize < minShares {
+			takeSize = minShares
+			if takeSize > remainingShares*2 { // Don't over-sell by too much
+				takeSize = remainingShares
+			}
+		}
+
+		followUpOrders = append(followUpOrders, struct {
+			price float64
+			size  float64
+		}{bidPrice, takeSize})
+
+		remainingShares -= takeSize
+	}
+
+	// Track total sold for final position update
+	totalSoldSize := sizeMatched
+	totalSoldValue := filledCost
+
+	// Place follow-up orders and log each as separate row
+	for i, fo := range followUpOrders {
+		foSize := fo.size
+		foPrice := fo.price
+
+		// Ensure minimum order size
+		if foSize < minShares {
+			foSize = minShares
+		}
+
+		// Don't sell more than we have
+		if foSize > ourPosition-totalSoldSize {
+			foSize = ourPosition - totalSoldSize
+			if foSize < 0.01 {
+				break
+			}
+		}
+
+		foStart := time.Now()
+		foResp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, foSize, foPrice, negRisk)
+		foMs := float64(time.Since(foStart).Microseconds()) / 1000
+
+		// Prepare debug log for this follow-up order
+		foDebugLog := map[string]interface{}{
+			"order_type":    "follow_up",
+			"order_index":   i + 1,
+			"target_size":   fo.size,
+			"target_price":  fo.price,
+			"adjusted_size": foSize,
+		}
+		foTiming := map[string]interface{}{
+			"place_order_ms": foMs,
+		}
+
+		if err != nil {
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | ERROR: %v", txRef, elapsed(), i+1, foMs, err)
+			foDebugLog["error"] = err.Error()
+			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "failed", fmt.Sprintf("order failed: %v", err), "", userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			continue
+		}
+
+		if !foResp.Success {
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | REJECTED: %s", txRef, elapsed(), i+1, foMs, foResp.ErrorMsg)
+			foDebugLog["error"] = foResp.ErrorMsg
+			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "failed", foResp.ErrorMsg, foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+			continue
+		}
+
+		if foResp.Status == "matched" {
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | SOLD %.4f @ $%.4f", txRef, elapsed(), i+1, foMs, foSize, foPrice)
+			totalSoldSize += foSize
+			totalSoldValue += foSize * foPrice
+			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, foSize*foPrice, foPrice, foSize, "executed", "", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+		} else {
+			// Order is pending - cancel it (we want immediate fills only)
+			cancelFoStart := time.Now()
+			ct.clobClient.CancelOrder(ctx, foResp.OrderID)
+			cancelFoMs := float64(time.Since(cancelFoStart).Microseconds()) / 1000
+			log.Printf("[%s] [%s] 📊 FollowUp#%d: %.0fms | PENDING → cancelled in %.0fms", txRef, elapsed(), i+1, foMs, cancelFoMs)
+			foDebugLog["cancelled"] = true
+			foTiming["cancel_ms"] = cancelFoMs
+			ct.logCopyTradeWithStrategy(ctx, trade, tokenID, foSize*foPrice, 0, foPrice, 0, "cancelled", "no immediate fill", foResp.OrderID, userSettings.StrategyType, foDebugLog, foTiming, timestamps)
+		}
+	}
+
+	// Update position with remaining shares
+	remainingPos := ourPosition - totalSoldSize
+	if remainingPos > 0.01 {
+		ct.store.UpdateMyPosition(ctx, MyPosition{
+			MarketID: trade.MarketID, TokenID: tokenID, Outcome: trade.Outcome,
+			Title: trade.Title, Size: remainingPos, AvgPrice: 0, TotalCost: 0,
+		})
+	} else {
+		ct.store.ClearMyPosition(ctx, trade.MarketID, trade.Outcome)
+	}
+
+	// Final summary log with total timing
+	totalMs := float64(time.Since(startTime).Microseconds()) / 1000
+	timing["total_ms"] = totalMs
+	timing["follow_up_count"] = len(followUpOrders)
+
+	if totalSoldSize >= totalSize*0.99 {
+		avgPrice := totalSoldValue / totalSoldSize
+		log.Printf("[%s] [%s] ✅ DONE: sold %.4f shares @ avg $%.4f | total=%.0fms", txRef, elapsed(), totalSoldSize, avgPrice, totalMs)
+	} else if totalSoldSize > 0.01 {
+		log.Printf("[%s] [%s] ⚠️ PARTIAL: sold %.4f/%.4f shares | total=%.0fms", txRef, elapsed(), totalSoldSize, totalSize, totalMs)
+	} else {
+		log.Printf("[%s] [%s] ❌ FAILED: no sells | total=%.0fms", txRef, elapsed(), totalMs)
 	}
 
 	return nil
