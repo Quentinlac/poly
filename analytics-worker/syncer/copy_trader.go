@@ -29,7 +29,7 @@
 // │     ↓                                                                       │
 // │  8. Sweep order book: accumulate shares up to target at acceptable prices │
 // │     ↓                                                                       │
-// │  9. Place order via clobClient.PlaceOrderFast() (FOK then GTC fallback)   │
+// │  9. Place FAK order via clobClient.PlaceOrderFAK() - always taker         │
 // │     ↓                                                                       │
 // │ 10. Log result to copy_trade_log table with timing breakdown              │
 // └─────────────────────────────────────────────────────────────────────────────┘
@@ -41,9 +41,12 @@
 //   - Under $0.20: 80%
 //   - $0.40+: 20%
 // - Order Book Sweeping: Buy at multiple price levels to fill target size
-// - FOK vs GTC: Try Fill-Or-Kill first (immediate), fall back to Good-Till-Cancel
+// - FAK (Fill-And-Kill): Take available liquidity immediately, cancel rest
+//   - Always a TAKER (no orders left in book)
+//   - Partial fills OK (unlike FOK which requires full fill)
+//   - 2-decimal precision for maker amount (API requirement)
 //
-// TIMING TARGET: ~600ms from detection to order placed on CLOB
+// TIMING TARGET: ~400ms from detection to order placed on CLOB (with FAK + connection pooling)
 //
 // =============================================================================
 package syncer
@@ -200,6 +203,14 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	} else {
 		log.Printf("[CopyTrader] Using EOA wallet (no funder address set)")
 	}
+
+	// Pre-warm connection pool to CLOB API for faster first order
+	// This establishes TCP+TLS connection upfront (~200-300ms savings on first trade)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := clobClient.WarmConnection(ctx); err != nil {
+		log.Printf("[CopyTrader] Warning: failed to warm connection: %v", err)
+	}
+	cancel()
 
 	// Set defaults
 	if config.Multiplier == 0 {
@@ -1314,10 +1325,10 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		"orderPrice": orderPrice,
 	}
 
-	// Step 7: Place order
+	// Step 7: Place FAK order (Fill-And-Kill = taker only, partial fills OK)
 	orderStart := time.Now()
 	timestamps.OrderPlacedAt = &orderStart
-	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideBuy, totalSize, orderPrice, negRisk)
 	orderConfirmed := time.Now()
 	timing["7_place_order_ms"] = float64(time.Since(orderStart).Microseconds()) / 1000
 	if err != nil {
@@ -1566,10 +1577,10 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		orderPrice := minFillPrice
 		log.Printf("[%s] [%s] 📊 found bids: size=%.4f, avgPrice=%.4f, orderPrice=%.4f", txRef, elapsed(), totalSold, avgPrice, orderPrice)
 
-		log.Printf("[%s] [%s] 🚀 placing SELL order...", txRef, elapsed())
+		log.Printf("[%s] [%s] 🚀 placing SELL FAK order...", txRef, elapsed())
 		orderPlacedAt := time.Now()
 		timestamps.OrderPlacedAt = &orderPlacedAt
-		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
+		resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
 		orderConfirmedAt := time.Now()
 		if err != nil {
 			log.Printf("[%s] [%s] ❌ SELL failed: %v", txRef, elapsed(), err)
@@ -1617,10 +1628,10 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	var totalFilled float64
 	var totalValue float64
 
-	log.Printf("[%s] [%s] 🚀 placing limit SELL order...", txRef, elapsed())
+	log.Printf("[%s] [%s] 🚀 placing SELL FAK order (limit fallback)...", txRef, elapsed())
 	orderPlacedAt := time.Now()
 	timestamps.OrderPlacedAt = &orderPlacedAt
-	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
+	resp, err := ct.clobClient.PlaceOrderFAK(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
 	orderConfirmedAt := time.Now()
 
 	// Capture detailed error info

@@ -145,8 +145,9 @@ type ClobTokenInfo struct {
 type OrderType string
 
 const (
-	OrderTypeFOK OrderType = "FOK" // Fill-Or-Kill (market order)
-	OrderTypeGTC OrderType = "GTC" // Good-Til-Cancelled (limit order)
+	OrderTypeFOK OrderType = "FOK" // Fill-Or-Kill: must fill entirely or cancel
+	OrderTypeFAK OrderType = "FAK" // Fill-And-Kill: fill available, cancel rest (best for copy trading)
+	OrderTypeGTC OrderType = "GTC" // Good-Til-Cancelled (limit order, can become maker)
 	OrderTypeGTD OrderType = "GTD" // Good-Til-Date
 )
 
@@ -198,10 +199,23 @@ func NewClobClient(baseURL string, auth *Auth) (*ClobClient, error) {
 		baseURL = "https://clob.polymarket.com"
 	}
 
+	// Optimized transport with connection pooling for low latency
+	// Default MaxIdleConnsPerHost is only 2, which causes connection churn
+	// By keeping connections alive, we skip DNS + TCP + TLS handshakes (~200-300ms)
+	transport := &http.Transport{
+		MaxIdleConns:        100,              // Total idle connections across all hosts
+		MaxIdleConnsPerHost: 20,               // Keep 20 connections to clob.polymarket.com
+		MaxConnsPerHost:     50,               // Max concurrent connections per host
+		IdleConnTimeout:     90 * time.Second, // Keep idle connections for 90s
+		DisableKeepAlives:   false,            // Explicitly enable keep-alives
+		ForceAttemptHTTP2:   true,             // Try HTTP/2 for multiplexing
+	}
+
 	client := &ClobClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		auth:          auth,
 		chainID:       137, // Polygon mainnet
@@ -221,6 +235,32 @@ func (c *ClobClient) SetFunder(funderAddress string) {
 // SetSignatureType sets the signature type (0=EOA, 1=Magic/Email, 2=Browser proxy)
 func (c *ClobClient) SetSignatureType(sigType int) {
 	c.signatureType = sigType
+}
+
+// WarmConnection pre-establishes TCP+TLS connections to the CLOB API
+// Call this at startup to avoid cold-start latency on first order (~200-300ms savings)
+func (c *ClobClient) WarmConnection(ctx context.Context) error {
+	start := time.Now()
+
+	// Make a lightweight request to establish connection pool
+	// The /time endpoint is simple and fast
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/time", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[CLOB] WarmConnection failed: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Must read body completely to allow connection reuse
+	io.Copy(io.Discard, resp.Body)
+
+	log.Printf("[CLOB] ✅ Connection pool warmed in %dms", time.Since(start).Milliseconds())
+	return nil
 }
 
 // DeriveAPICreds derives or creates API credentials
@@ -959,6 +999,37 @@ func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Si
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
 	return c.postOrder(ctx, order, OrderTypeGTC)
+}
+
+// PlaceOrderFAK places a Fill-And-Kill order - BEST FOR COPY TRADING
+// =============================================================================
+// FAK = Fill whatever liquidity is available immediately, cancel the rest
+// - Always a TAKER (never becomes a maker sitting in the book)
+// - Partial fills are OK (unlike FOK which requires full fill)
+// - Uses strict 2-decimal precision for maker amount (required by API)
+//
+// PRECISION REQUIREMENTS (same as FOK):
+// - Price: 2 decimals (tick size 0.01)
+// - Size: 4 decimals
+// - Maker amount (USDC for buy, tokens for sell): 2 decimals
+// - Taker amount: 4 decimals
+// =============================================================================
+func (c *ClobClient) PlaceOrderFAK(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
+	// Skip API creds check if already set (saves ~0ms but cleaner code path)
+	if c.apiCreds == nil {
+		if _, err := c.DeriveAPICreds(ctx); err != nil {
+			return nil, fmt.Errorf("failed to get API creds: %w", err)
+		}
+	}
+
+	// Use FOK-compatible precision (2 decimal maker amount)
+	// FAK has same precision requirements as FOK
+	order, err := c.createSignedOrderFOK(tokenID, side, size, price, negRisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create order: %w", err)
+	}
+
+	return c.postOrder(ctx, order, OrderTypeFAK)
 }
 
 // createSignedOrderFOK creates an order with FOK-compatible precision

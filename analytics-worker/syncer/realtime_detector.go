@@ -281,7 +281,21 @@ func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
 	}
 	d.processedTxsMu.Unlock()
 
-	// Update metrics for matched trades
+	// Check if this is OUR OWN trade (copy trade settlement appearing in mempool)
+	fromNorm := utils.NormalizeAddress(event.From)
+	if d.myAddress != "" && fromNorm == d.myAddress {
+		// This is our own copy trade hitting the mempool!
+		txRef := event.TxHash
+		if len(txRef) > 16 {
+			txRef = txRef[:16]
+		}
+		log.Printf("[OUR_TX] 📡 OUR COPY TRADE IN MEMPOOL! tx=%s side=%s size=%.4f price=%.4f token=%s",
+			txRef, event.Side, event.Size, event.Price, event.TokenID[:16])
+		// Don't process further - this is just for monitoring
+		return
+	}
+
+	// Update metrics for matched trades (from followed users only)
 	d.metricsMu.Lock()
 	d.metrics.MempoolMatches++
 	d.metrics.TradesDetected++
@@ -295,7 +309,7 @@ func (d *RealtimeDetector) handleMempoolTrade(event api.MempoolTradeEvent) {
 	// Note: Mempool decoded data may be inaccurate - copy_trader will verify via Alchemy
 	detail := models.TradeDetail{
 		ID:              event.TxHash, // Use TxHash as ID (matches dedup key)
-		UserID:          utils.NormalizeAddress(event.From),
+		UserID:          fromNorm,
 		MarketID:        event.TokenID, // May need verification in copy_trader
 		Type:            "TRADE",
 		Side:            event.Side,
@@ -650,11 +664,16 @@ func (d *RealtimeDetector) syncFollowedAddressesToMempool() {
 	}
 
 	d.followedUsersMu.RLock()
-	addrs := make([]string, 0, len(d.followedUsers))
+	addrs := make([]string, 0, len(d.followedUsers)+1)
 	for addr := range d.followedUsers {
 		addrs = append(addrs, addr)
 	}
 	d.followedUsersMu.RUnlock()
+
+	// Also add our own address to detect when our copy trades hit mempool
+	if d.myAddress != "" {
+		addrs = append(addrs, d.myAddress)
+	}
 
 	d.mempoolWS.SetFollowedAddresses(addrs)
 }
