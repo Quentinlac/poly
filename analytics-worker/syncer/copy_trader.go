@@ -1722,9 +1722,15 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		log.Printf("[%s] [%s] 📊 CancelOrder: %.0fms | OK | remaining=%.4f", txRef, elapsed(), cancelMs, unfilledSize)
 	}
 
-	// Check if we have an order book to use
-	if currentBook == nil || len(currentBook.Asks) == 0 {
-		log.Printf("[%s] [%s] ⚠️ no order book available for follow-up", txRef, elapsed())
+	// Fetch FRESH order book for follow-ups (the polled book is stale by now)
+	log.Printf("[%s] [%s] 📡 fetching fresh book for follow-ups...", txRef, elapsed())
+	freshBookStart := time.Now()
+	freshBook, freshBookErr := ct.clobClient.GetOrderBook(ctx, tokenID)
+	freshBookMs := float64(time.Since(freshBookStart).Microseconds()) / 1000
+	timing["fresh_book_ms"] = freshBookMs
+
+	if freshBookErr != nil || freshBook == nil || len(freshBook.Asks) == 0 {
+		log.Printf("[%s] [%s] ⚠️ no fresh order book for follow-up (err=%v)", txRef, elapsed(), freshBookErr)
 		if sizeMatched > 0.01 {
 			ct.store.UpdateMyPosition(ctx, MyPosition{
 				MarketID: trade.MarketID, TokenID: tokenID, Outcome: trade.Outcome,
@@ -1734,8 +1740,9 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		return nil
 	}
 
-	// Use order book to place follow-up orders for remaining shares
-	log.Printf("[%s] [%s] 📖 using order book (%d asks) for remaining %.4f shares", txRef, elapsed(), len(currentBook.Asks), unfilledSize)
+	// Use FRESH order book for follow-up orders
+	log.Printf("[%s] [%s] 📖 fresh book in %.0fms (%d asks) for remaining %.4f shares", txRef, elapsed(), freshBookMs, len(freshBook.Asks), unfilledSize)
+	currentBook = freshBook
 
 	// Calculate how to fill remaining from order book
 	remainingShares := unfilledSize
@@ -2174,9 +2181,15 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 		log.Printf("[%s] [%s] 📊 CancelOrder: %.0fms | OK | remaining=%.4f", txRef, elapsed(), cancelMs, unfilledSize)
 	}
 
-	// Check if we have an order book to use
-	if currentBook == nil || len(currentBook.Bids) == 0 {
-		log.Printf("[%s] [%s] ⚠️ no bids in order book for follow-up", txRef, elapsed())
+	// Fetch FRESH order book for follow-ups (the polled book is stale by now)
+	log.Printf("[%s] [%s] 📡 fetching fresh book for follow-ups...", txRef, elapsed())
+	freshBookStart := time.Now()
+	freshBook, freshBookErr := ct.clobClient.GetOrderBook(ctx, tokenID)
+	freshBookMs := float64(time.Since(freshBookStart).Microseconds()) / 1000
+	timing["fresh_book_ms"] = freshBookMs
+
+	if freshBookErr != nil || freshBook == nil || len(freshBook.Bids) == 0 {
+		log.Printf("[%s] [%s] ⚠️ no fresh order book for follow-up (err=%v)", txRef, elapsed(), freshBookErr)
 		// Update position to reflect partial sell
 		if sizeMatched > 0.01 {
 			remainingPos := ourPosition - sizeMatched
@@ -2192,8 +2205,9 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 		return nil
 	}
 
-	// Use order book BIDS to place follow-up SELL orders for remaining shares
-	log.Printf("[%s] [%s] 📖 using order book (%d bids) for remaining %.4f shares", txRef, elapsed(), len(currentBook.Bids), unfilledSize)
+	// Use FRESH order book BIDS for follow-up SELL orders
+	log.Printf("[%s] [%s] 📖 fresh book in %.0fms (%d bids) for remaining %.4f shares", txRef, elapsed(), freshBookMs, len(freshBook.Bids), unfilledSize)
+	currentBook = freshBook
 
 	// Calculate how to fill remaining from order book bids
 	remainingShares := unfilledSize
