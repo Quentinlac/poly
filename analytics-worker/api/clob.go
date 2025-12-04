@@ -1009,7 +1009,13 @@ func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Si
 	resp, err := c.postOrder(ctx, order, OrderTypeGTC)
 	postMs := time.Since(postStart).Milliseconds()
 
-	log.Printf("[PlaceOrderFast] sign=%dms post=%dms total=%dms", signMs, postMs, time.Since(totalStart).Milliseconds())
+	// Log order details and timing
+	status := "ERROR"
+	if resp != nil {
+		status = resp.Status
+	}
+	log.Printf("[PlaceOrderFast] %s %.4f @ $%.4f | sign=%dms post=%dms total=%dms | status=%s",
+		side, size, price, signMs, postMs, time.Since(totalStart).Milliseconds(), status)
 
 	return resp, err
 }
