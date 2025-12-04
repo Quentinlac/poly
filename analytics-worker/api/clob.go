@@ -985,20 +985,33 @@ func (c *ClobClient) PlaceOrderFOK(ctx context.Context, tokenID string, side Sid
 //
 // =============================================================================
 func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
+	totalStart := time.Now()
+
 	if c.apiCreds == nil {
+		credsStart := time.Now()
 		if _, err := c.DeriveAPICreds(ctx); err != nil {
 			return nil, fmt.Errorf("failed to get API creds: %w", err)
 		}
+		log.Printf("[PlaceOrderFast] DeriveAPICreds: %dms", time.Since(credsStart).Milliseconds())
 	}
 
 	// Use GTC directly - more reliable than FOK
 	// FOK has stricter validation (5 share minimum on some markets) and same speed
 	// GTC will still match immediately if there's liquidity at our price
+	signStart := time.Now()
 	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
+	signMs := time.Since(signStart).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
-	return c.postOrder(ctx, order, OrderTypeGTC)
+
+	postStart := time.Now()
+	resp, err := c.postOrder(ctx, order, OrderTypeGTC)
+	postMs := time.Since(postStart).Milliseconds()
+
+	log.Printf("[PlaceOrderFast] sign=%dms post=%dms total=%dms", signMs, postMs, time.Since(totalStart).Milliseconds())
+
+	return resp, err
 }
 
 // PlaceOrderFAK places a Fill-And-Kill order - BEST FOR COPY TRADING
