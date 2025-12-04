@@ -3039,3 +3039,63 @@ func (s *PostgresStore) GetBinancePriceRange(ctx context.Context, symbol string,
 
 	return prices, rows.Err()
 }
+
+// CopyTradeComparison represents a per-tx comparison between followed user and follower
+type CopyTradeComparison struct {
+	TxHash        string    // The followed user's transaction hash
+	Side          string    // BUY or SELL
+	FollowingSize float64   // Size the followed user traded (negative=buy, positive=sell)
+	FollowingCost float64   // Total cost/proceeds for followed user
+	FollowerSize  float64   // Size we actually filled (negative=buy, positive=sell)
+	FollowerCost  float64   // Total cost/proceeds for us
+	TokenID       string    // Token traded
+	MarketTitle   string    // Market title
+	Outcome       string    // Outcome (Yes/No)
+	CreatedAt     time.Time // When this record was created
+}
+
+// EnsureCopyTradeComparisonTable creates the copy_trade_comparison table if it doesn't exist
+func (s *PostgresStore) EnsureCopyTradeComparisonTable(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS copy_trade_comparison (
+			tx_hash VARCHAR(66) PRIMARY KEY,
+			side VARCHAR(4) NOT NULL,
+			following_size DECIMAL(20, 6) NOT NULL,
+			following_cost DECIMAL(20, 6) NOT NULL,
+			follower_size DECIMAL(20, 6) NOT NULL,
+			follower_cost DECIMAL(20, 6) NOT NULL,
+			token_id VARCHAR(80),
+			market_title TEXT,
+			outcome VARCHAR(10),
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		-- Index for analysis queries
+		CREATE INDEX IF NOT EXISTS idx_copy_trade_comparison_created
+			ON copy_trade_comparison (created_at DESC);
+	`)
+	if err != nil {
+		return fmt.Errorf("create copy_trade_comparison table: %w", err)
+	}
+	log.Printf("[Storage] Ensured copy_trade_comparison table exists")
+	return nil
+}
+
+// SaveCopyTradeComparison saves or updates a copy trade comparison record
+// Convention: negative size = BUY (spending USDC), positive size = SELL (receiving USDC)
+func (s *PostgresStore) SaveCopyTradeComparison(ctx context.Context, comp CopyTradeComparison) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO copy_trade_comparison (
+			tx_hash, side, following_size, following_cost, follower_size, follower_cost,
+			token_id, market_title, outcome, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		ON CONFLICT (tx_hash) DO UPDATE SET
+			follower_size = copy_trade_comparison.follower_size + EXCLUDED.follower_size,
+			follower_cost = copy_trade_comparison.follower_cost + EXCLUDED.follower_cost
+	`, comp.TxHash, comp.Side, comp.FollowingSize, comp.FollowingCost,
+		comp.FollowerSize, comp.FollowerCost, comp.TokenID, comp.MarketTitle, comp.Outcome)
+	if err != nil {
+		return fmt.Errorf("save copy trade comparison: %w", err)
+	}
+	return nil
+}

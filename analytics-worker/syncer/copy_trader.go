@@ -352,6 +352,11 @@ func (ct *CopyTrader) Start(ctx context.Context) error {
 	}
 	log.Printf("[CopyTrader] API credentials initialized successfully")
 
+	// Ensure copy trade comparison table exists
+	if err := ct.store.EnsureCopyTradeComparisonTable(ctx); err != nil {
+		log.Printf("[CopyTrader] Warning: failed to create comparison table: %v", err)
+	}
+
 	// Start real-time detector for faster trade detection
 	// Pass clobClient for fast CLOB API detection (~50ms latency)
 	// EnableBlockchainWS should only be true in the worker (for backup ~1s detection)
@@ -1890,6 +1895,24 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		log.Printf("[%s] [%s] ❌ FAILED: no fills | total=%.0fms", txRef, elapsed(), totalMs)
 	}
 
+	// Async save comparison: BUY = negative size (spending USDC)
+	go func() {
+		comp := storage.CopyTradeComparison{
+			TxHash:        trade.TransactionHash,
+			Side:          "BUY",
+			FollowingSize: -trade.Size,                // Negative = buying
+			FollowingCost: trade.Size * trade.Price,   // What followed user spent
+			FollowerSize:  -totalFilledSize,           // Negative = buying
+			FollowerCost:  totalFilledCost,            // What we spent
+			TokenID:       tokenID,
+			MarketTitle:   trade.Title,
+			Outcome:       trade.Outcome,
+		}
+		if err := ct.store.SaveCopyTradeComparison(context.Background(), comp); err != nil {
+			log.Printf("[%s] Warning: failed to save comparison: %v", txRef, err)
+		}
+	}()
+
 	return nil
 }
 
@@ -2369,6 +2392,24 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 	} else {
 		log.Printf("[%s] [%s] ❌ FAILED: no sells | total=%.0fms", txRef, elapsed(), totalMs)
 	}
+
+	// Async save comparison: SELL = positive size (receiving USDC)
+	go func() {
+		comp := storage.CopyTradeComparison{
+			TxHash:        trade.TransactionHash,
+			Side:          "SELL",
+			FollowingSize: trade.Size,                 // Positive = selling
+			FollowingCost: trade.Size * trade.Price,   // What followed user received
+			FollowerSize:  totalSoldSize,              // Positive = selling
+			FollowerCost:  totalSoldValue,             // What we received
+			TokenID:       tokenID,
+			MarketTitle:   trade.Title,
+			Outcome:       trade.Outcome,
+		}
+		if err := ct.store.SaveCopyTradeComparison(context.Background(), comp); err != nil {
+			log.Printf("[%s] Warning: failed to save comparison: %v", txRef, err)
+		}
+	}()
 
 	return nil
 }
