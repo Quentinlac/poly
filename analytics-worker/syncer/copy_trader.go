@@ -1458,11 +1458,11 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	if sellSize < minSellShares {
 		if ourPosition >= minSellShares {
 			// We have enough - bump up to minimum
-			log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum, bumping to %.0f shares (position=%.4f)", sellSize, minSellShares, ourPosition)
+			log.Printf("[%s] [%s] 📈 size %.4f below min, bumping to %.0f", txRef, elapsed(), sellSize, minSellShares)
 			sellSize = minSellShares
 		} else {
 			// We don't have enough - sell entire position
-			log.Printf("[CopyTrader-Bot] SELL: size %.4f below minimum %.0f, selling entire position %.4f", sellSize, minSellShares, ourPosition)
+			log.Printf("[%s] [%s] 📈 size %.4f below min, selling entire %.4f", txRef, elapsed(), sellSize, ourPosition)
 			sellSize = ourPosition
 		}
 	}
@@ -1476,26 +1476,25 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		if minPrice < 0 {
 			minPrice = 0.01 // Never go below 1 cent
 		}
-		log.Printf("[CopyTrader-Bot] SELL: Using dynamic slippage -%.0f%% for price $%.2f", slippage*100, copiedPrice)
 	} else {
 		// Blockchain trades don't have price - allow any price (accept any bid)
 		minPrice = 0.0
-		log.Printf("[CopyTrader-Bot] SELL: No price from blockchain, accepting any bid")
 	}
-
-	log.Printf("[CopyTrader-Bot] SELL: Copied price=%.4f, minPrice=%.4f, sellSize=%.4f, market=%s",
-		copiedPrice, minPrice, sellSize, trade.Title)
+	log.Printf("[%s] [%s] ✓ sellSize=%.4f, minPrice=%.4f", txRef, elapsed(), sellSize, minPrice)
 
 	// Get order book (use pre-fetched if available, otherwise fetch now)
+	log.Printf("[%s] [%s] 📡 fetching order book...", txRef, elapsed())
 	var book *api.OrderBook
 	var bookErr error
 	if orderBookCh != nil {
 		// Use pre-fetched order book from parallel execution
 		result := <-orderBookCh
 		book, bookErr = result.book, result.err
+		log.Printf("[%s] [%s] ✓ order book from parallel fetch", txRef, elapsed())
 	} else {
 		// Fetch fresh order book
 		book, bookErr = ct.clobClient.GetOrderBook(ctx, tokenID)
+		log.Printf("[%s] [%s] ✓ order book fetched fresh", txRef, elapsed())
 	}
 	if bookErr != nil {
 		if strings.Contains(bookErr.Error(), "404") || strings.Contains(bookErr.Error(), "No orderbook exists") {
@@ -1564,32 +1563,28 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	if totalSold > 0.01 {
 		avgPrice := totalUSDC / totalSold
 		// Use minFillPrice (not avgPrice) to ensure we sweep all bid levels
-		// Example: if bids are 10@0.12 and 5@0.11, and we want to sweep both:
-		// - avgPrice would be ~0.115, which only matches 0.12 bids
-		// - minFillPrice is 0.11, which matches both levels
 		orderPrice := minFillPrice
-		log.Printf("[CopyTrader-Bot] SELL: selling %.4f tokens at avgPrice=%.4f, orderPrice=%.4f (min fill) for $%.4f",
-			totalSold, avgPrice, orderPrice, totalUSDC)
+		log.Printf("[%s] [%s] 📊 found bids: size=%.4f, avgPrice=%.4f, orderPrice=%.4f", txRef, elapsed(), totalSold, avgPrice, orderPrice)
 
+		log.Printf("[%s] [%s] 🚀 placing SELL order...", txRef, elapsed())
 		orderPlacedAt := time.Now()
 		timestamps.OrderPlacedAt = &orderPlacedAt
-		// Try FOK first (immediate), fall back to GTC if needed
 		resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, totalSold, orderPrice, negRisk)
 		orderConfirmedAt := time.Now()
 		if err != nil {
-			log.Printf("[CopyTrader-Bot] SELL failed: %v", err)
+			log.Printf("[%s] [%s] ❌ SELL failed: %v", txRef, elapsed(), err)
 			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", fmt.Sprintf("order failed: %v", err), "", userSettings.StrategyType, nil, nil, timestamps)
 		}
 
 		timestamps.OrderConfirmedAt = &orderConfirmedAt
 
 		if !resp.Success {
-			log.Printf("[CopyTrader-Bot] SELL rejected: %s", resp.ErrorMsg)
+			log.Printf("[%s] [%s] ❌ SELL rejected: %s", txRef, elapsed(), resp.ErrorMsg)
 			return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", resp.ErrorMsg, "", userSettings.StrategyType, nil, nil, timestamps)
 		}
 
-		log.Printf("[CopyTrader-Bot] SELL success: OrderID=%s, Status=%s, Size=%.4f, AvgPrice=%.4f, USDC=$%.4f",
-			resp.OrderID, resp.Status, totalSold, avgPrice, totalUSDC)
+		log.Printf("[%s] [%s] ✅ SELL SUCCESS: status=%s, size=%.4f, price=%.4f, cost=$%.2f",
+			txRef, elapsed(), resp.Status, totalSold, avgPrice, totalUSDC)
 
 		// Clear position if we sold everything
 		if remainingSize < 0.01 {
@@ -1600,7 +1595,7 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	}
 
 	// No acceptable bids found within 10% - need to create limit orders
-	log.Printf("[CopyTrader-Bot] SELL: no bids within 10%%, creating limit orders...")
+	log.Printf("[%s] [%s] ⚠️ no bids within slippage, creating limit orders...", txRef, elapsed())
 
 	// Create 3 limit sell orders:
 	// - 20% at same price as copied user
@@ -1615,21 +1610,16 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	order2Price := copiedPrice * 0.97 // -3%
 	order3Price := copiedPrice * 0.95 // -5%
 
-	log.Printf("[CopyTrader-Bot] SELL: Creating limit orders - 20%% @ %.4f, 40%% @ %.4f, 40%% @ %.4f",
-		order1Price, order2Price, order3Price)
+	log.Printf("[%s] [%s] 📋 limit prices: %.4f / %.4f / %.4f", txRef, elapsed(), order1Price, order2Price, order3Price)
 
 	// Place limit orders (using market orders with price limits for now)
-	// TODO: Implement proper limit order API when available
 	var orderIDs []string
 	var totalFilled float64
 	var totalValue float64
 
-	// Try FOK first (immediate), fall back to GTC if needed
+	log.Printf("[%s] [%s] 🚀 placing limit SELL order...", txRef, elapsed())
 	orderPlacedAt := time.Now()
 	timestamps.OrderPlacedAt = &orderPlacedAt
-	sellUSDC := sellSize * order3Price
-	log.Printf("[CopyTrader-Bot] SELL: Placing order for %.4f tokens at $%.4f (total ~$%.2f)",
-		sellSize, order3Price, sellUSDC)
 	resp, err := ct.clobClient.PlaceOrderFast(ctx, tokenID, api.SideSell, sellSize, order3Price, negRisk)
 	orderConfirmedAt := time.Now()
 
@@ -1637,10 +1627,10 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	var failReason string
 	if err != nil {
 		failReason = fmt.Sprintf("market sell failed: %v", err)
-		log.Printf("[CopyTrader-Bot] SELL: Order error: %v", err)
+		log.Printf("[%s] [%s] ❌ SELL order error: %v", txRef, elapsed(), err)
 	} else if !resp.Success {
 		failReason = fmt.Sprintf("market sell rejected: %s", resp.ErrorMsg)
-		log.Printf("[CopyTrader-Bot] SELL: Order rejected: %s", resp.ErrorMsg)
+		log.Printf("[%s] [%s] ❌ SELL order rejected: %s", txRef, elapsed(), resp.ErrorMsg)
 	} else {
 		timestamps.OrderConfirmedAt = &orderConfirmedAt
 		orderIDs = append(orderIDs, resp.OrderID)
@@ -1650,7 +1640,7 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 			fmt.Sscanf(book.Bids[0].Price, "%f", &bestBid)
 			totalFilled = sellSize
 			totalValue = sellSize * bestBid
-			log.Printf("[CopyTrader-Bot] SELL: Order successful, estimated fill %.4f @ $%.4f", totalFilled, bestBid)
+			log.Printf("[%s] [%s] ✅ SELL SUCCESS (limit): size=%.4f, price=%.4f", txRef, elapsed(), totalFilled, bestBid)
 		} else {
 			failReason = "no bids available after order"
 		}
@@ -1666,7 +1656,7 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 	if failReason == "" {
 		failReason = "no fills achieved (unknown reason)"
 	}
-	log.Printf("[CopyTrader-Bot] SELL: failed - %s", failReason)
+	log.Printf("[%s] [%s] ❌ SELL failed: %s", txRef, elapsed(), failReason)
 	return ct.logCopyTradeWithStrategy(ctx, trade, tokenID, 0, 0, 0, sellSize, "failed", failReason, "", userSettings.StrategyType, nil, nil, timestamps)
 }
 
