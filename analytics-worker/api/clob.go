@@ -1541,22 +1541,23 @@ func CalculateOptimalFill(book *OrderBook, side Side, amountUSDC float64) (total
 // =============================================================================
 
 // OpenOrder represents the status of an order from GET /data/order/{id}
+// Note: Some fields come as numbers from the API, using json.Number for flexibility
 type OpenOrder struct {
-	ID              string   `json:"id"`
-	Status          string   `json:"status"`
-	Market          string   `json:"market"`
-	OriginalSize    string   `json:"original_size"`
-	SizeMatched     string   `json:"size_matched"`
-	Outcome         string   `json:"outcome"`
-	MakerAddress    string   `json:"maker_address"`
-	Owner           string   `json:"owner"`
-	Price           string   `json:"price"`
-	Side            string   `json:"side"`
-	AssetID         string   `json:"asset_id"`
-	Expiration      string   `json:"expiration"`
-	Type            string   `json:"type"`
-	CreatedAt       string   `json:"created_at"`
-	AssociateTrades []string `json:"associate_trades"`
+	ID              string      `json:"id"`
+	Status          string      `json:"status"`
+	Market          string      `json:"market"`
+	OriginalSize    string      `json:"original_size"`
+	SizeMatched     string      `json:"size_matched"`
+	Outcome         string      `json:"outcome"`
+	MakerAddress    string      `json:"maker_address"`
+	Owner           string      `json:"owner"`
+	Price           string      `json:"price"`
+	Side            string      `json:"side"`
+	AssetID         string      `json:"asset_id"`
+	Expiration      json.Number `json:"expiration"`
+	Type            string      `json:"type"`
+	CreatedAt       json.Number `json:"created_at"`
+	AssociateTrades []string    `json:"associate_trades"`
 }
 
 // GetOrder retrieves order status by order ID
