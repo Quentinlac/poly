@@ -463,3 +463,71 @@ CREATE TABLE IF NOT EXISTS privileged_analysis_meta (
     user_count INTEGER,
     PRIMARY KEY (time_window_minutes, price_threshold_pct)
 );
+
+-- ============================================================================
+-- TRADING ACCOUNTS (Multi-account support)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS trading_accounts (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    private_key_env_var VARCHAR(100) NOT NULL,
+    funder_address_env_var VARCHAR(100),
+    signature_type INT DEFAULT 1,
+    enabled BOOLEAN DEFAULT TRUE,
+    is_default BOOLEAN DEFAULT FALSE,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(private_key_env_var),
+    UNIQUE(name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trading_accounts_enabled ON trading_accounts(enabled);
+CREATE INDEX IF NOT EXISTS idx_trading_accounts_default ON trading_accounts(is_default) WHERE is_default = TRUE;
+
+-- Add trading_account_id to user_copy_settings if not exists
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'user_copy_settings' AND column_name = 'trading_account_id') THEN
+        ALTER TABLE user_copy_settings ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'user_copy_settings' AND column_name = 'strategy_type') THEN
+        ALTER TABLE user_copy_settings ADD COLUMN strategy_type INT DEFAULT 1;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'user_copy_settings' AND column_name = 'max_usd') THEN
+        ALTER TABLE user_copy_settings ADD COLUMN max_usd DECIMAL(20, 8);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_user_copy_settings_account ON user_copy_settings(trading_account_id);
+
+-- Add trading_account_id to copy_trades if not exists
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'copy_trades' AND column_name = 'trading_account_id') THEN
+        ALTER TABLE copy_trades ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_copy_trades_account ON copy_trades(trading_account_id);
+
+-- Add trading_account_id to my_positions if not exists
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'my_positions' AND column_name = 'trading_account_id') THEN
+        ALTER TABLE my_positions ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_my_positions_account ON my_positions(trading_account_id);
+
+-- Insert default account if not exists
+INSERT INTO trading_accounts (name, private_key_env_var, funder_address_env_var, signature_type, enabled, is_default, description)
+VALUES ('Default Account', 'POLYMARKET_PRIVATE_KEY', 'POLYMARKET_FUNDER_ADDRESS', 1, TRUE, TRUE, 'Default trading account')
+ON CONFLICT (private_key_env_var) DO NOTHING;

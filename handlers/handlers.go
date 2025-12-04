@@ -373,9 +373,12 @@ func (h *Handler) GetUserCopySettings(c *gin.Context) {
 
 // UpdateUserCopySettingsRequest is the payload for updating copy settings
 type UpdateUserCopySettingsRequest struct {
-	Multiplier *float64 `json:"multiplier"`
-	Enabled    *bool    `json:"enabled"`
-	MinUSDC    *float64 `json:"min_usdc"`
+	Multiplier        *float64 `json:"multiplier"`
+	Enabled           *bool    `json:"enabled"`
+	MinUSDC           *float64 `json:"min_usdc"`
+	TradingAccountID  *int     `json:"trading_account_id"`  // ID of the trading account to use
+	StrategyType      *int     `json:"strategy_type"`       // 1=human, 2=bot, 3=btc_15m
+	MaxUSD            *float64 `json:"max_usd"`             // Max USDC per trade (nil = no cap)
 }
 
 // UpdateUserCopySettings updates copy trading settings for a user
@@ -425,6 +428,35 @@ func (h *Handler) UpdateUserCopySettings(c *gin.Context) {
 			return
 		}
 		settings.MinUSDC = *req.MinUSDC
+	}
+	if req.TradingAccountID != nil {
+		// Validate account exists if not nil
+		if *req.TradingAccountID > 0 {
+			account, err := h.service.GetTradingAccount(c.Request.Context(), *req.TradingAccountID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to validate account: " + err.Error()})
+				return
+			}
+			if account == nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "trading account not found"})
+				return
+			}
+		}
+		settings.TradingAccountID = req.TradingAccountID
+	}
+	if req.StrategyType != nil {
+		if *req.StrategyType < 1 || *req.StrategyType > 3 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "strategy_type must be 1 (human), 2 (bot), or 3 (btc_15m)"})
+			return
+		}
+		settings.StrategyType = *req.StrategyType
+	}
+	if req.MaxUSD != nil {
+		if *req.MaxUSD < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "max_usd must be non-negative"})
+			return
+		}
+		settings.MaxUSD = req.MaxUSD
 	}
 
 	if err := h.service.SetUserCopySettings(c.Request.Context(), *settings); err != nil {
@@ -584,5 +616,218 @@ func (h *Handler) GetAnalyticsList(c *gin.Context) {
 		"offset":      filter.Offset,
 		"limit":       filter.Limit,
 	})
+}
+
+// ============================================================================
+// TRADING ACCOUNTS ENDPOINTS
+// ============================================================================
+
+// GetTradingAccounts returns all trading accounts
+func (h *Handler) GetTradingAccounts(c *gin.Context) {
+	accounts, err := h.service.GetTradingAccounts(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get trading accounts: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"accounts": accounts,
+		"count":    len(accounts),
+	})
+}
+
+// GetTradingAccount returns a single trading account by ID
+func (h *Handler) GetTradingAccount(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account ID"})
+		return
+	}
+
+	account, err := h.service.GetTradingAccount(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get account: " + err.Error()})
+		return
+	}
+	if account == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"account": account,
+	})
+}
+
+// CreateTradingAccountRequest is the request body for creating a trading account
+type CreateTradingAccountRequest struct {
+	Name                string  `json:"name" binding:"required"`
+	PrivateKeyEnvVar    string  `json:"private_key_env_var" binding:"required"`
+	FunderAddressEnvVar *string `json:"funder_address_env_var"`
+	SignatureType       *int    `json:"signature_type"` // 0=EOA, 1=Magic
+	Enabled             *bool   `json:"enabled"`
+	IsDefault           *bool   `json:"is_default"`
+	Description         *string `json:"description"`
+}
+
+// CreateTradingAccount creates a new trading account
+func (h *Handler) CreateTradingAccount(c *gin.Context) {
+	var req CreateTradingAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		return
+	}
+
+	account := storage.TradingAccount{
+		Name:                req.Name,
+		PrivateKeyEnvVar:    req.PrivateKeyEnvVar,
+		FunderAddressEnvVar: req.FunderAddressEnvVar,
+		SignatureType:       1, // Default to Magic wallet
+		Enabled:             true,
+		IsDefault:           false,
+	}
+
+	if req.SignatureType != nil {
+		account.SignatureType = *req.SignatureType
+	}
+	if req.Enabled != nil {
+		account.Enabled = *req.Enabled
+	}
+	if req.IsDefault != nil {
+		account.IsDefault = *req.IsDefault
+	}
+	if req.Description != nil {
+		account.Description = req.Description
+	}
+
+	created, err := h.service.CreateTradingAccount(c.Request.Context(), account)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create account: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
+		"account": created,
+	})
+}
+
+// UpdateTradingAccountRequest is the request body for updating a trading account
+type UpdateTradingAccountRequest struct {
+	Name                *string `json:"name"`
+	PrivateKeyEnvVar    *string `json:"private_key_env_var"`
+	FunderAddressEnvVar *string `json:"funder_address_env_var"`
+	SignatureType       *int    `json:"signature_type"`
+	Enabled             *bool   `json:"enabled"`
+	IsDefault           *bool   `json:"is_default"`
+	Description         *string `json:"description"`
+}
+
+// UpdateTradingAccount updates an existing trading account
+func (h *Handler) UpdateTradingAccount(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account ID"})
+		return
+	}
+
+	// Get existing account
+	existing, err := h.service.GetTradingAccount(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get account: " + err.Error()})
+		return
+	}
+	if existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		return
+	}
+
+	var req UpdateTradingAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		return
+	}
+
+	// Apply updates
+	if req.Name != nil {
+		existing.Name = *req.Name
+	}
+	if req.PrivateKeyEnvVar != nil {
+		existing.PrivateKeyEnvVar = *req.PrivateKeyEnvVar
+	}
+	if req.FunderAddressEnvVar != nil {
+		existing.FunderAddressEnvVar = req.FunderAddressEnvVar
+	}
+	if req.SignatureType != nil {
+		existing.SignatureType = *req.SignatureType
+	}
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	if req.IsDefault != nil {
+		existing.IsDefault = *req.IsDefault
+	}
+	if req.Description != nil {
+		existing.Description = req.Description
+	}
+
+	updated, err := h.service.UpdateTradingAccount(c.Request.Context(), *existing)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update account: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"account": updated,
+	})
+}
+
+// DeleteTradingAccount deletes a trading account
+func (h *Handler) DeleteTradingAccount(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account ID"})
+		return
+	}
+
+	if err := h.service.DeleteTradingAccount(c.Request.Context(), id); err != nil {
+		if strings.Contains(err.Error(), "cannot delete default") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete account: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Account deleted successfully",
+	})
+}
+
+// GetTradingAccountStats returns statistics for a trading account
+func (h *Handler) GetTradingAccountStats(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account ID"})
+		return
+	}
+
+	stats, err := h.service.GetTradingAccountStats(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get stats: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
 }
 

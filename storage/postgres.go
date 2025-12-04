@@ -85,10 +85,113 @@ func NewPostgres() (*PostgresStore, error) {
 		return nil, fmt.Errorf("redis: ping: %w", err)
 	}
 
-	return &PostgresStore{
+	store := &PostgresStore{
 		pool:  pool,
 		redis: rdb,
-	}, nil
+	}
+
+	// Run migrations to ensure schema is up to date
+	if err := store.runMigrations(context.Background()); err != nil {
+		log.Printf("[PostgresStore] Warning: migration failed: %v", err)
+		// Don't fail startup, just log the warning - tables may already exist
+	}
+
+	return store, nil
+}
+
+// runMigrations ensures all required tables and columns exist
+func (s *PostgresStore) runMigrations(ctx context.Context) error {
+	log.Println("[PostgresStore] Running migrations...")
+
+	// Create trading_accounts table if not exists
+	_, err := s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS trading_accounts (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(100) NOT NULL,
+			private_key_env_var VARCHAR(100) NOT NULL,
+			funder_address_env_var VARCHAR(100),
+			signature_type INT DEFAULT 1,
+			enabled BOOLEAN DEFAULT TRUE,
+			is_default BOOLEAN DEFAULT FALSE,
+			description TEXT,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(private_key_env_var),
+			UNIQUE(name)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create trading_accounts: %w", err)
+	}
+
+	// Add trading_account_id to user_copy_settings if not exists
+	_, err = s.pool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name = 'user_copy_settings' AND column_name = 'trading_account_id') THEN
+				ALTER TABLE user_copy_settings ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE SET NULL;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name = 'user_copy_settings' AND column_name = 'strategy_type') THEN
+				ALTER TABLE user_copy_settings ADD COLUMN strategy_type INT DEFAULT 1;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name = 'user_copy_settings' AND column_name = 'max_usd') THEN
+				ALTER TABLE user_copy_settings ADD COLUMN max_usd DECIMAL(20, 8);
+			END IF;
+		END $$
+	`)
+	if err != nil {
+		return fmt.Errorf("alter user_copy_settings: %w", err)
+	}
+
+	// Add trading_account_id to copy_trades if not exists
+	_, err = s.pool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name = 'copy_trades' AND column_name = 'trading_account_id') THEN
+				ALTER TABLE copy_trades ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE SET NULL;
+			END IF;
+		END $$
+	`)
+	if err != nil {
+		return fmt.Errorf("alter copy_trades: %w", err)
+	}
+
+	// Add trading_account_id to my_positions if not exists
+	_, err = s.pool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name = 'my_positions' AND column_name = 'trading_account_id') THEN
+				ALTER TABLE my_positions ADD COLUMN trading_account_id INT REFERENCES trading_accounts(id) ON DELETE CASCADE;
+			END IF;
+		END $$
+	`)
+	if err != nil {
+		return fmt.Errorf("alter my_positions: %w", err)
+	}
+
+	// Create indexes if not exist
+	_, _ = s.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_trading_accounts_enabled ON trading_accounts(enabled)`)
+	_, _ = s.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_user_copy_settings_account ON user_copy_settings(trading_account_id)`)
+	_, _ = s.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_copy_trades_account ON copy_trades(trading_account_id)`)
+	_, _ = s.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_my_positions_account ON my_positions(trading_account_id)`)
+
+	// Insert default account if not exists
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO trading_accounts (name, private_key_env_var, funder_address_env_var, signature_type, enabled, is_default, description)
+		VALUES ('Default Account', 'POLYMARKET_PRIVATE_KEY', 'POLYMARKET_FUNDER_ADDRESS', 1, TRUE, TRUE, 'Default trading account')
+		ON CONFLICT (private_key_env_var) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("insert default account: %w", err)
+	}
+
+	log.Println("[PostgresStore] Migrations completed successfully")
+	return nil
 }
 
 func getEnv(key, defaultValue string) string {
@@ -1374,23 +1477,38 @@ const (
 
 // UserCopySettings represents per-user copy trading settings
 type UserCopySettings struct {
-	UserAddress  string
-	Multiplier   float64
-	Enabled      bool
-	MinUSDC      float64
-	StrategyType int      // 1=human, 2=bot
-	MaxUSD       *float64 // nil means no cap, otherwise max USDC per trade
+	UserAddress      string
+	Multiplier       float64
+	Enabled          bool
+	MinUSDC          float64
+	StrategyType     int      // 1=human, 2=bot, 3=btc_15m
+	MaxUSD           *float64 // nil means no cap, otherwise max USDC per trade
+	TradingAccountID *int     // nil means use default account
+}
+
+// TradingAccount represents a Polymarket trading account configuration
+type TradingAccount struct {
+	ID                  int       `json:"id"`
+	Name                string    `json:"name"`
+	PrivateKeyEnvVar    string    `json:"private_key_env_var"`    // e.g., "POLYMARKET_PRIVATE_KEY_1"
+	FunderAddressEnvVar *string   `json:"funder_address_env_var"` // e.g., "POLYMARKET_FUNDER_ADDRESS_1"
+	SignatureType       int       `json:"signature_type"`         // 0=EOA, 1=Magic/Email
+	Enabled             bool      `json:"enabled"`
+	IsDefault           bool      `json:"is_default"`
+	Description         *string   `json:"description,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // GetUserCopySettings gets the copy trading settings for a specific user
 func (s *PostgresStore) GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error) {
 	var settings UserCopySettings
 	err := s.pool.QueryRow(ctx, `
-		SELECT user_address, multiplier, enabled, min_usdc, COALESCE(strategy_type, 1), max_usd
+		SELECT user_address, multiplier, enabled, min_usdc, COALESCE(strategy_type, 1), max_usd, trading_account_id
 		FROM user_copy_settings
 		WHERE user_address = $1
 	`, strings.ToLower(userAddress)).Scan(
-		&settings.UserAddress, &settings.Multiplier, &settings.Enabled, &settings.MinUSDC, &settings.StrategyType, &settings.MaxUSD,
+		&settings.UserAddress, &settings.Multiplier, &settings.Enabled, &settings.MinUSDC, &settings.StrategyType, &settings.MaxUSD, &settings.TradingAccountID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1409,16 +1527,17 @@ func (s *PostgresStore) SetUserCopySettings(ctx context.Context, settings UserCo
 		strategyType = StrategyHuman
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO user_copy_settings (user_address, multiplier, enabled, min_usdc, strategy_type, max_usd, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO user_copy_settings (user_address, multiplier, enabled, min_usdc, strategy_type, max_usd, trading_account_id, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
 		ON CONFLICT (user_address) DO UPDATE SET
 			multiplier = EXCLUDED.multiplier,
 			enabled = EXCLUDED.enabled,
 			min_usdc = EXCLUDED.min_usdc,
 			strategy_type = EXCLUDED.strategy_type,
 			max_usd = EXCLUDED.max_usd,
+			trading_account_id = EXCLUDED.trading_account_id,
 			updated_at = NOW()
-	`, strings.ToLower(settings.UserAddress), settings.Multiplier, settings.Enabled, settings.MinUSDC, strategyType, settings.MaxUSD)
+	`, strings.ToLower(settings.UserAddress), settings.Multiplier, settings.Enabled, settings.MinUSDC, strategyType, settings.MaxUSD, settings.TradingAccountID)
 	return err
 }
 
@@ -1444,6 +1563,197 @@ func (s *PostgresStore) GetFollowedUsersByStrategy(ctx context.Context, strategy
 		users = append(users, addr)
 	}
 	return users, rows.Err()
+}
+
+// ============================================================================
+// TRADING ACCOUNTS METHODS
+// ============================================================================
+
+// GetTradingAccounts returns all trading accounts
+func (s *PostgresStore) GetTradingAccounts(ctx context.Context) ([]TradingAccount, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, private_key_env_var, funder_address_env_var, signature_type,
+			   enabled, is_default, description, created_at, updated_at
+		FROM trading_accounts
+		ORDER BY is_default DESC, name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []TradingAccount
+	for rows.Next() {
+		var acc TradingAccount
+		if err := rows.Scan(
+			&acc.ID, &acc.Name, &acc.PrivateKeyEnvVar, &acc.FunderAddressEnvVar,
+			&acc.SignatureType, &acc.Enabled, &acc.IsDefault, &acc.Description,
+			&acc.CreatedAt, &acc.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, acc)
+	}
+	return accounts, rows.Err()
+}
+
+// GetTradingAccount returns a single trading account by ID
+func (s *PostgresStore) GetTradingAccount(ctx context.Context, id int) (*TradingAccount, error) {
+	var acc TradingAccount
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, name, private_key_env_var, funder_address_env_var, signature_type,
+			   enabled, is_default, description, created_at, updated_at
+		FROM trading_accounts
+		WHERE id = $1
+	`, id).Scan(
+		&acc.ID, &acc.Name, &acc.PrivateKeyEnvVar, &acc.FunderAddressEnvVar,
+		&acc.SignatureType, &acc.Enabled, &acc.IsDefault, &acc.Description,
+		&acc.CreatedAt, &acc.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &acc, nil
+}
+
+// GetDefaultTradingAccount returns the default trading account
+func (s *PostgresStore) GetDefaultTradingAccount(ctx context.Context) (*TradingAccount, error) {
+	var acc TradingAccount
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, name, private_key_env_var, funder_address_env_var, signature_type,
+			   enabled, is_default, description, created_at, updated_at
+		FROM trading_accounts
+		WHERE is_default = TRUE AND enabled = TRUE
+		LIMIT 1
+	`).Scan(
+		&acc.ID, &acc.Name, &acc.PrivateKeyEnvVar, &acc.FunderAddressEnvVar,
+		&acc.SignatureType, &acc.Enabled, &acc.IsDefault, &acc.Description,
+		&acc.CreatedAt, &acc.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &acc, nil
+}
+
+// CreateTradingAccount creates a new trading account
+func (s *PostgresStore) CreateTradingAccount(ctx context.Context, acc TradingAccount) (*TradingAccount, error) {
+	// If this is being set as default, unset any existing default
+	if acc.IsDefault {
+		_, err := s.pool.Exec(ctx, `UPDATE trading_accounts SET is_default = FALSE WHERE is_default = TRUE`)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unset existing default: %w", err)
+		}
+	}
+
+	var id int
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO trading_accounts (name, private_key_env_var, funder_address_env_var, signature_type, enabled, is_default, description)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id
+	`, acc.Name, acc.PrivateKeyEnvVar, acc.FunderAddressEnvVar, acc.SignatureType, acc.Enabled, acc.IsDefault, acc.Description).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.GetTradingAccount(ctx, id)
+}
+
+// UpdateTradingAccount updates an existing trading account
+func (s *PostgresStore) UpdateTradingAccount(ctx context.Context, acc TradingAccount) (*TradingAccount, error) {
+	// If this is being set as default, unset any existing default
+	if acc.IsDefault {
+		_, err := s.pool.Exec(ctx, `UPDATE trading_accounts SET is_default = FALSE WHERE is_default = TRUE AND id != $1`, acc.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unset existing default: %w", err)
+		}
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		UPDATE trading_accounts
+		SET name = $2, private_key_env_var = $3, funder_address_env_var = $4,
+			signature_type = $5, enabled = $6, is_default = $7, description = $8, updated_at = NOW()
+		WHERE id = $1
+	`, acc.ID, acc.Name, acc.PrivateKeyEnvVar, acc.FunderAddressEnvVar, acc.SignatureType, acc.Enabled, acc.IsDefault, acc.Description)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.GetTradingAccount(ctx, acc.ID)
+}
+
+// DeleteTradingAccount deletes a trading account
+func (s *PostgresStore) DeleteTradingAccount(ctx context.Context, id int) error {
+	// Check if it's the default account
+	var isDefault bool
+	err := s.pool.QueryRow(ctx, `SELECT is_default FROM trading_accounts WHERE id = $1`, id).Scan(&isDefault)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("account not found")
+		}
+		return err
+	}
+	if isDefault {
+		return fmt.Errorf("cannot delete default account")
+	}
+
+	// Set trading_account_id to NULL for any users using this account
+	_, err = s.pool.Exec(ctx, `UPDATE user_copy_settings SET trading_account_id = NULL WHERE trading_account_id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to update user settings: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx, `DELETE FROM trading_accounts WHERE id = $1`, id)
+	return err
+}
+
+// GetTradingAccountStats returns statistics for a trading account
+func (s *PostgresStore) GetTradingAccountStats(ctx context.Context, accountID int) (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	// Count followed users
+	var followedCount int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM user_copy_settings
+		WHERE trading_account_id = $1 AND enabled = TRUE
+	`, accountID).Scan(&followedCount)
+	if err != nil {
+		return nil, err
+	}
+	stats["followed_users"] = followedCount
+
+	// Count open positions
+	var positionCount int
+	var totalValue float64
+	err = s.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size * avg_price), 0)
+		FROM my_positions
+		WHERE trading_account_id = $1 AND size > 0
+	`, accountID).Scan(&positionCount, &totalValue)
+	if err != nil {
+		return nil, err
+	}
+	stats["open_positions"] = positionCount
+	stats["total_position_value"] = totalValue
+
+	// Count recent trades
+	var tradeCount int
+	err = s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM copy_trades
+		WHERE trading_account_id = $1 AND created_at > NOW() - INTERVAL '24 hours'
+	`, accountID).Scan(&tradeCount)
+	if err != nil {
+		return nil, err
+	}
+	stats["trades_24h"] = tradeCount
+
+	return stats, nil
 }
 
 // ============================================================================

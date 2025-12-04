@@ -18,11 +18,14 @@ import (
 type CopyTrader struct {
 	store      *storage.PostgresStore
 	client     *api.Client
-	clobClient *api.ClobClient
+	clobClient *api.ClobClient // Default client (backward compatibility)
 	config     CopyTraderConfig
 	running    bool
 	stopCh     chan struct{}
 	myAddress  string // Our wallet address for position lookups
+
+	// Multi-account support
+	accountManager *api.AccountManager
 
 	// Real-time detector for faster trade detection
 	detector *RealtimeDetector
@@ -114,7 +117,12 @@ func getMaxSlippage(traderPrice float64) float64 {
 
 // NewCopyTrader creates a new copy trader
 func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config CopyTraderConfig) (*CopyTrader, error) {
-	// Create CLOB client
+	return NewCopyTraderWithAccountManager(store, client, config, nil)
+}
+
+// NewCopyTraderWithAccountManager creates a new copy trader with multi-account support
+func NewCopyTraderWithAccountManager(store *storage.PostgresStore, client *api.Client, config CopyTraderConfig, accountManager *api.AccountManager) (*CopyTrader, error) {
+	// Create default CLOB client (for backward compatibility)
 	auth, err := api.NewAuth()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create auth: %w", err)
@@ -156,16 +164,42 @@ func NewCopyTrader(store *storage.PostgresStore, client *api.Client, config Copy
 	}
 
 	ct := &CopyTrader{
-		store:      store,
-		client:     client,
-		clobClient: clobClient,
-		config:     config,
-		stopCh:     make(chan struct{}),
-		myAddress:  myAddress,
-		metrics:    &CopyTraderMetrics{},
+		store:          store,
+		client:         client,
+		clobClient:     clobClient,
+		config:         config,
+		stopCh:         make(chan struct{}),
+		myAddress:      myAddress,
+		metrics:        &CopyTraderMetrics{},
+		accountManager: accountManager,
+	}
+
+	// Log multi-account status
+	if accountManager != nil {
+		log.Printf("[CopyTrader] Multi-account support enabled via AccountManager")
 	}
 
 	return ct, nil
+}
+
+// getClobClientForUser returns the appropriate ClobClient for a user based on their settings.
+// If AccountManager is available and user has a specific account assigned, uses that account.
+// Otherwise falls back to the default clobClient.
+func (ct *CopyTrader) getClobClientForUser(ctx context.Context, userAddress string) (*api.ClobClient, int, error) {
+	// If we don't have an account manager, use default client
+	if ct.accountManager == nil {
+		return ct.clobClient, 0, nil
+	}
+
+	// Get the client for this user
+	client, accountID, err := ct.accountManager.GetClientForUser(ctx, userAddress)
+	if err != nil {
+		// Fall back to default client on error
+		log.Printf("[CopyTrader] Warning: failed to get client for user %s: %v, using default", userAddress, err)
+		return ct.clobClient, 0, nil
+	}
+
+	return client, accountID, nil
 }
 
 // Start begins monitoring for trades to copy

@@ -103,6 +103,17 @@ func main() {
 		apiGroup.GET("/copy-trade-metrics", h.GetCopyTradeMetrics)
 	}
 
+	// Trading accounts routes
+	accountsGroup := r.Group("/api/trading-accounts")
+	{
+		accountsGroup.GET("", h.GetTradingAccounts)
+		accountsGroup.POST("", h.CreateTradingAccount)
+		accountsGroup.GET("/:id", h.GetTradingAccount)
+		accountsGroup.PUT("/:id", h.UpdateTradingAccount)
+		accountsGroup.DELETE("/:id", h.DeleteTradingAccount)
+		accountsGroup.GET("/:id/stats", h.GetTradingAccountStats)
+	}
+
 	// Internal API for worker communication (critical path - trade execution)
 	internalAPI := r.Group("/api/internal")
 	{

@@ -44,6 +44,15 @@ type DataStore interface {
 	GetUserCopySettings(ctx context.Context, userAddress string) (*UserCopySettings, error)
 	SetUserCopySettings(ctx context.Context, settings UserCopySettings) error
 
+	// Trading accounts
+	GetTradingAccounts(ctx context.Context) ([]TradingAccount, error)
+	GetTradingAccount(ctx context.Context, id int) (*TradingAccount, error)
+	GetDefaultTradingAccount(ctx context.Context) (*TradingAccount, error)
+	CreateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error)
+	UpdateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error)
+	DeleteTradingAccount(ctx context.Context, id int) error
+	GetTradingAccountStats(ctx context.Context, accountID int) (map[string]interface{}, error)
+
 	// Analytics
 	GetUserAnalyticsList(ctx context.Context, filter UserAnalyticsFilter) ([]UserAnalyticsRecord, int, error)
 

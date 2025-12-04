@@ -464,5 +464,34 @@ func (m *MockStore) UpdateMyPosition(ctx context.Context, pos interface{}) error
 	return nil
 }
 
+// Trading accounts - Mock implementations
+func (m *MockStore) GetTradingAccounts(ctx context.Context) ([]TradingAccount, error) {
+	return nil, nil
+}
+
+func (m *MockStore) GetTradingAccount(ctx context.Context, id int) (*TradingAccount, error) {
+	return nil, nil
+}
+
+func (m *MockStore) GetDefaultTradingAccount(ctx context.Context) (*TradingAccount, error) {
+	return nil, nil
+}
+
+func (m *MockStore) CreateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error) {
+	return nil, nil
+}
+
+func (m *MockStore) UpdateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error) {
+	return nil, nil
+}
+
+func (m *MockStore) DeleteTradingAccount(ctx context.Context, id int) error {
+	return nil
+}
+
+func (m *MockStore) GetTradingAccountStats(ctx context.Context, accountID int) (map[string]interface{}, error) {
+	return nil, nil
+}
+
 // Verify MockStore implements DataStore
 var _ DataStore = (*MockStore)(nil)

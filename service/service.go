@@ -1228,6 +1228,39 @@ func (s *Service) SetUserCopySettings(ctx context.Context, settings storage.User
 	return s.store.SetUserCopySettings(ctx, settings)
 }
 
+// ============================================================================
+// TRADING ACCOUNTS
+// ============================================================================
+
+// GetTradingAccounts returns all trading accounts
+func (s *Service) GetTradingAccounts(ctx context.Context) ([]storage.TradingAccount, error) {
+	return s.store.GetTradingAccounts(ctx)
+}
+
+// GetTradingAccount returns a single trading account by ID
+func (s *Service) GetTradingAccount(ctx context.Context, id int) (*storage.TradingAccount, error) {
+	return s.store.GetTradingAccount(ctx, id)
+}
+
+// CreateTradingAccount creates a new trading account
+func (s *Service) CreateTradingAccount(ctx context.Context, account storage.TradingAccount) (*storage.TradingAccount, error) {
+	return s.store.CreateTradingAccount(ctx, account)
+}
+
+// UpdateTradingAccount updates an existing trading account
+func (s *Service) UpdateTradingAccount(ctx context.Context, account storage.TradingAccount) (*storage.TradingAccount, error) {
+	return s.store.UpdateTradingAccount(ctx, account)
+}
+
+// DeleteTradingAccount deletes a trading account
+func (s *Service) DeleteTradingAccount(ctx context.Context, id int) error {
+	return s.store.DeleteTradingAccount(ctx, id)
+}
+
+// GetTradingAccountStats returns statistics for a trading account
+func (s *Service) GetTradingAccountStats(ctx context.Context, id int) (map[string]interface{}, error) {
+	return s.store.GetTradingAccountStats(ctx, id)
+}
 
 // GetUserAnalyticsList returns filtered and sorted user analytics
 func (s *Service) GetUserAnalyticsList(ctx context.Context, filter storage.UserAnalyticsFilter) ([]storage.UserAnalyticsRecord, int, error) {

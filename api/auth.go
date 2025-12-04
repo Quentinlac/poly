@@ -22,11 +22,25 @@ type Auth struct {
 	address    common.Address
 }
 
-// NewAuth creates a new auth instance from private key
+// NewAuth creates a new auth instance from the default POLYMARKET_PRIVATE_KEY env var
 func NewAuth() (*Auth, error) {
-	privateKeyStr := strings.TrimSpace(os.Getenv("POLYMARKET_PRIVATE_KEY"))
+	return NewAuthFromEnvVar("POLYMARKET_PRIVATE_KEY")
+}
+
+// NewAuthFromEnvVar creates a new auth instance from a specific environment variable
+func NewAuthFromEnvVar(envVarName string) (*Auth, error) {
+	privateKeyStr := strings.TrimSpace(os.Getenv(envVarName))
 	if privateKeyStr == "" {
-		return nil, fmt.Errorf("POLYMARKET_PRIVATE_KEY environment variable not set")
+		return nil, fmt.Errorf("%s environment variable not set", envVarName)
+	}
+	return NewAuthFromKey(privateKeyStr)
+}
+
+// NewAuthFromKey creates a new auth instance from a private key string
+func NewAuthFromKey(privateKeyStr string) (*Auth, error) {
+	privateKeyStr = strings.TrimSpace(privateKeyStr)
+	if privateKeyStr == "" {
+		return nil, fmt.Errorf("private key is empty")
 	}
 
 	// Remove 0x prefix if present

@@ -998,3 +998,32 @@ func (s *Store) InvalidateUserListCache(ctx context.Context) error {
 func (s *Store) GetRedisValue(ctx context.Context, key string) (string, error) {
 	return "", fmt.Errorf("redis not available in SQLite store")
 }
+
+// Trading accounts - Not supported in SQLite store (use PostgresStore)
+func (s *Store) GetTradingAccounts(ctx context.Context) ([]TradingAccount, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) GetTradingAccount(ctx context.Context, id int) (*TradingAccount, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) GetDefaultTradingAccount(ctx context.Context) (*TradingAccount, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) CreateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) UpdateTradingAccount(ctx context.Context, account TradingAccount) (*TradingAccount, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) DeleteTradingAccount(ctx context.Context, id int) error {
+	return fmt.Errorf("trading accounts not supported in SQLite store")
+}
+
+func (s *Store) GetTradingAccountStats(ctx context.Context, accountID int) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("trading accounts not supported in SQLite store")
+}
