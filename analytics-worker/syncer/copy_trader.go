@@ -1303,8 +1303,8 @@ func (ct *CopyTrader) executeBotBuyWithBook(ctx context.Context, trade models.Tr
 		}
 	}
 
-	// Ensure we meet minimum 5 shares
-	const minShares = 5.0
+	// Ensure we meet minimum shares (retry logic in PlaceOrderFast handles actual minimum)
+	const minShares = 0.1
 	if totalSize < minShares {
 		log.Printf("[CopyTrader-Bot] BUY: size %.4f below minimum, bumping to %.0f shares", totalSize, minShares)
 		originalSize := totalSize
@@ -1506,8 +1506,8 @@ func (ct *CopyTrader) executeBotBuyImmediate(ctx context.Context, trade models.T
 		}
 	}
 
-	// Ensure minimum 5 shares
-	const minShares = 5.0
+	// Ensure minimum shares (retry logic in PlaceOrderFast handles actual minimum)
+	const minShares = 0.1
 	if totalSize < minShares {
 		log.Printf("[%s] [%s] ⚠️ size %.4f < min %.0f, bumping", txRef, elapsed(), totalSize, minShares)
 		originalSize := totalSize
@@ -1987,8 +1987,8 @@ func (ct *CopyTrader) executeBotSellImmediate(ctx context.Context, trade models.
 		log.Printf("[%s] [%s] 📉 selling entire position (target > position)", txRef, elapsed())
 	}
 
-	// Ensure minimum 5 shares for SELL
-	const minShares = 5.0
+	// Ensure minimum shares for SELL (retry logic in PlaceOrderFast handles actual minimum)
+	const minShares = 0.1
 	if sellSize < minShares {
 		if ourPosition >= minShares {
 			log.Printf("[%s] [%s] 📈 size %.4f below min, bumping to %.0f", txRef, elapsed(), sellSize, minShares)
@@ -2451,8 +2451,8 @@ func (ct *CopyTrader) executeBotSellWithBook(ctx context.Context, trade models.T
 		log.Printf("[%s] [%s] 📉 selling entire position (target > position)", txRef, elapsed())
 	}
 
-	// Ensure minimum 5 shares for SELL
-	const minSellShares = 5.0
+	// Ensure minimum shares for SELL (retry logic in PlaceOrderFast handles actual minimum)
+	const minSellShares = 0.1
 	if sellSize < minSellShares {
 		if ourPosition >= minSellShares {
 			// We have enough - bump up to minimum

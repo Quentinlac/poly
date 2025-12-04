@@ -1011,29 +1011,66 @@ func (c *ClobClient) PlaceOrderFast(ctx context.Context, tokenID string, side Si
 		log.Printf("[PlaceOrderFast] DeriveAPICreds: %dms", time.Since(credsStart).Milliseconds())
 	}
 
-	// Use GTC directly - more reliable than FOK
-	// FOK has stricter validation (5 share minimum on some markets) and same speed
-	// GTC will still match immediately if there's liquidity at our price
-	signStart := time.Now()
-	order, err := c.createSignedOrder(tokenID, side, size, price, negRisk)
-	signMs := time.Since(signStart).Milliseconds()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create order: %w", err)
+	// Retry sizes if we get minimum order error
+	// Start with requested size, then try increasing sizes up to 4 retries
+	retrySizes := []float64{size, 1.0, 2.0, 5.0, 10.0}
+	var lastErr error
+	var lastResp *OrderResponse
+
+	for attempt, trySize := range retrySizes {
+		if attempt > 0 {
+			// Only use larger sizes on retry
+			if trySize <= size {
+				continue
+			}
+			log.Printf("[PlaceOrderFast] RETRY #%d with size %.4f (was %.4f)", attempt, trySize, size)
+		}
+
+		signStart := time.Now()
+		order, err := c.createSignedOrder(tokenID, side, trySize, price, negRisk)
+		signMs := time.Since(signStart).Milliseconds()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create order: %w", err)
+		}
+
+		postStart := time.Now()
+		resp, err := c.postOrder(ctx, order, OrderTypeGTC)
+		postMs := time.Since(postStart).Milliseconds()
+
+		// Log order details and timing
+		status := "ERROR"
+		errMsg := ""
+		if resp != nil {
+			status = resp.Status
+			errMsg = resp.ErrorMsg
+		}
+		if err != nil {
+			errMsg = err.Error()
+		}
+		log.Printf("[PlaceOrderFast] %s %.4f @ $%.4f | sign=%dms post=%dms total=%dms | status=%s",
+			side, trySize, price, signMs, postMs, time.Since(totalStart).Milliseconds(), status)
+
+		// Check if it's a minimum order error - if so, retry with larger size
+		if err != nil || (resp != nil && !resp.Success) {
+			errorStr := errMsg
+			if strings.Contains(strings.ToLower(errorStr), "minimum") ||
+				strings.Contains(strings.ToLower(errorStr), "min order") ||
+				strings.Contains(strings.ToLower(errorStr), "too small") ||
+				strings.Contains(strings.ToLower(errorStr), "size must be") {
+				log.Printf("[PlaceOrderFast] ⚠️ minimum order error: %s", errorStr)
+				lastErr = err
+				lastResp = resp
+				continue // Try next size
+			}
+		}
+
+		// Not a minimum error, return result
+		return resp, err
 	}
 
-	postStart := time.Now()
-	resp, err := c.postOrder(ctx, order, OrderTypeGTC)
-	postMs := time.Since(postStart).Milliseconds()
-
-	// Log order details and timing
-	status := "ERROR"
-	if resp != nil {
-		status = resp.Status
-	}
-	log.Printf("[PlaceOrderFast] %s %.4f @ $%.4f | sign=%dms post=%dms total=%dms | status=%s",
-		side, size, price, signMs, postMs, time.Since(totalStart).Milliseconds(), status)
-
-	return resp, err
+	// All retries failed
+	log.Printf("[PlaceOrderFast] ❌ all retry sizes failed")
+	return lastResp, lastErr
 }
 
 // PlaceOrderFAK places a Fill-And-Kill order - BEST FOR COPY TRADING
