@@ -5,6 +5,42 @@ import (
 	"sync"
 )
 
+// ClobClientInterface defines the methods needed from a CLOB client.
+// This interface enables dependency injection for testing.
+type ClobClientInterface interface {
+	// Configuration
+	SetFunder(address string)
+	SetSignatureType(sigType int)
+	DeriveAPICreds(ctx context.Context) (*APICreds, error)
+
+	// Order Book
+	GetOrderBook(ctx context.Context, tokenID string) (*OrderBook, error)
+	GetCachedOrderBook(ctx context.Context, tokenID string) (*OrderBook, error)
+	AddTokenToCache(tokenID string)
+	RemoveTokenFromCache(tokenID string)
+	StartOrderBookCaching()
+	StopOrderBookCaching()
+
+	// Market Info
+	GetMarket(ctx context.Context, conditionID string) (*MarketInfo, error)
+	GetTokenInfoByID(ctx context.Context, tokenID string) (*GammaTokenInfo, error)
+
+	// Order Placement
+	PlaceMarketOrder(ctx context.Context, tokenID string, side Side, amountUSDC float64, negRisk bool) (*OrderResponse, error)
+	PlaceLimitOrder(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error)
+
+	// Order Management
+	GetOrderStatus(ctx context.Context, orderID string) (*OrderStatus, error)
+	CancelOrder(ctx context.Context, orderID string) error
+	CancelOrders(ctx context.Context, orderIDs []string) error
+}
+
+// Ensure ClobClient implements ClobClientInterface
+var _ ClobClientInterface = (*ClobClient)(nil)
+
+// Ensure MockClobClient implements ClobClientInterface
+var _ ClobClientInterface = (*MockClobClient)(nil)
+
 // MockHTTPClient is a mock HTTP client for testing
 type MockHTTPClient struct {
 	mu sync.RWMutex
@@ -58,13 +94,42 @@ type MockClobClient struct {
 
 	// Error injection
 	ErrorOnNext map[string]error
+
+	// Detailed call tracking for verification
+	PlaceMarketOrderCalls []PlaceMarketOrderCall
+	PlaceLimitOrderCalls  []PlaceLimitOrderCall
+	CancelOrderCalls      []string
+
+	// Token cache tracking
+	CachedTokens map[string]bool
+}
+
+// PlaceMarketOrderCall records a call to PlaceMarketOrder
+type PlaceMarketOrderCall struct {
+	TokenID    string
+	Side       Side
+	AmountUSDC float64
+	NegRisk    bool
+}
+
+// PlaceLimitOrderCall records a call to PlaceLimitOrder
+type PlaceLimitOrderCall struct {
+	TokenID string
+	Side    Side
+	Size    float64
+	Price   float64
+	NegRisk bool
 }
 
 // NewMockClobClient creates a new mock CLOB client
 func NewMockClobClient() *MockClobClient {
 	return &MockClobClient{
-		Calls:       make(map[string]int),
-		ErrorOnNext: make(map[string]error),
+		Calls:                 make(map[string]int),
+		ErrorOnNext:           make(map[string]error),
+		PlaceMarketOrderCalls: []PlaceMarketOrderCall{},
+		PlaceLimitOrderCalls:  []PlaceLimitOrderCall{},
+		CancelOrderCalls:      []string{},
+		CachedTokens:          make(map[string]bool),
 		APICreds: &APICreds{
 			APIKey:        "test-api-key",
 			APISecret:     "test-api-secret",
@@ -175,6 +240,120 @@ func (m *MockClobClient) SetFunder(address string) {
 
 func (m *MockClobClient) SetSignatureType(sigType int) {
 	m.trackCall("SetSignatureType")
+}
+
+// PlaceMarketOrder mocks placing a market order
+func (m *MockClobClient) PlaceMarketOrder(ctx context.Context, tokenID string, side Side, amountUSDC float64, negRisk bool) (*OrderResponse, error) {
+	if err := m.trackCall("PlaceMarketOrder"); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.PlaceMarketOrderCalls = append(m.PlaceMarketOrderCalls, PlaceMarketOrderCall{
+		TokenID:    tokenID,
+		Side:       side,
+		AmountUSDC: amountUSDC,
+		NegRisk:    negRisk,
+	})
+	m.mu.Unlock()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.OrderResponse != nil {
+		return m.OrderResponse, nil
+	}
+	return &OrderResponse{
+		Success: true,
+		OrderID: "mock-order-id",
+		Status:  "matched",
+	}, nil
+}
+
+// PlaceLimitOrder mocks placing a limit order
+func (m *MockClobClient) PlaceLimitOrder(ctx context.Context, tokenID string, side Side, size float64, price float64, negRisk bool) (*OrderResponse, error) {
+	if err := m.trackCall("PlaceLimitOrder"); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.PlaceLimitOrderCalls = append(m.PlaceLimitOrderCalls, PlaceLimitOrderCall{
+		TokenID: tokenID,
+		Side:    side,
+		Size:    size,
+		Price:   price,
+		NegRisk: negRisk,
+	})
+	m.mu.Unlock()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.OrderResponse != nil {
+		return m.OrderResponse, nil
+	}
+	return &OrderResponse{
+		Success: true,
+		OrderID: "mock-limit-order-id",
+		Status:  "live",
+	}, nil
+}
+
+// CancelOrder mocks canceling an order
+func (m *MockClobClient) CancelOrder(ctx context.Context, orderID string) error {
+	if err := m.trackCall("CancelOrder"); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.CancelOrderCalls = append(m.CancelOrderCalls, orderID)
+	m.mu.Unlock()
+	return nil
+}
+
+// AddTokenToCache mocks adding a token to cache
+func (m *MockClobClient) AddTokenToCache(tokenID string) {
+	m.trackCall("AddTokenToCache")
+	m.mu.Lock()
+	m.CachedTokens[tokenID] = true
+	m.mu.Unlock()
+}
+
+// RemoveTokenFromCache mocks removing a token from cache
+func (m *MockClobClient) RemoveTokenFromCache(tokenID string) {
+	m.trackCall("RemoveTokenFromCache")
+	m.mu.Lock()
+	delete(m.CachedTokens, tokenID)
+	m.mu.Unlock()
+}
+
+// GetCachedOrderBook mocks getting a cached order book
+func (m *MockClobClient) GetCachedOrderBook(ctx context.Context, tokenID string) (*OrderBook, error) {
+	if err := m.trackCall("GetCachedOrderBook"); err != nil {
+		return nil, err
+	}
+	// Falls back to regular GetOrderBook
+	return m.GetOrderBook(ctx, tokenID)
+}
+
+// GetOrderStatus mocks getting order status
+func (m *MockClobClient) GetOrderStatus(ctx context.Context, orderID string) (*OrderStatus, error) {
+	if err := m.trackCall("GetOrderStatus"); err != nil {
+		return nil, err
+	}
+	// Return a default "MATCHED" status
+	return &OrderStatus{
+		OrderID:      orderID,
+		Status:       "MATCHED",
+		SizeMatched:  "100",
+		OriginalSize: "100",
+	}, nil
+}
+
+// CancelOrders mocks canceling multiple orders
+func (m *MockClobClient) CancelOrders(ctx context.Context, orderIDs []string) error {
+	if err := m.trackCall("CancelOrders"); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.CancelOrderCalls = append(m.CancelOrderCalls, orderIDs...)
+	m.mu.Unlock()
+	return nil
 }
 
 // MockWSClient is a mock WebSocket client for testing

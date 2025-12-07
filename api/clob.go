@@ -1057,6 +1057,86 @@ func min(a, b int) int {
 	return b
 }
 
+// OrderStatus represents the status of an order
+type OrderStatus struct {
+	OrderID       string  `json:"id"`
+	Status        string  `json:"status"` // LIVE, MATCHED, CANCELLED
+	SizeMatched   string  `json:"size_matched"`
+	OriginalSize  string  `json:"original_size"`
+	Price         string  `json:"price"`
+	Side          string  `json:"side"`
+	TokenID       string  `json:"asset_id"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+// GetOrderStatus fetches the status of an order by ID
+func (c *ClobClient) GetOrderStatus(ctx context.Context, orderID string) (*OrderStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/order/"+orderID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	req.Header.Set("Accept", "application/json")
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get order status failed: %d %s", resp.StatusCode, string(body))
+	}
+
+	var status OrderStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		return nil, fmt.Errorf("failed to decode order status: %w", err)
+	}
+
+	return &status, nil
+}
+
+// CancelOrder cancels an open order by ID
+func (c *ClobClient) CancelOrder(ctx context.Context, orderID string) error {
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.baseURL+"/order/"+orderID, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	req.Header.Set("Accept", "application/json")
+	c.addL2Headers(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("cancel order failed: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// CancelOrders cancels multiple orders by IDs
+func (c *ClobClient) CancelOrders(ctx context.Context, orderIDs []string) error {
+	for _, id := range orderIDs {
+		if err := c.CancelOrder(ctx, id); err != nil {
+			log.Printf("[ClobClient] Warning: failed to cancel order %s: %v", id, err)
+			// Continue with other cancellations
+		}
+	}
+	return nil
+}
+
 func (c *ClobClient) hmacSign(message string, secret string) string {
 	// Decode URL-safe base64 secret
 	key, err := base64.URLEncoding.DecodeString(secret)
